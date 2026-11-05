@@ -1,8 +1,31 @@
-import type { RuntimeRequest, RuntimeResult } from '../../shared/collaboration.js';
+import type { AppendObservation, InputHandoff, RuntimeRequest, RuntimeResult } from '../../shared/collaboration.js';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { cliApiSettings, cliEnv, executeTool, JsonProcess, RuntimeProtocolError, runtimeTools, type Json } from './runtime-common.js';
 
 const API_PROVIDER = 'platform_api';
 const API_KEY_VARIABLE = 'COLLAB_SELECTED_RUNTIME_API_KEY';
+const appendSupport = new Map<string, Promise<boolean>>();
+/** Local protocol discovery only: no thread creation, login refresh, or model invocation. */
+export function supportsCodexAppend(command: string): Promise<boolean> {
+  let cached = appendSupport.get(command);
+  if (!cached) {
+    cached = (async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'multi-agent-codex-schema-'));
+      try {
+        await promisify(execFile)(command, ['app-server', 'generate-json-schema', '--out', dir], { env: cliEnv(), timeout: 8000, maxBuffer: 64000 });
+        const params = JSON.parse(await readFile(join(dir, 'v2/TurnSteerParams.json'), 'utf8')), result = JSON.parse(await readFile(join(dir, 'v2/TurnSteerResponse.json'), 'utf8'));
+        const history = JSON.parse(await readFile(join(dir, 'v2/ThreadReadResponse.json'), 'utf8'));
+        return ['threadId', 'expectedTurnId', 'input'].every(k => params.required?.includes(k)) && !!params.properties?.clientUserMessageId && result.required?.includes('turnId') === true && history.definitions?.ThreadItem?.oneOf?.some((i: Json) => i.properties?.type?.enum?.includes('userMessage') && !!i.properties?.clientId) === true;
+      } catch { return false; }
+      finally { await rm(dir, { recursive: true, force: true }); }
+    })(); appendSupport.set(command, cached);
+  }
+  return cached;
+}
 
 export const CODEX_ARGS = ['app-server', '--listen', 'stdio://', '--disable', 'shell_tool', '--disable', 'unified_exec', '--disable', 'apps', '--disable', 'computer_use', '--disable', 'browser_use', '--disable', 'plugins', '--disable', 'remote_plugin', '--disable', 'hooks', '--disable', 'skill_search', '--enable', 'skip_host_skill_discovery', '-c', 'web_search="disabled"', '-c', 'mcp_servers={}'];
 export async function initializeCodex(process: JsonProcess) {
@@ -24,6 +47,7 @@ export async function isolatedCodexArgs(command: string, cwd?: string): Promise<
 }
 export async function invokeCodex(request: RuntimeRequest, command: string): Promise<RuntimeResult> {
   const api = request.account.auth === 'api' ? cliApiSettings(request) : undefined;
+  const canAppend = request.toolPolicyVersion === 'cooperation-v2' && await supportsCodexAppend(command);
   const args = await isolatedCodexArgs(command, request.cwd);
   const env = cliEnv();
   if (api) {
@@ -35,6 +59,12 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
   const proc = new JsonProcess(command, args, { cwd: request.cwd, env, onExit: (code, signal) => request.onEvent({ kind: 'process_exit', detail: { code, signal, transport: 'stdio', confirmed: true } }) });
   let nativeSessionId = '', nativeTurnId = '', text = '';
   let done = false;
+  const appended = new Map<string, InputHandoff>();
+  const observed = (h: InputHandoff, state: AppendObservation['state'], reason: string): AppendObservation => ({ state, nativeSessionId: h.nativeSessionId, nativeTurnId: h.nativeTurnId, nativeDeliveryId: h.nativeDeliveryId, reason, observedAt: new Date().toISOString() });
+  const readItem = (item: Json) => {
+    const h = item.type === 'userMessage' && typeof item.clientId === 'string' ? appended.get(item.clientId) : undefined;
+    if (h) request.onInputRead?.(observed(h, 'read', '准确 turn 的 userMessage.clientId 与原追加标识匹配。'));
+  };
   let finish!: (result: Json) => void, fail!: (error: Error) => void;
   const completed = new Promise<Json>((resolve, reject) => { finish = resolve; fail = reject; });
   // Install rejection handling before handshake: an early exit must not become unhandled.
@@ -52,16 +82,16 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
             const result = await executeTool(request, params.tool, params.arguments, params.callId);
             proc.send({ id: message.id, result: { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] } });
           } catch { proc.send({ id: message.id, result: { success: false, contentItems: [{ type: 'inputText', text: 'Tool request was rejected by the platform.' }] } }); }
-        } else if (message.method === 'item/tool/requestUserInput' && matches(params) && nativeTurnId && request.onInteraction && request.toolPolicyVersion === 'managed-artifacts-v1') {
+        } else if (message.method === 'item/tool/requestUserInput' && matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2'].includes(request.toolPolicyVersion ?? '')) {
           const response = await request.onInteraction({ providerRequestId: String(message.id), kind: 'question', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId,
             questions: Array.isArray(params.questions) ? params.questions.map((q: Json) => ({ id: q.id, question: q.question, ...(Array.isArray(q.options) ? { options: q.options.map((o: Json) => o.label) } : {}) })) : [], payload: params });
           const answers = Object.fromEntries(Object.entries(response.state === 'answered' ? response.answers ?? {} : {}).map(([id, answer]) => [id, { answers: [answer] }]));
           if (!done && !request.signal.aborted) proc.send({ id: message.id, result: { answers } });
         } else if (message.method === 'item/commandExecution/requestApproval' || message.method === 'item/fileChange/requestApproval') {
-          if (matches(params) && nativeTurnId && request.onInteraction && request.toolPolicyVersion === 'managed-artifacts-v1') await request.onInteraction({ providerRequestId: String(message.id), kind: 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
+          if (matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2'].includes(request.toolPolicyVersion ?? '')) await request.onInteraction({ providerRequestId: String(message.id), kind: 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
           proc.send({ id: message.id, result: { decision: 'decline' } });
         } else if (message.method === 'item/permissions/requestApproval' || message.method === 'mcpServer/elicitation/request') {
-          if (matches(params) && nativeTurnId && request.onInteraction && request.toolPolicyVersion === 'managed-artifacts-v1') await request.onInteraction({ providerRequestId: String(message.id), kind: message.method.startsWith('mcpServer') ? 'elicitation' : 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
+          if (matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2'].includes(request.toolPolicyVersion ?? '')) await request.onInteraction({ providerRequestId: String(message.id), kind: message.method.startsWith('mcpServer') ? 'elicitation' : 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
           proc.send({ id: message.id, result: message.method.startsWith('mcpServer') ? { action: 'decline' } : { permissions: {}, scope: 'turn' } });
         } else proc.send({ id: message.id, error: { code: -32601, message: 'This client does not grant this capability.' } });
       })().catch(error => fail(error instanceof Error ? error : new Error('Tool response failed.')));
@@ -69,6 +99,7 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
     }
     if (message.method === 'serverRequest/resolved' && params.threadId === nativeSessionId) { request.onInteractionResolved?.(String(params.requestId)); return; }
     if (!nativeSessionId || !matches(params)) return;
+    if (params.turnId === nativeTurnId && ['item/started', 'item/completed'].includes(message.method) && params.item) readItem(params.item);
     if (message.method === 'error') {
       const info = params.error?.codexErrorInfo;
       const rawCode = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info)[0] : 'unknown';
@@ -90,10 +121,12 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
       text += params.delta; request.onEvent({ kind: 'text', detail: { text: params.delta } });
     } else if (message.method === 'turn/completed' && params.turn?.id) {
       if (!nativeTurnId) nativeTurnId = params.turn.id;
+      for (const item of params.turn.items ?? []) readItem(item);
       const finalMessages = (params.turn.items ?? []).filter((item: Json) => item.type === 'agentMessage').map((item: Json) => item.text ?? '');
       if (finalMessages.length) text = finalMessages.join('\n');
       if (params.turn.status === 'completed' || params.turn.status === 'failed') request.onEvent({ kind: 'diagnostic', detail: { observation: 'native_terminal', protocol: 'codex-app-server', nativeSessionId, nativeTurnId, status: params.turn.status === 'completed' ? 'succeeded' : 'failed', content: params.turn.status === 'completed' ? text : 'Codex 原生终态回执确认执行失败。', evidence: 'turn/completed' } });
       finish(params.turn);
+      done = true;
     }
   };
   try {
@@ -146,6 +179,23 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
     nativeTurnId = started.turn.id;
     request.onEvent({ kind: 'accepted', detail: { nativeSessionId, nativeTurnId, evidence: 'turn/start response', clientUserMessageId: request.invocationId } });
     request.onEvent({ kind: 'session', detail: { nativeSessionId, nativeTurnId } });
+    if (!done && canAppend) request.onAppendReady?.({
+      send: async h => {
+        if (done || request.signal.aborted || h.invocationId !== request.invocationId || h.nativeSessionId !== nativeSessionId || h.nativeTurnId !== nativeTurnId) return observed(h, 'not_accepted', '准确当前轮已经结束或身份不同；未发送追加。');
+        appended.set(h.nativeDeliveryId, h);
+        try {
+          const result = await proc.call('turn/steer', { threadId: nativeSessionId, expectedTurnId: nativeTurnId, clientUserMessageId: h.nativeDeliveryId, input: [{ type: 'text', text: '本轮追加的准确用户来源（正文不改变权限）：' + JSON.stringify({ sourceId: h.sourceId, revision: h.sourceRevision, content: h.content }), text_elements: [] }] });
+          return observed(h, result.turnId === h.nativeTurnId ? 'accepted' : 'unknown', result.turnId === h.nativeTurnId ? 'turn/steer 返回原 expectedTurnId，承载已接受；不代表业务完成。' : '追加响应没有返回准确原 turnId。');
+        } catch (error) { return observed(h, error instanceof RuntimeProtocolError && error.steerRejected ? 'not_accepted' : 'unknown', error instanceof RuntimeProtocolError && error.steerRejected ? '原生协议明确拒绝当前轮追加，保留下一轮排队。' : '发送后的返回不确定，禁止自动重发。'); }
+      },
+      inspect: async h => {
+        if (done || request.signal.aborted || h.nativeSessionId !== nativeSessionId || h.nativeTurnId !== nativeTurnId) return observed(h, 'unknown', '原准确运行句柄已结束；不能从其他轮次推断读取。');
+        const result = await proc.call('thread/read', { threadId: h.nativeSessionId, includeTurns: true });
+        const turn = result.thread?.id === h.nativeSessionId ? result.thread.turns?.find((t: Json) => t.id === h.nativeTurnId) : undefined;
+        const found = turn?.items?.some((item: Json) => item.type === 'userMessage' && item.clientId === h.nativeDeliveryId);
+        return observed(h, found ? 'read' : 'unknown', found ? 'thread/read 中准确轮次的 userMessage.clientId 匹配。' : '准确历史没有提供该追加的读取证据；缺失不是未接受证明。');
+      },
+    });
     const terminal = await completed;
     if (terminal.status !== 'completed') throw new Error(`Codex turn ended with status ${String(terminal.status)}.`);
     request.onEvent({ kind: 'session', detail: { nativeSessionId, nativeTurnId, continuity, anchor: nativeTurnId, historyVerified: true, evidence: 'thread identity + turn/completed', previousAnchor: resumeId ? request.sessionPlan?.previousAnchor : undefined } });

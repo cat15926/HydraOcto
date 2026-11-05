@@ -28,7 +28,7 @@ export class ArtifactService {
     const origin: ArtifactOrigin = { actor };
     if (actor.kind === 'agent') {
       const i = this.port.invocation(actor.invocationId), contract = this.port.contract(i.id);
-      if (i.conversationId !== conversationId || contract.toolPolicyVersion !== 'managed-artifacts-v1' || i.acceptance !== 'accepted') fail('此准确执行没有产物权限或接受证据。');
+      if (i.conversationId !== conversationId || !['managed-artifacts-v1', 'cooperation-v2'].includes(contract.toolPolicyVersion) || i.acceptance !== 'accepted') fail('此准确执行没有产物权限或接受证据。');
       const r = this.get<CollaborationResponse>('cc_responses', i.responseId);
       origin.responseId = r.id; origin.inputRevision = r.inputRevision; origin.sourceDigest = contract.sourceDigest;
     }
@@ -45,7 +45,7 @@ export class ArtifactService {
     if (a.kind === 'agent') {
       const i = this.port.invocation(a.invocationId), s = this.get<SourceWork>('cc_sources', a.sourceId), r = this.get<CollaborationResponse>('cc_responses', i.responseId);
       try { this.target(conversationId, a.memberId); } catch { return '原成员已停用或离开会话。'; }
-      if (i.conversationId !== conversationId || i.memberId !== a.memberId || i.responseId !== origin.responseId || r.inputRevision !== origin.inputRevision || r.inputSourceIds.length !== 1 || r.inputSourceIds[0] !== s.id || s.revision !== a.sourceRevision || digest(s.content) !== origin.sourceDigest || (i.cancelRevision ?? 0) !== a.cancelRevision || i.acceptance !== 'accepted' || !(i.status === 'running' || (i.status === 'succeeded' && i.teardown === 'confirmed'))) return '原执行、来源、输入或取消代次已失效，或执行结果/退出未确认。';
+      if (i.conversationId !== conversationId || i.memberId !== a.memberId || i.responseId !== origin.responseId || r.inputRevision !== origin.inputRevision || !r.inputSourceIds.includes(s.id) || s.revision !== a.sourceRevision || digest(s.content) !== origin.sourceDigest || (i.cancelRevision ?? 0) !== a.cancelRevision || i.acceptance !== 'accepted' || !(i.status === 'running' || (i.status === 'succeeded' && i.teardown === 'confirmed'))) return '原执行、来源、输入或取消代次已失效，或执行结果/退出未确认。';
     }
     if (origin.task) {
       const t = this.port.tasks.getTask(origin.task.id), ref = t.executionRef ?? t.lastExecutionRef;
@@ -181,7 +181,7 @@ export class ArtifactService {
     if (r.state === 'pending' && Date.parse(r.expiresAt) <= Date.now()) return '评审已到期。';
     if (r.state === 'submitted' && r.invocationId) {
       const i = this.port.invocation(r.invocationId), s = this.get<SourceWork>('cc_sources', r.sourceId), c = this.port.contract(i.id), response = this.get<CollaborationResponse>('cc_responses', i.responseId);
-      if ((i.cancelRevision ?? 0) !== r.submission?.cancelRevision || i.responseId !== r.submission?.responseId || response.inputRevision !== r.submission?.inputRevision || response.inputSourceIds.length !== 1 || response.inputSourceIds[0] !== s.id || i.memberId !== r.reviewerMemberId || s.revision !== r.sourceRevision || digest(s.content) !== c.sourceDigest || !(i.status === 'running' || (i.status === 'succeeded' && i.teardown === 'confirmed'))) return '提交评审的准确执行已失效或结果/退出未确认。';
+      if ((i.cancelRevision ?? 0) !== r.submission?.cancelRevision || i.responseId !== r.submission?.responseId || response.inputRevision !== r.submission?.inputRevision || !response.inputSourceIds.includes(s.id) || i.memberId !== r.reviewerMemberId || s.revision !== r.sourceRevision || digest(s.content) !== c.sourceDigest || !(i.status === 'running' || (i.status === 'succeeded' && i.teardown === 'confirmed'))) return '提交评审的准确执行已失效或结果/退出未确认。';
     }
     if (r.headCommit && this.gitHead() !== r.headCommit) return '代码 HEAD 或工作区内容已变化。';
     try { this.target(r.conversationId, r.reviewerMemberId); this.content(v.id); } catch { return '评审目标或准确材料不可用。'; }

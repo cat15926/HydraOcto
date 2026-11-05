@@ -75,11 +75,11 @@ export function collaborationHttp(deps: HttpDependencies) {
     close() { for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
     async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
       const path = decodeURIComponent(url.pathname);
-      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$))/.test(path)) return false;
+      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$)|sources(?:\/|$)|mention-groups(?:\/|$)|input-handoffs(?:\/|$))/.test(path)) return false;
       const { store, engine, json } = deps;
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.6.0-n5', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), accounts: store.accounts().map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.7.0-n6', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), accounts: store.accounts().map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
@@ -119,6 +119,24 @@ export function collaborationHttp(deps: HttpDependencies) {
       }
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const body = object(await deps.readJson(request));
+        const queueCommand = /^\/api\/conversations\/([^/]+)\/(queue-order|cancel-all|mention-groups)$/.exec(path);
+        const sourceCommand = /^\/api\/sources\/([^/]+)\/(withdraw|priority)$/.exec(path);
+        const groupCancel = /^\/api\/mention-groups\/([^/]+)\/cancel$/.exec(path);
+        const appendInspect = /^\/api\/input-handoffs\/([^/]+)\/inspect$/.exec(path);
+        if (queueCommand || sourceCommand || groupCancel || appendInspect) {
+          const action = queueCommand?.[2] ?? sourceCommand?.[2] ?? (groupCancel ? 'group-cancel' : 'append-inspect');
+          const keys: Record<string, string[]> = { 'queue-order': ['sourceIds', 'expectedRevision'], 'cancel-all': [], 'mention-groups': ['targets', 'question', 'context', 'timeoutMs'], withdraw: ['expectedRevision'], priority: ['expectedRevision', 'priority'], 'group-cancel': ['expectedRevision'], 'append-inspect': ['expectedRevision'] };
+          if (Object.keys(body).some(k => k !== 'requestId' && !keys[action!]!.includes(k))) throw new AppError(400, '身份和证据由服务端绑定；请求包含未知字段。');
+          const requestId = field(body.requestId, '请求标识', 200);
+          let result: unknown;
+          if (queueCommand?.[2] === 'queue-order') result = store.cooperation.reorder(queueCommand[1]!, body);
+          else if (queueCommand?.[2] === 'cancel-all') { const out = store.cooperation.cancelAll(queueCommand[1]!, requestId); out.invocationIds.forEach(id => engine.cancel(id)); result = out; }
+          else if (queueCommand) result = store.cooperation.createGroup(queueCommand[1]!, body);
+          else if (sourceCommand) result = sourceCommand[2] === 'withdraw' ? store.cooperation.withdraw(sourceCommand[1]!, body) : store.cooperation.priority(sourceCommand[1]!, body);
+          else if (groupCancel) { const out = store.cooperation.cancelGroup(groupCancel[1]!, body); out.invocationIds.forEach(id => engine.cancel(id)); result = out; }
+          else result = await engine.inspectAppend(appendInspect![1]!, revision(body.expectedRevision, '追加', 1));
+          engine.kick(); json(response, 200, result); return true;
+        }
         const proposeArtifact = /^\/api\/conversations\/([^/]+)\/managed-artifacts$/.exec(path);
         const reviewArtifact = /^\/api\/conversations\/([^/]+)\/artifact-reviews$/.exec(path);
         const approveArtifact = /^\/api\/artifact-approvals\/([^/]+)\/decide$/.exec(path);
@@ -159,7 +177,9 @@ export function collaborationHttp(deps: HttpDependencies) {
         }
         const send = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path);
         if (send) {
-          const result = store.send(send[1]!, { content: field(body.content, '消息', 20_000), requestId: field(body.requestId, '请求标识', 200) });
+          if (body.deliveryMode !== undefined && !['next_turn', 'continue_current'].includes(String(body.deliveryMode))) throw new AppError(400, '输入投递模式无效。');
+          if (body.resolveWhenIdle !== undefined && typeof body.resolveWhenIdle !== 'boolean') throw new AppError(400, '空闲解析必须为布尔值。');
+          const result = store.send(send[1]!, { content: field(body.content, '消息', 20_000), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
           engine.kick(); json(response, result.replayed ? 200 : 201, result); return true;
         }
         const preview = /^\/api\/conversations\/([^/]+)\/route-preview$/.exec(path);

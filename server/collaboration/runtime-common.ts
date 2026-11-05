@@ -7,10 +7,12 @@ import type { RuntimeRequest } from '../../shared/collaboration.js';
 export type Json = Record<string, any>;
 export class RuntimeProtocolError extends Error {
   readonly missingSession: boolean;
+  readonly steerRejected: boolean;
   constructor(error: Json) {
     super(`Runtime protocol rejected request (${error.code ?? 'unknown'}).`);
     // Used only by thread/resume, before turn/start; transport failures never qualify.
     this.missingSession = error.code === -32600 && /(?:thread|session|rollout).*(?:not found|does not exist)|no (?:thread|session|rollout).*found/i.test(String(error.message ?? ''));
+    this.steerRejected = error.code === -32601 || ([-32600, -32602].includes(error.code) && /no active turn|expected.*turn|turn.*(?:mismatch|not active)|active turn.*(?:not found|does not exist)/i.test(String(error.message ?? '')));
   }
 }
 export const TOOL_SPECS = [
@@ -25,7 +27,12 @@ export const TASK_TOOL_SPECS = [
   { name: 'task_update', description: 'Update a task using its latest revisions from task_list. doing can claim unassigned work. done requires the exact current owner execution; finishing a reply alone never completes a task. blocked requires a reason.', inputSchema: { type: 'object', properties: { ...versionFields, status: { type: 'string', enum: ['todo', 'doing', 'blocked', 'done'] }, reason: { type: 'string', maxLength: 2000 } }, required: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'status'], additionalProperties: false } },
   { name: 'task_handoff', description: 'Formally transfer an owned ordinary task to another member in THIS conversation. Requires the exact owner execution and current revisions. A waiting receipt means finish this invocation; the platform changes owner ONLY after real execution release. Do not also send collaboration_request for the same work.', inputSchema: { type: 'object', properties: { ...versionFields, targetMemberId: { type: 'string' }, reason: { type: 'string', maxLength: 2000 } }, required: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'targetMemberId', 'reason'], additionalProperties: false } },
 ];
-export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion'>) { return request.toolPolicyVersion === 'managed-artifacts-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS] : request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS; }
+export const COOPERATION_TOOL_SPECS = [
+  { name: 'conversation_pending', description: 'List your eligible pending source IDs. A directory read alone consumes nothing.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'conversation_read', description: 'Read 1–8 complete pending sources and accept responsibility for them in THIS response. Exact deliveries and failure callers are bound atomically; other recipients remain pending.', inputSchema: { type: 'object', properties: { sourceIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 } }, required: ['sourceIds'], additionalProperties: false } },
+  { name: 'multi_mention', description: 'Ask 2–8 OTHER members one question. Only all results produce an ordinary summary. Timeout posts no partial summary and never wakes the caller. Active participants cannot create nested groups.', inputSchema: { type: 'object', properties: { targets: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 8 }, question: { type: 'string', maxLength: 10000 }, context: { type: 'string', maxLength: 10000 }, timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000 } }, required: ['targets', 'question'], additionalProperties: false } },
+];
+export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion'>) { return request.toolPolicyVersion === 'cooperation-v2' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS] : request.toolPolicyVersion === 'managed-artifacts-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS] : request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS; }
 export function cliEnv(): NodeJS.ProcessEnv {
   // Accounts can reference arbitrary variable names (DS_KEY, MY_TOKEN, etc.). A deny-list
   // cannot isolate them. Native hosts inherit only OS, path, locale and network settings.
@@ -51,7 +58,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question') result = await request.onToolCall(name, args, callId);
+  if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     const path = args.path ?? '.';

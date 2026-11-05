@@ -37,3 +37,7 @@
 .cc-artifact-dialog label { display: block; margin: 14px 0; }
 .cc-artifact-dialog input:not([type=checkbox]), .cc-artifact-dialog textarea, .cc-artifact-dialog select { display: block; width: 100%; margin-top: 6px; }
 .cc-artifact-preview { max-height: 45vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f5f1; padding: 14px; border-radius: 6px; }
+
+.cc-cooperation-panel>details{margin:12px 0}.cc-cooperation-panel summary{cursor:pointer;font-size:11px;line-height:1.7}.cc-cooperation-card{padding:10px;margin:8px 0;border:1px solid #e0e7d5;border-radius:6px;overflow-wrap:anywhere}.cc-cooperation-card p{font-size:11px;white-space:pre-wrap;line-height:1.6;max-height:180px;overflow:auto}.cc-cooperation-card small,.cc-cooperation-card code{display:block;font-size:10px;margin:5px 0}.cc-cooperation-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.cc-cooperation-panel button{font-size:10px}.cc-group-form{display:grid;gap:10px;padding:10px 0;font-size:11px}.cc-group-form label{display:grid;gap:5px}.cc-group-form textarea{min-height:60px;resize:vertical;width:100%}.cc-group-form fieldset label{display:flex;align-items:center;gap:6px;margin:7px 0}.cc-group-form input[type=checkbox]{width:auto}
+
+.cc-group-form textarea,.cc-group-form input[type=number]{border:1px solid #dfe7d8;border-radius:6px;background:#fff;color:#496043;font:inherit;line-height:1.7;padding:8px}.cc-group-form fieldset{border:1px solid #dfe7d8;border-radius:6px;padding:8px}.cc-group-form legend{color:#687e59}.cc-group-form label{color:#526846}

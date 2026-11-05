@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { CollaborationRuntime, RuntimeCapability, RuntimeRequest } from '../../shared/collaboration.js';
 import { cliApiSettings, cliEnv, JsonProcess } from './runtime-common.js';
-import { isolatedCodexArgs, initializeCodex, invokeCodex } from './runtime-codex.js';
+import { isolatedCodexArgs, initializeCodex, invokeCodex, supportsCodexAppend } from './runtime-codex.js';
 import { invokeClaude } from './runtime-claude.js';
 import { invokeApi } from './runtime-api.js';
 import { withRuntimeInspection } from './inspection.js';
@@ -71,7 +71,7 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
             const config = await process.call('config/read', { includeLayers: false });
             const externalMcp = Object.values(config.config?.mcp_servers ?? {}).some(value => (value as { enabled?: boolean })?.enabled !== false);
             const available = account.account?.type === 'chatgpt' && !externalMcp;
-            return { ...base, version, installed: true, available, ...(available ? {} : { reason: externalMcp ? 'External MCP configuration could not be isolated; runtime will not start a model.' : 'Official ChatGPT CLI login required.' }) };
+            return { ...base, version, append: await supportsCodexAppend(codex), installed: true, available, ...(available ? {} : { reason: externalMcp ? 'External MCP configuration could not be isolated; runtime will not start a model.' : 'Official ChatGPT CLI login required.' }) };
           }
           catch { return { ...base, version, installed: true, available: false, reason: 'Codex app-server handshake or account check failed.' }; }
           finally { clearTimeout(timer); await process.stop(); }

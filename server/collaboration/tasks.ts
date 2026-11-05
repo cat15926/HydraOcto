@@ -47,7 +47,8 @@ export class OrdinaryTaskService {
   }
   private sourceFor(i: CollaborationInvocation): SourceWork {
     const r = this.get<CollaborationResponse>('cc_responses', i.responseId), c = this.port.contract(i.id);
-    const source = r.inputSourceIds.length === 1 ? this.get<SourceWork>('cc_sources', r.inputSourceIds[0]!) : undefined;
+    const primary = c.primarySourceId ?? (r.inputSourceIds.length === 1 ? r.inputSourceIds[0] : undefined);
+    const source = primary && r.inputSourceIds.includes(primary) ? this.get<SourceWork>('cc_sources', primary) : undefined;
     const receipt = this.rows<Consumption>('cc_consumptions', 'WHERE response_id=?', [i.responseId]).find(x => x.memberId === i.memberId && x.sourceId === source?.id);
     const delivery = receipt && this.get<Delivery>('cc_deliveries', receipt.deliveryId);
     if (!source || source.conversationId !== i.conversationId || source.revision !== c.sourceRevision || digest(source.content) !== c.sourceDigest || r.invocationId !== i.id || r.memberId !== i.memberId || r.conversationId !== i.conversationId || delivery?.status !== 'consumed' || delivery.responseId !== i.responseId || delivery.memberId !== i.memberId) fail('任务操作缺少准确且有效的消费来源。', 'task_source_conflict');
@@ -56,7 +57,7 @@ export class OrdinaryTaskService {
   actor(invocationId?: string): TaskActor {
     if (!invocationId) return { kind: 'user' };
     const i = this.port.invocation(invocationId);
-    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
+    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
     this.target(i.conversationId, i.memberId);
     const s = this.sourceFor(i);
     return { kind: 'agent', invocationId, memberId: i.memberId, sourceId: s.id, sourceRevision: s.revision, cancelRevision: i.cancelRevision ?? 0 };
@@ -70,6 +71,11 @@ export class OrdinaryTaskService {
     if (t.ownerMemberId !== i.memberId || ref?.invocationId !== i.id || ref.responseId !== i.responseId || binding?.ownerRevision !== t.ownerRevision || binding.fence !== ref.fence || ref.sourceId !== actor.sourceId || ref.sourceRevision !== actor.sourceRevision || ref.inputRevision !== this.get<CollaborationResponse>('cc_responses', i.responseId).inputRevision) fail('此回调不是当前任务的准确执行，不能修改负责人或完成状态。', 'task_execution_conflict');
   }
   executionAuthority(taskId: string, actor: TaskActor): void { this.authorize(this.getTask(taskId), actor); }
+  onInputsChanged(i: CollaborationInvocation): void {
+    for (const t of this.list(i.conversationId)) if (t.executionRef?.invocationId === i.id && i.taskBindings?.some(b => b.taskId === t.id && b.fence === t.executionRef!.fence && b.ownerRevision === t.ownerRevision)) {
+      t.executionRef.inputRevision = this.get<CollaborationResponse>('cc_responses', i.responseId).inputRevision; this.save(t, 'task.input_revision_changed', { invocationId: i.id });
+    }
+  }
   private pending(t: OrdinaryTask): boolean { return !!t.currentSourceId && this.rows<Delivery>('cc_deliveries', 'WHERE source_id=?', [t.currentSourceId]).some(d => ['pending', 'held'].includes(d.status)); }
   private delivery(sourceId: string, status: 'held' | 'pending' | 'withdrawn', reason?: string) {
     for (const d of this.rows<Delivery>('cc_deliveries', 'WHERE source_id=?', [sourceId])) {

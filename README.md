@@ -2,7 +2,7 @@
 
 本地多 Agent 持续协作平台。用户在同一会话中直接提问、追问或 @成员，成员结合自己的职责，通过持久投递和工具调用请求其他成员协助。平台保存来源、执行、输入与结果之间的关系，让协作过程可以追踪和核查。
 
-当前产品为 **0.6.0，已交付 N0–N5 的当前范围**：持续协作内核、Codex/Claude Code 接入、自然跟聊、运行契约与输入冻结、执行核查、原投递重验、双 CLI 原生会话延续、可选普通任务交接、版本化产物审批、固定版本评审与受管写入恢复。正式开发依据见[实施指导](docs/implementation-guide.md)，交付范围、验证依据和后续进度见[实施进度](docs/implementation-progress.md)。
+当前产品为 **0.7.0，已交付 N0–N6 的当前范围**：持续协作内核、Codex/Claude Code 接入、运行契约与输入冻结、执行核查、原生会话延续、可选任务交接、版本化产物审批、固定版本评审，以及来源排序、多来源消费、精确 Codex 活动追加与多人征询。N6 已通过 GPT-6.1 Terra 独立复验并升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
 
 本项目根据独立设计实现。Clowder AI 用于研究业务行为，没有搬迁其源码、Prompt、数据库或品牌素材。
 
@@ -27,6 +27,8 @@ flowchart LR
   UI["React 工作台"] -->|"HTTP 命令与查询"| HTTP["Node.js HTTP 层"]
   HTTP --> CORE["协作内核<br/>Store 事务与 Engine 调度"]
   CORE --> ROUTE["自然路由"]
+  CORE <--> COOP["来源排位 / 输入归并 / 精确追加 / 多人征询"]
+  COOP <--> DB
   CORE --> CONTEXT["契约快照与输入组装"]
   CORE <--> DB[("SQLite<br/>来源、投递、执行、证据、事件")]
   CORE --> TASK["可选任务与交接<br/>ownerRevision / executionRef"]
@@ -56,6 +58,7 @@ flowchart LR
 | 持久协作内核 | [store.ts](server/collaboration/store.ts) | 幂等命令、来源领取、责任关联、冻结输入、终态及恢复事务 |
 | 任务责任 | [tasks.ts](server/collaboration/tasks.ts)、[TaskPanel.tsx](web/TaskPanel.tsx) | 任务状态、准确执行授权、等待释放的交接与责任投影 |
 | 产物与交互 | [artifacts.ts](server/collaboration/artifacts.ts)、[artifact-files.ts](server/collaboration/artifact-files.ts)、[interactions.ts](server/collaboration/interactions.ts)、[ArtifactPanel.tsx](web/ArtifactPanel.tsx) | 精确审批、不可变文件、评审失效、原作业核查与有界提问 |
+| N6 协作分支 | [cooperation.ts](server/collaboration/cooperation.ts)、[CooperationPanel.tsx](web/CooperationPanel.tsx) | 来源排序、抑制/退避、准确多来源消费、追加交付状态和多人征询收集 |
 | 调度执行 | [engine.ts](server/collaboration/engine.ts) | 在数据库事务外调用承载，处理工具回调、取消与核查结果 |
 | 原生连续性 | [continuity.ts](server/collaboration/continuity.ts)、[runtime-session.ts](server/collaboration/runtime-session.ts) | 配置指纹、CLI 身份、准确历史证明；持久绑定由协作 Store 管理 |
 | 运行时 | [runtime.ts](server/collaboration/runtime.ts)、[inspection.ts](server/collaboration/inspection.ts) | CLI/API 适配、协议证据与准确执行观察 |
@@ -72,7 +75,13 @@ SQLite 短事务保证命令幂等、来源领取、回复关联和合格失败�
 5. 选择并保存原生会话计划，再次验证运行身份。Codex 核对已存轮次，Claude 核对本平台创建的 transcript 祖先链；没有恢复证据时不冒充 resumed。
 6. 原生回执、工具调用、使用量和退出证据陆续落库，结果保存到原回复。页面通过 SSE 获取变化，断线后按事件游标补取。
 
-新执行工具为 `workspace_list`、`workspace_read`、`collaboration_request`，`task_list`、`task_create`、`task_update`、`task_handoff`，以及 `artifact_list`、`artifact_read`、`artifact_propose`、`review_request`、`review_submit`、`user_question`。旧冻结契约保留原工具集合，权限变化会使旧原生会话重建。工作区访问限制在配置目录内，读取工具只读，拒绝越界及软链接逃逸；任意 Shell 和工作区写入不开放。产物审批只允许将固定版本保存到平台数据目录。
+新执行工具为 `workspace_list`、`workspace_read`、`collaboration_request`，`task_list`、`task_create`、`task_update`、`task_handoff`，以及 `artifact_list`、`artifact_read`、`artifact_propose`、`review_request`、`review_submit`、`user_question`；N6 增加 `conversation_pending`、`conversation_read`、`multi_mention`。旧冻结契约保留原工具集合，权限变化会使旧原生会话重建。工作区访问限制在配置目录内，读取工具只读，拒绝越界及软链接逃逸；任意 Shell 和工作区写入不开放。产物审批只允许将固定版本保存到平台数据目录。
+
+## N6 的连续输入与多人征询
+
+输入栏仍可直接发送。单目标 Codex 正在运行时，后续消息绑定原 invocation / response，取得准确 turn/steer 回执后才消费该投递；userMessage.clientId 匹配另记读取证据。不支持的承载保留下一轮。源码与协议支持不等于所有供应商均已实测。
+
+“协作动态 → 协作调度”可查看来源排序、优先级、撤回、停止当前全部执行、逐条输入归并及追加核查。“多人征询”是可选操作，也可由 Agent 使用 multi_mention 发起；与普通多人 @ 分开，只有全目标返回才发布汇总，成功不自动唤回发起者。初次 prompt 或工具完整读取可承接多条来源；普通任务仍锚定 primarySource，不因此转交负责人。
 
 ## 产物如何交付与评审
 
@@ -124,9 +133,9 @@ sequenceDiagram
 
 ## 当前边界
 
-- 双 CLI 支持有证据的原生续接；模型未固定、身份不可核验或旧契约执行保守新建。API 直连使用平台公开历史。活动追加仍未实现。
+- 双 CLI 支持有证据的原生续接；模型未固定、身份不可核验或旧契约执行保守新建。API 直连使用平台公开历史。N6 支持经过本机协议发现的 Codex 精确当前轮追加；Claude/API 直连仍排队。accepted、read 与任务完成独立，未知不自动重发，追加核查目前限原活动句柄。
 - 执行核查使用本服务进程保留的准确观察。服务重启、缓存丢失或承载无法查询时，明确保留未知，不自动重发。
-- 普通任务支持同会话交接；跨会话委托、Action 专用责任与外部条件自动唤醒尚未实现。N5 的本地受管产物写入已实现，任意外部作业恢复未实现；下一阶段为 N6 调度剩余分支；附件、私聊、长期记忆及完整多人汇总也属于后续范围。
+- 普通任务支持同会话交接；跨会话委托、Action 专用责任与外部条件自动唤醒尚未实现。N5 的本地受管产物写入已实现，任意外部作业恢复未实现；N6 多人征询收齐后发一次普通汇总，超时不发部分汇总、重启停止收集；附件、私聊、长期记忆和其他承载追加属于后续范围。
 - `/?legacy=1` 保留早期顺序任务原型。它与持续协作共用服务连接和租约，但使用独立数据表、API 与业务状态，其审批和产物能力不计入持续协作入口。
 
 ## 快速启动

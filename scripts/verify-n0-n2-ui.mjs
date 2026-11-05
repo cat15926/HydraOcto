@@ -93,7 +93,7 @@ try {
   const responsibilitySelector = `.cc-source-responsibility[data-source-id="${pending.source.id}"]`;
   await page.waitForSelector(responsibilitySelector);
   const responsibilityText = await page.$eval(responsibilitySelector, el => el.textContent);
-  check('visible pending background preserves original delivery responsibility', responsibilityText.includes('仅作背景') && responsibilityText.includes('当前执行不新增消费关系') && responsibilityText.includes('codex · 等待投递') && responsibilityText.includes('仍由此原投递负责'));
+  check('visible pending background preserves original delivery responsibility', responsibilityText.includes('背景可见性') && responsibilityText.includes('是否另行全文纳入') && responsibilityText.includes('codex · 等待投递') && responsibilityText.includes('仍由此原投递负责'));
   check('response background is distinguished from missing historical delivery evidence', (await page.$eval(`.cc-execution[data-invocation-id="${latestRun.id}"] .cc-input-audit`, el => el.textContent)).includes('此背景不关联来源投递'));
   check('visible background creates no extra consumption or provider invocation', calls.length === 4 && !responsibilityDetail.consumptions.some(c => c.sourceId === pending.source.id) && responsibilityDetail.deliveries.find(delivery => delivery.sourceId === pending.source.id)?.status === 'pending');
   await page.$eval(responsibilitySelector, el => el.scrollIntoView({ block: 'center' }));

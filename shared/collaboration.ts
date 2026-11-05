@@ -20,16 +20,20 @@ export interface ConversationMessage {
   memberId?: string; sourceId?: string; responseId?: string; content: string; createdAt: string; sequence?: number;
 }
 export interface SourceWork {
-  id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result';
+  id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result' | 'multi_mention';
   content: string; requestedTargets: string[]; bindingState: 'bound' | 'unresolved';
   parentInvocationId?: string; authorMemberId?: string; revision: number; sequence: number;
   depth: number; createdAt: string; routingDecisionId?: string;
   taskRef?: { taskId: string; ownerRevision: number; handoffId?: string };
   reviewRef?: { reviewId: string; versionId: string; digest: string };
+  position?: number; priority?: 'normal' | 'urgent'; enqueuedAt?: string; orderRevision?: number;
+  withdrawnAt?: string; groupId?: string;
 }
 export interface Delivery {
   id: string; sourceId: string; memberId: string; status: 'pending' | 'consumed' | 'held' | 'withdrawn';
   responseId?: string; holdReason?: string; revision: number;
+  continuation?: { invocationId: string; responseId: string; cancelRevision: number; fallback?: boolean; reason?: string };
+  handoffId?: string;
 }
 export interface DispatchBatch {
   id: string; sourceId: string; targets: string[]; mode: ExecutionMode; createdAt: string; historyCutoff?: number;
@@ -53,7 +57,7 @@ export interface CollaborationResponse {
 }
 export interface Consumption {
   id: string; sourceId: string; deliveryId: string; memberId: string; responseId: string;
-  kind: 'prompt'; createdAt: string;
+  kind: 'prompt' | 'tool' | 'append'; createdAt: string; sourceRevision?: number; sourceDigest?: string;
 }
 export interface AcceptanceEvidence {
   id: string; invocationId: string; kind: RuntimeEvent['kind']; detail: Record<string, unknown>; createdAt: string;
@@ -71,6 +75,38 @@ export interface ConversationDetail {
   tasks?: OrdinaryTask[]; taskHandoffs?: TaskHandoff[]; responsibility?: ResponsibilityItem[];
   artifacts?: ManagedArtifact[]; artifactVersions?: ArtifactVersion[]; artifactApprovals?: ArtifactApproval[];
   reviews?: ArtifactReview[]; jobs?: ManagedJob[]; interactions?: RuntimeInteraction[];
+  queue?: QueueState; groups?: MentionGroup[]; inputExposures?: InputExposure[]; inputHandoffs?: InputHandoff[];
+}
+export interface QueueState {
+  revision: number; sources: SourceWork[];
+  backoffs: { sourceId: string; invocationId: string; attempts: number; until: string; reason: string }[];
+  suppressions: { memberId: string; invocationId: string; cancelRevision: number; until: string }[];
+}
+export interface InputExposure {
+  id: string; conversationId: string; invocationId: string; responseId: string; sourceId: string;
+  sourceRevision: number; sourceDigest: string; content: string; kind: Consumption['kind']; inputRevision: number; createdAt: string;
+}
+export interface MentionGroup {
+  id: string; conversationId: string; sourceId: string; targets: string[]; question: string; context: string;
+  callerInvocationId?: string; callbackTo?: string; state: 'collecting' | 'done' | 'timeout' | 'cancelled' | 'lost';
+  createdAt: string; deadline: string; finishedAt?: string; revision: number;
+  results?: { memberId: string; responseId: string; status: 'succeeded' | 'failed'; content: string }[]; missing?: string[];
+}
+export interface InputHandoff {
+  id: string; conversationId: string; sourceId: string; sourceRevision: number; sourceDigest: string;
+  deliveryId: string; deliveryRevision: number; memberId: string; invocationId: string; responseId: string;
+  inputRevision: number; cancelRevision: number; nativeSessionId: string; nativeTurnId: string; nativeDeliveryId: string;
+  content: string; state: 'sent' | 'accepted' | 'read' | 'unknown' | 'not_accepted';
+  revision: number; createdAt: string; updatedAt: string; reason?: string; requiresCompletion: false;
+  evidence?: AppendObservation[];
+}
+export interface AppendObservation {
+  state: 'accepted' | 'read' | 'not_accepted' | 'unknown'; nativeSessionId: string; nativeTurnId: string; nativeDeliveryId: string;
+  reason: string; observedAt: string;
+}
+export interface AppendDispatcher {
+  send(input: InputHandoff): Promise<AppendObservation>;
+  inspect(input: InputHandoff): Promise<AppendObservation>;
 }
 export interface ArtifactOrigin {
   actor: TaskActor; responseId?: string; inputRevision?: number; sourceDigest?: string;
@@ -189,6 +225,7 @@ export interface ExecutionContractSnapshot {
   historySourceSnapshots?: HistorySourceResponsibility[];
   taskSnapshot?: OrdinaryTask;
   reviewSnapshot?: ArtifactReview;
+  primarySourceId?: string;
 }
 export interface InputManifestItem {
   kind: string; reference: string; representation: string; reason?: string; characters: number; complete: boolean;
@@ -229,7 +266,7 @@ export interface HoldRecheck {
 }
 export interface RuntimeCapability {
   carrier: Carrier; installed: boolean; version?: string; available: boolean; reason?: string;
-  append: false; authentication: 'cli' | 'api'; verified: 'unverified' | 'protocol_tested' | 'live_tested';
+  append: boolean; authentication: 'cli' | 'api'; verified: 'unverified' | 'protocol_tested' | 'live_tested';
 }
 export interface CollaborationBootstrap {
   version: string; workspace: string; csrfToken: string; members: Member[];
@@ -239,7 +276,7 @@ export interface CollaborationBootstrap {
 export interface CreateConversation {
   title: string; memberIds: string[]; defaultMemberId: string; requestId: string;
 }
-export interface SendMessage { content: string; requestId: string }
+export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean }
 export interface RuntimeEvent {
   kind: 'prepared' | 'exposed' | 'accepted' | 'not_accepted' | 'session' | 'session_replaced' | 'usage' | 'text' | 'tool' | 'process_exit' | 'transport_settled' | 'diagnostic';
   detail: Record<string, unknown>;
@@ -251,6 +288,8 @@ export interface RuntimeRequest {
   onToolCall: (name: string, args: Record<string, unknown>, callId: string) => Promise<unknown>;
   onInteraction?: (request: NativeInteractionRequest) => Promise<{ state: RuntimeInteraction['state']; answers?: Record<string, string> }>;
   onInteractionResolved?: (providerRequestId: string) => void;
+  onAppendReady?: (dispatcher: AppendDispatcher) => void;
+  onInputRead?: (observation: AppendObservation) => void;
 }
 export interface RuntimeResult {
   text: string; nativeSessionId?: string; nativeTurnId?: string; continuity: 'fresh' | 'resumed' | 'unknown';

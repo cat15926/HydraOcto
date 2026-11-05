@@ -234,7 +234,12 @@ test('NEXT10: one held target recheck cannot bypass earlier overlapping sources 
     assert.equal(rechecked.invocations.length, 1); assert.equal(rechecked.sources.length, 3);
     assert.equal(h.store.admitNext(), undefined, 'The free reviewer must not drag the later overlapping group past the earlier codex/claude source.');
     const finish = (id: string) => {
-      if (h.store.invocation(id).status === 'prepared') { h.store.startInvocation(id); accepted(h.store, id); }
+      if (h.store.invocation(id).status === 'prepared') {
+        // Preserve this pre-N6 queue contract; new multi-input consumption has its own tests.
+        const contract = h.store.contract(id); contract.toolPolicyVersion = 'managed-artifacts-v1'; contract.contextPolicyVersion = 'bounded-public-context-artifacts-v3'; contract.behaviorVersion = '0.6.0';
+        h.owner.db.prepare('UPDATE cc_contracts SET value=? WHERE id=?').run(JSON.stringify(contract), contract.id);
+        h.store.startInvocation(id); accepted(h.store, id);
+      }
       h.store.recordEvidence(id, { kind: 'process_exit', detail: { code: 0, confirmed: true } });
       h.store.finish(id, 'succeeded', '受控工作完成。');
     };
