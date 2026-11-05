@@ -12,13 +12,14 @@ export class CollaborationEngine {
   constructor(readonly store: CollaborationStore, readonly runtime: CollaborationRuntime, readonly options: { workspace: string; maxDepth?: number }) {}
   start(): void {
     if (this.started) return;
-    this.store.recover(); this.started = true; this.stopping = false;
+    this.store.recover(); this.store.artifacts.recover(); this.store.interactions.sweep(); this.started = true; this.stopping = false;
     this.timer = setInterval(() => this.kick(), 500); this.timer.unref(); this.kick();
   }
   kick(): void {
     if (!this.started || this.stopping || this.draining) return;
     this.draining = true;
     try {
+      this.store.artifacts.processJobs(); this.store.interactions.sweep();
       // Recover the durable human stop intent even if HTTP disconnected before aborting the adapter.
       for (const id of this.store.tasks.pendingStops()) this.cancel(id);
       for (const invocation of this.store.invocations().filter(i => i.status === 'prepared' && !i.dispatchStarted && !i.blockedReason)) this.launch(invocation);
@@ -68,8 +69,13 @@ export class CollaborationEngine {
       const input = this.store.input(i.id)!; const contract = this.store.contract(i.id);
       onEvent({ kind: 'exposed', detail: { source: 'platform_prompt', characters: prompt.length, manifestId: input.manifest.id, renderDigest: input.manifest.renderDigest, providerAcceptance: false } });
       const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, signal: controller.signal, onEvent,
+        onInteraction: request => this.store.interactions.wait(i.id, JSON.parse(redact(JSON.stringify(request))), 'codex', controller.signal),
+        onInteractionResolved: requestId => this.store.interactions.resolved(i.id, requestId),
         onToolCall: async (name, args, callId) => {
           const current = this.store.invocation(i.id); if (current.status !== 'running' || controller.signal.aborted) throw new AppError(409, 'Invocation no longer accepts callbacks.');
+          this.store.bindToolCall(i.id, name, args, callId);
+          if (name === 'user_question') return this.store.interactions.tool(i.id, JSON.parse(redact(JSON.stringify(args))), callId, controller.signal);
+          if (name.startsWith('artifact_') || name.startsWith('review_')) { const result = this.store.artifacts.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId); this.kick(); return result; }
           if (name.startsWith('task_')) { const result = this.store.tasks.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId); this.kick(); return result; }
           if (name !== 'collaboration_request') throw new AppError(400, 'Unsupported collaboration tool.');
           const content = typeof args.content === 'string' ? redact(args.content) : '';

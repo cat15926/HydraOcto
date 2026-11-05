@@ -20,11 +20,12 @@ export interface ConversationMessage {
   memberId?: string; sourceId?: string; responseId?: string; content: string; createdAt: string; sequence?: number;
 }
 export interface SourceWork {
-  id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff';
+  id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result';
   content: string; requestedTargets: string[]; bindingState: 'bound' | 'unresolved';
   parentInvocationId?: string; authorMemberId?: string; revision: number; sequence: number;
   depth: number; createdAt: string; routingDecisionId?: string;
   taskRef?: { taskId: string; ownerRevision: number; handoffId?: string };
+  reviewRef?: { reviewId: string; versionId: string; digest: string };
 }
 export interface Delivery {
   id: string; sourceId: string; memberId: string; status: 'pending' | 'consumed' | 'held' | 'withdrawn';
@@ -68,6 +69,51 @@ export interface ConversationDetail {
   routingDecisions?: RoutingDecision[]; recoveryChecks?: RecoveryCheck[]; holdRechecks?: HoldRecheck[];
   nativeSessions?: NativeSessionBinding[];
   tasks?: OrdinaryTask[]; taskHandoffs?: TaskHandoff[]; responsibility?: ResponsibilityItem[];
+  artifacts?: ManagedArtifact[]; artifactVersions?: ArtifactVersion[]; artifactApprovals?: ArtifactApproval[];
+  reviews?: ArtifactReview[]; jobs?: ManagedJob[]; interactions?: RuntimeInteraction[];
+}
+export interface ArtifactOrigin {
+  actor: TaskActor; responseId?: string; inputRevision?: number; sourceDigest?: string;
+  task?: { id: string; ownerRevision: number; fence: string };
+}
+export interface ManagedArtifact { id: string; conversationId: string; name: string; revision: number; headVersionId?: string; createdAt: string; updatedAt: string }
+export interface ArtifactVersion {
+  id: string; artifactId: string; conversationId: string; number: number; baseVersionId: string | null;
+  digest: string; bytes: number; origin: ArtifactOrigin; createdAt: string;
+  state: 'proposed' | 'published' | 'rejected' | 'expired' | 'stale' | 'cancelled' | 'unknown';
+  approvalId: string; jobId?: string; publishedAt?: string; reason?: string;
+}
+export interface ArtifactApproval {
+  id: string; conversationId: string; versionId: string; operationDigest: string; revision: number;
+  state: 'pending' | 'approved' | 'rejected' | 'expired' | 'stale' | 'cancelled';
+  expiresAt: string; createdAt: string; decidedAt?: string; reason?: string; notifyMemberId?: string;
+}
+export interface ManagedJob {
+  id: string; conversationId: string; versionId: string; approvalId: string; operationDigest: string;
+  kind: 'artifact_materialize'; state: 'pending' | 'running' | 'succeeded' | 'unknown' | 'stale' | 'cancelled'; revision: number;
+  fence: string; supervisorEpoch?: string; startedAt?: string; finishedAt?: string; createdAt: string;
+  receiptDigest?: string; reason?: string; notificationSourceId?: string;
+}
+export interface ArtifactReview {
+  id: string; conversationId: string; artifactId: string; versionId: string; digest: string; reviewerMemberId: string;
+  sourceId: string; sourceRevision: number; revision: number; origin: ArtifactOrigin;
+  state: 'pending' | 'submitted' | 'expired' | 'stale' | 'cancelled'; verdict?: 'accept' | 'changes_requested'; comment?: string;
+  createdAt: string; expiresAt: string; submittedAt?: string; invocationId?: string; headCommit?: string;
+  current?: boolean;
+  submission?: { responseId: string; inputRevision: number; cancelRevision: number };
+}
+export interface InteractionQuestion { id: string; question: string; options?: string[] }
+export interface NativeInteractionRequest {
+  providerRequestId: string; kind: 'question' | 'approval' | 'elicitation'; operation: string;
+  nativeSessionId?: string; nativeTurnId?: string; nativeItemId?: string;
+  questions?: InteractionQuestion[]; payload: Record<string, unknown>;
+}
+export interface RuntimeInteraction extends NativeInteractionRequest {
+  id: string; conversationId: string; invocationId: string; memberId: string; sourceId: string;
+  sourceRevision: number; inputRevision: number; cancelRevision: number; payloadDigest: string; revision: number;
+  state: 'pending' | 'answered' | 'declined' | 'expired' | 'cancelled' | 'unsupported';
+  transport: 'platform' | 'codex'; createdAt: string; expiresAt: string; answers?: Record<string, string>;
+  delivery: 'not_sent' | 'returned_to_adapter' | 'unknown'; reason?: string;
 }
 export type OrdinaryTaskStatus = 'todo' | 'doing' | 'blocked' | 'done';
 export interface TaskExecutionRef {
@@ -142,6 +188,7 @@ export interface ExecutionContractSnapshot {
   historySnapshot?: ConversationMessage[]; sourceRevision?: number; sourceDigest?: string;
   historySourceSnapshots?: HistorySourceResponsibility[];
   taskSnapshot?: OrdinaryTask;
+  reviewSnapshot?: ArtifactReview;
 }
 export interface InputManifestItem {
   kind: string; reference: string; representation: string; reason?: string; characters: number; complete: boolean;
@@ -202,6 +249,8 @@ export interface RuntimeRequest {
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;
   onEvent: (event: RuntimeEvent) => void;
   onToolCall: (name: string, args: Record<string, unknown>, callId: string) => Promise<unknown>;
+  onInteraction?: (request: NativeInteractionRequest) => Promise<{ state: RuntimeInteraction['state']; answers?: Record<string, string> }>;
+  onInteractionResolved?: (providerRequestId: string) => void;
 }
 export interface RuntimeResult {
   text: string; nativeSessionId?: string; nativeTurnId?: string; continuity: 'fresh' | 'resumed' | 'unknown';

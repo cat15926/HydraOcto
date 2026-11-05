@@ -45,7 +45,7 @@ test('N4 HTTP + engine: injected adapters use server-bound task tools; transfer 
   const errors: string[] = [];
   const h = await setup({ probe: async () => [], invoke: async r => {
     calls.push(r); r.onEvent({ kind: 'accepted', detail: {} });
-    assert.equal(r.toolPolicyVersion, 'readonly-tasks-v1');
+    assert.equal(r.toolPolicyVersion, 'managed-artifacts-v1');
     const read = await r.onToolCall('task_list', {}, `read-${r.member.id}`) as { tasks: OrdinaryTask[] }, t = read.tasks[0]!;
     try { await r.onToolCall('task_update', { taskId: t.id, actor: { kind: 'user' }, status: 'done' }, 'forged'); } catch { errors.push('identity rejected'); }
     if (r.member.id === 'codex') {

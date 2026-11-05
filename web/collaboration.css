@@ -27,3 +27,13 @@
 
 /* Optional task responsibility and handoff controls, separate from the composer. */
 .cc-task-panel>.cc-note{margin-bottom:12px}.cc-task-card{background:#fff;border:1px solid #dce4d8;border-radius:8px;margin:10px 0;overflow:hidden}.cc-task-card>summary{cursor:pointer;padding:12px;display:flex;align-items:flex-start;gap:8px;justify-content:space-between;font-size:12px;list-style:none}.cc-task-card>summary strong{overflow-wrap:anywhere;min-width:0}.cc-task-state{font-size:10px;white-space:nowrap;color:#65765e;background:#eef2e9;padding:3px 5px;border-radius:4px}.cc-task-done{color:#286b50;background:#e5f2e9}.cc-task-blocked{color:#8e6528;background:#faf0d9}.cc-task-body{padding:0 12px 12px;font-size:11px;line-height:1.8;overflow-wrap:anywhere}.cc-task-body>p{white-space:pre-wrap}.cc-task-body dl{margin:12px 0}.cc-task-body dt{color:#7c8976;font-size:10px;margin-top:8px}.cc-task-body dd{margin:0}.cc-task-actions{display:flex;flex-wrap:wrap;gap:6px}.cc-task-actions button{font-size:10px}.cc-task-id{display:block;margin-top:12px;color:#8a9586;font-size:9px}.cc-task-history{margin-top:12px}.cc-task-history summary{cursor:pointer}.cc-task-history p{padding:8px 0;border-bottom:1px solid #eef1eb}.cc-task-diagnostic{margin-left:6px;color:#9b6236}.cc-task-notice{font-size:11px;color:#326449;line-height:1.7}.cc-task-error{font-size:12px;color:#a33e32;line-height:1.7}.cc-task-dialog{width:min(520px,calc(100vw - 32px))}.cc-task-dialog h2{font-size:18px}.cc-task-stop{display:flex!important;align-items:center;gap:8px}.cc-task-stop input{width:auto!important}.cc-message-responsibility{padding-top:10px}
+
+/* Versioned artifacts stay outside the natural chat composer. */
+.cc-artifact-version { border-top: 1px solid var(--cc-line, #deded8); margin-top: 12px; padding-top: 12px; }
+.cc-artifact-panel code, .cc-artifact-dialog code { overflow-wrap: anywhere; font-size: 11px; }
+.cc-artifact-panel small { display: block; overflow-wrap: anywhere; color: #6b706b; margin: 5px 0; }
+.cc-interaction { border: 1px solid #caaf76; border-radius: 8px; padding: 12px; margin: 10px 0; background: #fffcf3; }
+.cc-artifact-dialog { width: min(760px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; }
+.cc-artifact-dialog label { display: block; margin: 14px 0; }
+.cc-artifact-dialog input:not([type=checkbox]), .cc-artifact-dialog textarea, .cc-artifact-dialog select { display: block; width: 100%; margin-top: 6px; }
+.cc-artifact-preview { max-height: 45vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f5f1; padding: 14px; border-radius: 6px; }

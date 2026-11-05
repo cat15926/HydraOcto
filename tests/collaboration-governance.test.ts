@@ -65,7 +65,7 @@ test('N0 migration preserves real v1 identities/account references, fences histo
 
     owner = new Store(path); const migrated = new CollaborationStore(owner, { workspace: '/synthetic/governance-workspace' });
     assert.deepEqual(snapshotIds(migrated, first.conversation.id), ids);
-    assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as { version: number }).version, 4);
+    assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as { version: number }).version, 5);
     assert.equal(migrated.accounts().find(a => a.id === 'migration-account')?.apiKeyEnv, 'N0_SYNTHETIC_KEY');
     assert.equal(migrated.invocation(historical.id).nativeSessionId, 'legacy-session');
     assert.equal(migrated.invocation(historical.id).interruptionCause, 'legacy_unknown');

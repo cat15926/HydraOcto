@@ -11,6 +11,7 @@ import { createProvider, type Provider } from './provider.js';
 import { ToolGateway } from './tools.js';
 import type { CollaborationRuntime } from '../shared/collaboration.js';
 import { CollaborationStore } from './collaboration/store.js';
+import { ArtifactFiles } from './collaboration/artifact-files.js';
 import { CollaborationEngine } from './collaboration/engine.js';
 import { createCollaborationRuntime } from './collaboration/runtime.js';
 import { collaborationHttp } from './collaboration/http.js';
@@ -62,13 +63,15 @@ export async function createApplication(options: ApplicationOptions = {}) {
   const secrets = modelApiKey ? [modelApiKey] : [];
   const gateway = new ToolGateway({ workspace, artifactDir: resolve(dataDir, 'artifacts'), seedDemo: !customWorkspace });
   await gateway.init();
+  // Validate before opening/acquiring the database lease; rejected configuration has no live worker.
+  new ArtifactFiles(resolve(dataDir, 'collaboration-artifacts'), workspace).validate();
   const store = new Store(resolve(dataDir, 'platform.sqlite'), { ...(options.leaseMs ? { leaseMs: options.leaseMs } : {}) });
   store.recover();
   const provider = options.provider ?? createProvider({ baseUrl: modelBaseUrl, model: modelName, apiKey: modelApiKey, timeoutMs: options.providerTimeoutMs });
   const worker = new Worker(store, gateway, provider, { approvalTtlMs: options.approvalTtlMs, providerTimeoutMs: options.providerTimeoutMs, secrets });
   const commands = new Commands(store, worker, gateway);
   const csrfToken = randomBytes(32).toString('hex');
-  const collaborationStore = new CollaborationStore(store, { workspace });
+  const collaborationStore = new CollaborationStore(store, { workspace, artifactDir: resolve(dataDir, 'collaboration-artifacts') });
   const collaborationRuntime = options.collaborationRuntime ?? createCollaborationRuntime();
   const collaborationEngine = new CollaborationEngine(collaborationStore, collaborationRuntime, { workspace });
   const collaborationRoutes = collaborationHttp({ store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, workspace, csrfToken, verifyCsrf, readJson, json });

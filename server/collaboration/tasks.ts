@@ -56,7 +56,7 @@ export class OrdinaryTaskService {
   actor(invocationId?: string): TaskActor {
     if (!invocationId) return { kind: 'user' };
     const i = this.port.invocation(invocationId);
-    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || this.port.contract(i.id).toolPolicyVersion !== 'readonly-tasks-v1') fail('此执行不具备任务操作权限。', 'stale_task_callback');
+    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
     this.target(i.conversationId, i.memberId);
     const s = this.sourceFor(i);
     return { kind: 'agent', invocationId, memberId: i.memberId, sourceId: s.id, sourceRevision: s.revision, cancelRevision: i.cancelRevision ?? 0 };
@@ -69,6 +69,7 @@ export class OrdinaryTaskService {
     const ref = t.executionRef, binding = i.taskBindings?.find(b => b.taskId === t.id);
     if (t.ownerMemberId !== i.memberId || ref?.invocationId !== i.id || ref.responseId !== i.responseId || binding?.ownerRevision !== t.ownerRevision || binding.fence !== ref.fence || ref.sourceId !== actor.sourceId || ref.sourceRevision !== actor.sourceRevision || ref.inputRevision !== this.get<CollaborationResponse>('cc_responses', i.responseId).inputRevision) fail('此回调不是当前任务的准确执行，不能修改负责人或完成状态。', 'task_execution_conflict');
   }
+  executionAuthority(taskId: string, actor: TaskActor): void { this.authorize(this.getTask(taskId), actor); }
   private pending(t: OrdinaryTask): boolean { return !!t.currentSourceId && this.rows<Delivery>('cc_deliveries', 'WHERE source_id=?', [t.currentSourceId]).some(d => ['pending', 'held'].includes(d.status)); }
   private delivery(sourceId: string, status: 'held' | 'pending' | 'withdrawn', reason?: string) {
     for (const d of this.rows<Delivery>('cc_deliveries', 'WHERE source_id=?', [sourceId])) {

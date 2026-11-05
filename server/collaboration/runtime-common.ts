@@ -1,3 +1,4 @@
+import { ARTIFACT_TOOL_SPECS } from './artifact-tools.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -24,7 +25,7 @@ export const TASK_TOOL_SPECS = [
   { name: 'task_update', description: 'Update a task using its latest revisions from task_list. doing can claim unassigned work. done requires the exact current owner execution; finishing a reply alone never completes a task. blocked requires a reason.', inputSchema: { type: 'object', properties: { ...versionFields, status: { type: 'string', enum: ['todo', 'doing', 'blocked', 'done'] }, reason: { type: 'string', maxLength: 2000 } }, required: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'status'], additionalProperties: false } },
   { name: 'task_handoff', description: 'Formally transfer an owned ordinary task to another member in THIS conversation. Requires the exact owner execution and current revisions. A waiting receipt means finish this invocation; the platform changes owner ONLY after real execution release. Do not also send collaboration_request for the same work.', inputSchema: { type: 'object', properties: { ...versionFields, targetMemberId: { type: 'string' }, reason: { type: 'string', maxLength: 2000 } }, required: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'targetMemberId', 'reason'], additionalProperties: false } },
 ];
-export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion'>) { return request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS; }
+export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion'>) { return request.toolPolicyVersion === 'managed-artifacts-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS] : request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS; }
 export function cliEnv(): NodeJS.ProcessEnv {
   // Accounts can reference arbitrary variable names (DS_KEY, MY_TOKEN, etc.). A deny-list
   // cannot isolate them. Native hosts inherit only OS, path, locale and network settings.
@@ -50,7 +51,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name === 'collaboration_request' || name.startsWith('task_')) result = await request.onToolCall(name, args, callId);
+  if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     const path = args.path ?? '.';

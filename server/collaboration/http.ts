@@ -75,11 +75,11 @@ export function collaborationHttp(deps: HttpDependencies) {
     close() { for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
     async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
       const path = decodeURIComponent(url.pathname);
-      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$))/.test(path)) return false;
+      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$))/.test(path)) return false;
       const { store, engine, json } = deps;
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.5.0-n4', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), accounts: store.accounts().map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.6.0-n5', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), accounts: store.accounts().map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
@@ -108,8 +108,31 @@ export function collaborationHttp(deps: HttpDependencies) {
         send(); const timer = setInterval(send, 300); timer.unref(); streams.set(response, timer);
         response.on('close', () => { clearInterval(timer); streams.delete(response); }); return true;
       }
+      const artifactContent = /^\/api\/managed-artifacts\/versions\/([^/]+)(\/download)?$/.exec(path);
+      if (request.method === 'GET' && artifactContent) {
+        const result = store.artifacts.content(artifactContent[1]!);
+        if (artifactContent[2]) {
+          if (result.version.state !== 'published') throw new AppError(409, '此版本尚未发布。');
+          response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `attachment; filename="artifact.txt"; filename*=UTF-8''${encodeURIComponent(result.artifact.name)}`, 'Cache-Control': 'no-store' }); response.end(result.content);
+        } else json(response, 200, result);
+        return true;
+      }
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const body = object(await deps.readJson(request));
+        const proposeArtifact = /^\/api\/conversations\/([^/]+)\/managed-artifacts$/.exec(path);
+        const reviewArtifact = /^\/api\/conversations\/([^/]+)\/artifact-reviews$/.exec(path);
+        const approveArtifact = /^\/api\/artifact-approvals\/([^/]+)\/decide$/.exec(path);
+        const reconcileJob = /^\/api\/managed-jobs\/([^/]+)\/reconcile$/.exec(path);
+        const answerInteraction = /^\/api\/runtime-interactions\/([^/]+)\/answer$/.exec(path);
+        if (proposeArtifact || reviewArtifact || approveArtifact || reconcileJob || answerInteraction) {
+          if (['actor', 'origin', 'invocationId', 'fence', 'observation', 'conversationId'].some(k => k in body)) throw new AppError(400, '准确身份与核查证据由服务端绑定。');
+          const result = proposeArtifact ? store.artifacts.propose(proposeArtifact[1]!, body)
+            : reviewArtifact ? store.artifacts.requestReview(reviewArtifact[1]!, body)
+            : approveArtifact ? store.artifacts.decide(approveArtifact[1]!, body)
+            : answerInteraction ? store.interactions.answer(answerInteraction[1]!, body)
+            : store.artifacts.reconcileJob(reconcileJob![1]!);
+          engine.kick(); json(response, 200, result); return true;
+        }
         const createTask = /^\/api\/conversations\/([^/]+)\/ordinary-tasks$/.exec(path);
         const taskCommand = /^\/api\/ordinary-tasks\/([^/]+)\/(update|handoff|cancel-handoff)$/.exec(path);
         if (createTask || taskCommand) {

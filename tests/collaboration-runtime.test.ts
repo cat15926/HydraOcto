@@ -294,3 +294,16 @@ test('Claude API session rejects missing/different model or an OAuth authenticat
     }
   } finally { delete process.env.COLLAB_SELECTED_TEST_API_KEY; await rm(dir, { recursive: true, force: true }); }
 });
+
+test('N5 Codex protocol: exact native question response and denied native writes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'n5-codex-question-'));
+  try {
+    const source = fakeCodex.replace("send({id:99,method:'item/tool/call',params:{threadId:'thread-exact',turnId:turn,callId:'native-call-exact',tool:'collaboration_request',arguments:{targets:['member-2'],content:'Review'}}});", `
+      send({id:98,method:'item/commandExecution/requestApproval',params:{threadId:'thread-exact',turnId:turn,itemId:'command-1',command:'echo prohibited'}});
+      send({id:99,method:'item/tool/requestUserInput',params:{threadId:'thread-exact',turnId:turn,itemId:'question-1',isBlocking:true,questions:[{id:'format',header:'Format',question:'Format?',options:[{label:'Markdown',description:'Text'}]}]}});
+    `).replace("if(m.id===99&&m.result) {", "if(m.id===98&&m.result&&m.result.decision!=='decline')process.exit(4); if(m.id===99&&m.result) { if(m.result.answers.format.answers[0]!=='Markdown')process.exit(5);");
+    const path = await script(dir, 'codex.cjs', source), events: RuntimeEvent[] = [], interactions: any[] = [];
+    await createCollaborationRuntime({ codexPath: path, timeoutMs: 5000 }).invoke(request('codex-app-server', dir, events, [], { toolPolicyVersion: 'managed-artifacts-v1', onInteraction: async req => { interactions.push(req); return req.kind === 'question' ? { state: 'answered', answers: { format: 'Markdown' } } : { state: 'unsupported' }; } }));
+    assert.deepEqual(interactions.map(i => i.kind), ['approval', 'question']); assert.equal(interactions[1].nativeTurnId, 'turn-exact'); assert.equal(interactions[1].nativeItemId, 'question-1'); assert.ok(events.some(e => e.kind === 'session' && e.detail.nativeTurnId === 'turn-exact'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

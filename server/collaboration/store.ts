@@ -5,6 +5,9 @@ import { AppError, canonical, now, Store } from '../store.js';
 import { parseMentions, resolveRouting } from './routing.js';
 import { assembleContext, CONTEXT_POLICY_VERSION } from './context.js';
 import { nativeUsage, sessionFingerprint } from './continuity.js';
+import { resolve } from 'node:path';
+import { ArtifactService } from './artifacts.js';
+import { InteractionService } from './interactions.js';
 import { OrdinaryTaskService } from './tasks.js';
 
 const id = () => randomUUID();
@@ -19,13 +22,17 @@ interface FailureProof { sourceId: string; responseId: string; invocationId: str
 export class CollaborationStore {
   readonly db;
   readonly tasks: OrdinaryTaskService;
+  readonly artifacts: ArtifactService;
+  readonly interactions: InteractionService;
   private listeners = new Set<(events: CollaborationEvent[]) => void>();
   private emitted: CollaborationEvent[] | undefined;
-  constructor(readonly owner: Store, readonly options: { workspace?: string } = {}) {
+  constructor(readonly owner: Store, readonly options: { workspace?: string; artifactDir?: string } = {}) {
     this.db = owner.db;
     this.tasks = new OrdinaryTaskService({ db: this.db, tx: fn => this.tx(fn), command: (key, input, fn) => this.command(key, input, fn),
       invocation: key => this.invocation(key), saveInvocation: i => this.saveInvocation(i), contract: key => this.contract(key), addSource: input => this.addSource(input),
       message: (conversationId, content, sourceId) => this.addMessage({ conversationId, content, sourceId, author: 'system' }), event: (conversationId, type, data) => this.event(conversationId, type, data) });
+    this.artifacts = new ArtifactService({ db: this.db, tasks: this.tasks, tx: fn => this.tx(fn), command: (key, input, fn) => this.command(key, input, fn), invocation: key => this.invocation(key), contract: key => this.contract(key), addSource: input => this.addSource(input), event: (cid, type, data) => this.event(cid, type, data) }, options.artifactDir ?? resolve('.local-data/collaboration-artifacts'), options.workspace ?? '');
+    this.interactions = new InteractionService(this.artifacts);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS cc_accounts (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_members (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES cc_accounts(id), value TEXT NOT NULL);
@@ -67,11 +74,13 @@ export class CollaborationStore {
         CREATE TABLE IF NOT EXISTS cc_native_sessions (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), member_id TEXT NOT NULL REFERENCES cc_members(id), sequence INTEGER NOT NULL, value TEXT NOT NULL, UNIQUE(conversation_id,member_id,sequence));
         CREATE TABLE IF NOT EXISTS cc_ordinary_tasks (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS cc_task_handoffs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES cc_ordinary_tasks(id), conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), value TEXT NOT NULL);`);
+      for (const table of ['cc_artifacts', 'cc_artifact_versions', 'cc_artifact_approvals', 'cc_managed_jobs', 'cc_artifact_reviews', 'cc_runtime_interactions']) this.db.exec(`CREATE TABLE IF NOT EXISTS ${table}(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), value TEXT NOT NULL); CREATE INDEX IF NOT EXISTS ${table}_conversation ON ${table}(conversation_id)`);
+      this.db.exec('CREATE TABLE IF NOT EXISTS cc_artifact_contents(version_id TEXT PRIMARY KEY REFERENCES cc_artifact_versions(id), content TEXT NOT NULL)');
       const version = (this.db.prepare('SELECT version FROM cc_schema').get() as { version: number } | undefined)?.version ?? 1;
-      if (version > 4) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 5) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
-      if (version === 4) return;
-      if (version === 2 || version === 3) { this.db.exec('UPDATE cc_schema SET version=4'); return; }
+      if (version === 5) return;
+      if (version === 2 || version === 3 || version === 4) { this.db.exec('UPDATE cc_schema SET version=5'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -88,7 +97,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(4)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(5)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }
@@ -115,10 +124,10 @@ export class CollaborationStore {
       })),
     }));
     const routing = detail.routingDecisions?.find(r => r.sourceId === source.id);
-    return { id: id(), invocationId: i.id, behaviorVersion: '0.5.0', routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-public-context-tasks-v2', toolPolicyVersion: 'readonly-tasks-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: this.options.workspace ?? '', roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), createdAt: now(), snapshotOrigin };
+    return { id: id(), invocationId: i.id, behaviorVersion: '0.6.0', routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-public-context-artifacts-v3', toolPolicyVersion: 'managed-artifacts-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: this.options.workspace ?? '', roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private validateContract(c: ExecutionContractSnapshot): void {
-    if (!['0.2.1', '0.3.0', '0.4.0', '0.5.0'].includes(c.behaviorVersion) || !['legacy-history-40-v1', CONTEXT_POLICY_VERSION, 'bounded-public-context-tasks-v2'].includes(c.contextPolicyVersion) || !['readonly-v1', 'readonly-tasks-v1'].includes(c.toolPolicyVersion) || !['native-fresh-v1', 'native-continuity-v1'].includes(c.adapterCapabilityVersion)) throw new AppError(503, '此执行的冻结规则版本不受当前服务支持，已保留待处理。', 'contract_not_supported');
+    if (!['0.2.1', '0.3.0', '0.4.0', '0.5.0', '0.6.0'].includes(c.behaviorVersion) || !['legacy-history-40-v1', CONTEXT_POLICY_VERSION, 'bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3'].includes(c.contextPolicyVersion) || !['readonly-v1', 'readonly-tasks-v1', 'managed-artifacts-v1'].includes(c.toolPolicyVersion) || !['native-fresh-v1', 'native-continuity-v1'].includes(c.adapterCapabilityVersion)) throw new AppError(503, '此执行的冻结规则版本不受当前服务支持，已保留待处理。', 'contract_not_supported');
   }
   blockInvocation(invocationId: string, reason: string): void { this.tx(() => { const i = this.invocation(invocationId); if (i.status !== 'prepared' || i.dispatchStarted) return; i.blockedReason = reason; this.saveInvocation(i); this.event(i.conversationId, 'invocation.blocked', { invocationId, reason }); }); }
   private tx<T>(fn: () => T): T {
@@ -227,7 +236,7 @@ export class CollaborationStore {
     value.sequence = Number(inserted.lastInsertRowid); this.put('cc_messages', value);
     const c = this.get<Conversation>('cc_conversations', value.conversationId); c.updatedAt = value.createdAt; this.put('cc_conversations', c);
   }
-  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef'>>): SourceWork {
+  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'reviewRef'>>): SourceWork {
     const conversation = this.get<Conversation>('cc_conversations', input.conversationId);
     if (!input.requestedTargets.length || input.requestedTargets.some(t => !conversation.memberIds.includes(t))) throw new AppError(400, 'Targets must belong to this conversation.');
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
@@ -244,7 +253,7 @@ export class CollaborationStore {
     const conversation = this.get<Conversation>('cc_conversations', conversationId);
     const sources = this.rows<SourceWork>('cc_sources', 'WHERE conversation_id=? ORDER BY sequence', [conversationId]);
     const sourcesIds = new Set(sources.map(s => s.id)); const invocations = this.invocations(conversationId); const invocationIds = new Set(invocations.map(i => i.id));
-    return { conversation, messages: this.rows<ConversationMessage>('cc_messages', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), sources,
+    return { conversation, ...this.artifacts.detail(conversationId), interactions: this.interactions.list(conversationId), messages: this.rows<ConversationMessage>('cc_messages', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), sources,
       deliveries: this.rows<Delivery>('cc_deliveries', 'ORDER BY rowid').filter(d => sourcesIds.has(d.sourceId)), batches: this.rows<DispatchBatch>('cc_batches', 'ORDER BY rowid').filter(b => sourcesIds.has(b.sourceId)), invocations,
       responses: this.rows<CollaborationResponse>('cc_responses', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), consumptions: this.rows<Consumption>('cc_consumptions', 'ORDER BY rowid').filter(c => sourcesIds.has(c.sourceId)),
       evidence: this.rows<AcceptanceEvidence>('cc_evidence', 'ORDER BY rowid').filter(e => invocationIds.has(e.invocationId)), events: this.events(0, conversationId),
@@ -257,6 +266,10 @@ export class CollaborationStore {
   }
   invocations(conversationId?: string): CollaborationInvocation[] { return this.rows('cc_invocations', conversationId ? 'WHERE conversation_id=? ORDER BY rowid' : 'ORDER BY rowid', conversationId ? [conversationId] : []); }
   invocation(invocationId: string): CollaborationInvocation { return this.get('cc_invocations', invocationId); }
+  bindToolCall(invocationId: string, name: string, args: Record<string, unknown>, callId: string): void {
+    checkText(callId, 'tool call identity', 200);
+    this.tx(() => this.command(`runtime-tool-binding:${invocationId}:${callId}`, { name, args }, () => ({ registered: true })));
+  }
   response(responseId: string): CollaborationResponse { return this.get('cc_responses', responseId); }
   accountFor(invocationId: string): CollaborationAccount { return JSON.parse((this.db.prepare('SELECT account_snapshot FROM cc_invocations WHERE id=?').get(invocationId) as { account_snapshot: string }).account_snapshot); }
   private saveDelivery(delivery: Delivery): void { this.db.prepare('UPDATE cc_deliveries SET status=?,response_id=?,value=? WHERE id=?').run(delivery.status, delivery.responseId ?? null, JSON.stringify(delivery), delivery.id); }
@@ -264,12 +277,12 @@ export class CollaborationStore {
   /** Reads and claims synchronously under the same write lock: there is no async resolver snapshot. */
   admitNext(): Admission | undefined {
     return this.tx(() => {
-      this.tasks.reconcile();
+      this.tasks.reconcile(); this.artifacts.sweep(); this.interactions.sweep();
       for (const conversation of this.list().reverse()) {
         const detail = this.detail(conversation.id); const busy = new Set(detail.invocations.filter(i => this.busy(i)).map(i => i.memberId)); const held = new Set<string>();
         for (const source of detail.sources) {
           const outstanding = detail.deliveries.filter(d => d.sourceId === source.id && ['pending', 'held'].includes(d.status)); if (!outstanding.length) continue;
-          const taskHold = this.tasks.admissionReason(source);
+          const taskHold = this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
           if (taskHold) { for (const d of outstanding) if (d.status === 'pending') { d.status = 'held'; d.holdReason = taskHold; d.revision++; this.saveDelivery(d); } continue; }
           // Bound recipients never silently fall back to a new default member.
           for (const d of outstanding) if (d.status === 'pending' && !this.get<Member>('cc_members', d.memberId).enabled) { d.status = 'held'; d.holdReason = '成员已禁用；需要显式恢复。'; d.revision++; this.saveDelivery(d); this.event(conversation.id, 'delivery.held', { deliveryId: d.id }); }
@@ -562,7 +575,7 @@ export class CollaborationStore {
         if (d.revision !== input.expectedDeliveryRevision || source.revision !== input.expectedSourceRevision) throw new AppError(409, '来源或投递已变化，请刷新后重新核查。', 'delivery_version_conflict');
         if (d.status !== 'held') throw new AppError(409, '仅阻塞中的投递需要重验。', 'delivery_not_held');
         const conversation = this.get<Conversation>('cc_conversations', source.conversationId); const member = this.get<Member>('cc_members', d.memberId);
-        const taskHold = this.tasks.admissionReason(source);
+        const taskHold = this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
         const available = member.enabled && conversation.memberIds.includes(d.memberId) && !taskHold;
         if (available) { d.status = 'pending'; delete d.holdReason; } else d.holdReason = taskHold || '成员未启用或不再属于该会话，仍保留原目标。';
         d.revision++; this.saveDelivery(d);
@@ -593,7 +606,7 @@ export class CollaborationStore {
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (source.revision !== c.sourceRevision || hash(source.content) !== c.sourceDigest) throw new AppError(409, '来源已变化，不能使用旧执行的输入。', 'inputs_changed');
       const response = this.response(i.responseId); const legacy = c.contextPolicyVersion === 'legacy-history-40-v1';
-      const assembly = legacy ? undefined : assembleContext({ invocation: i, taskSnapshot: c.taskSnapshot, taskPolicy: c.contextPolicyVersion === 'bounded-public-context-tasks-v2', source, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
+      const assembly = legacy ? undefined : assembleContext({ invocation: i, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3'].includes(c.contextPolicyVersion), artifactPolicy: c.toolPolicyVersion === 'managed-artifacts-v1', reviewSnapshot: c.reviewSnapshot, source, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
         history: (c.historySnapshot ?? []).map(m => ({ ...m, sequence: m.sequence! })), historySourceSnapshots: c.historySourceSnapshots,
         ...(source.parentInvocationId ? { caller: this.invocation(source.parentInvocationId) } : {}) });
       const prompt = assembly?.prompt ?? this.legacyPrompt(invocationId);
