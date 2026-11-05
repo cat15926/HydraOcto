@@ -1,0 +1,135 @@
+/** UI + real HTTP/SQLite integration, with an explicitly injected runtime fixture.
+ * No real model is invoked. Run after npm run build with Node 24.
+ */
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createApplication } from '../dist/server/index.js';
+
+const root = resolve(import.meta.dirname, '..');
+const output = resolve(process.env.UI_OUTPUT_DIR || process.env.VALIDATION_OUTPUT_DIR || join(root, '.local-data/validation/round1-ui'));
+const dataDir = await mkdtemp(join(tmpdir(), 'collaboration-ui-'));
+const puppeteerPath = process.env.PUPPETEER_PATH || '/Users/ruhonglin/lhz/clowder-ai-latest/packages/api/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js';
+const chrome = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const { default: puppeteer } = await import(pathToFileURL(puppeteerPath).href);
+const calls = [];
+let holdNext = false;
+const runtime = {
+  async probe() { return ['codex-app-server', 'claude-cli'].map(carrier => ({ carrier, installed: true, version: 'UI test fixture', available: true, append: false, authentication: 'cli', verified: 'protocol_tested', reason: '仅用于 UI 集成验收的注入运行时，不是真实模型验证。' })); },
+  async invoke(request) {
+    calls.push(request);
+    request.onEvent({ kind: 'session', detail: { nativeSessionId: `fixture-${request.invocationId}`, continuity: 'fresh', fixture: true } });
+    request.onEvent({ kind: 'accepted', detail: { nativeTurnId: `fixture-turn-${request.invocationId}`, fixture: true } });
+    if (holdNext) {
+      holdNext = false;
+      await new Promise(resolve => request.signal.addEventListener('abort', resolve, { once: true }));
+      request.onEvent({ kind: 'process_exit', detail: { confirmed: true, code: 0, fixture: true } });
+      throw new Error('UI fixture aborted');
+    }
+    if (calls.length === 1) await request.onToolCall('collaboration_request', { targets: ['claude'], content: '请复核持续协作方案，核对排队和失败回报。' }, 'ui-handoff-1');
+    request.onEvent({ kind: 'process_exit', detail: { confirmed: true, code: 0, fixture: true } });
+    return { text: request.member.id === 'claude' ? '复核完成：来源级调度应保持整组等待，失败回报保留准确调用方。\n这是 UI 集成测试的注入结果。' : '已整理持续协作方案，并通过结构化请求邀请 Claude Code 复核。\n这是 UI 集成测试的注入结果。', continuity: 'fresh' };
+  },
+};
+let app;
+let browser;
+const errors = [];
+const checks = [];
+const check = (label, condition) => { assert.ok(condition, label); checks.push(label); };
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+try {
+  await mkdir(output, { recursive: true });
+  app = await createApplication({ dataDir, port: 0, staticDir: join(root, 'dist/web'), collaborationRuntime: runtime });
+  const { url } = await app.start();
+  browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ['--no-first-run', '--disable-background-networking'] });
+  const page = await browser.newPage();
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  await page.setViewport({ width: 1512, height: 982, deviceScaleFactor: 1 });
+  await page.goto(url, { waitUntil: 'networkidle2' });
+  await page.waitForSelector('.cc-welcome-members button');
+  check('default page is continuous collaboration', await page.$('.cc-shell'));
+  check('composer has no recipient or message-type selector', !(await page.$('.cc-composer select')));
+  check('default two members are available', (await page.$$('.cc-welcome-members button')).length === 2);
+  await page.screenshot({ path: join(output, 'round1-ui-empty-desktop.png') });
+  await page.type('#cc-message-input', '请梳理持续协作方案，并请另一位成员复核。');
+  await page.click('.cc-send-button');
+  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
+  check('one natural input creates a conversation and two real HTTP response records', calls.length === 2);
+  check('second member is reached through A2A, not a fixed step list', calls[1].member.id === 'claude');
+  const bootstrap = await (await fetch(url + '/api/collaboration/bootstrap')).json();
+  const conversationId = bootstrap.conversations[0].id;
+  const detail = await (await fetch(url + '/api/conversations/' + conversationId)).json();
+  check('source/consumption identity persisted in SQLite', detail.sources.some(s => s.kind === 'a2a') && detail.consumptions.length === 2);
+  await page.click('.cc-monitor-button');
+  await page.waitForSelector('.cc-monitor.cc-open');
+  await page.click('.cc-execution summary');
+  check('native acceptance and teardown evidence visible', (await page.$$('.cc-evidence')).length >= 3);
+  await page.screenshot({ path: join(output, 'round1-ui-desktop.png') });
+  await page.type('#cc-message-input', '继续整理最终交付。');
+  await page.click('.cc-send-button');
+  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 3);
+  check('follow-up uses the same persistent conversation', (await (await fetch(url + '/api/collaboration/bootstrap')).json()).conversations.length === 1);
+  check('follow-up includes earlier member output', calls[2].prompt.includes('复核完成'));
+  await page.click('[aria-label="设置会话成员与默认成员"]');
+  await page.waitForSelector('.cc-conversation-settings');
+  await page.select('.cc-conversation-settings select', 'claude');
+  await page.click('.cc-conversation-settings .cc-button-primary');
+  await page.waitForFunction(() => !document.querySelector('dialog'));
+  check('conversation default member is editable', (await (await fetch(url + '/api/conversations/' + conversationId)).json()).conversation.defaultMemberId === 'claude');
+  await page.click('.cc-sidebar-bottom>button');
+  await page.waitForSelector('.cc-dialog');
+  await page.click('.cc-settings-item');
+  await page.$eval('.cc-settings-form input[name="name"]', element => { element.value = ''; });
+  await page.type('.cc-settings-form input[name="name"]', 'Codex 分析成员');
+  await page.click('.cc-settings-form .cc-button-primary');
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-settings-item strong')].some(element => element.textContent === 'Codex 分析成员'));
+  check('member edit saves through HTTP', (await (await fetch(url + '/api/collaboration/bootstrap')).json()).members.some(m => m.name === 'Codex 分析成员'));
+  await page.click('.cc-tabs button:nth-child(2)');
+  await page.type('.cc-settings-form input[name="name"]', '测试 API 账户');
+  await page.select('.cc-settings-form select', 'openai');
+  await page.type('.cc-settings-form input[name="apiKeyEnv"]', '_UI_TEST');
+  await page.click('.cc-settings-form .cc-button-primary');
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-settings-item strong')].some(element => element.textContent === '测试 API 账户'));
+  check('account stores a key reference, never an inline secret', (await (await fetch(url + '/api/collaboration/bootstrap')).json()).accounts.some(a => a.name === '测试 API 账户' && a.apiKeyEnv.endsWith('_UI_TEST')));
+  await page.click('[aria-label="关闭设置"]');
+  holdNext = true;
+  await page.type('#cc-message-input', '验证停止当前执行。');
+  await page.click('.cc-send-button');
+  await page.waitForSelector('.cc-run-card');
+  await page.click('.cc-run-card .cc-text-button');
+  await page.waitForFunction(() => document.querySelector('.cc-message-member .cc-status-cancelled'));
+  check('stop action waits for confirmed fixture exit', (await (await fetch(url + '/api/conversations/' + conversationId)).json()).invocations.at(-1).teardown === 'confirmed');
+  await page.click('[aria-label="收起协作动态"]');
+  await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
+  await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0);
+  await wait(100);
+  check('mobile sidebar is fully hidden until requested', await page.$eval('.cc-sidebar', element => element.getBoundingClientRect().right <= 0));
+  await page.screenshot({ path: join(output, 'round1-ui-mobile.png') });
+  check('390px page has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  check('390px composer send remains in viewport', await page.$eval('.cc-send-button', element => { const r = element.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; }));
+  await page.click('[aria-label="打开会话列表"]');
+  await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().left >= 0);
+  check('mobile conversation navigation opens', await page.$('.cc-sidebar.cc-open'));
+  await page.click('.cc-new-button');
+  await page.waitForSelector('.cc-welcome');
+  await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0);
+  await page.click('.cc-mention-button');
+  await page.click('.cc-mention-menu button');
+  check('@ member inserts naturally into composer', (await page.$eval('#cc-message-input', element => element.value)).startsWith('@'));
+  await page.click('[aria-label="打开会话列表"]');
+  await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().left >= 0);
+  await page.click('.cc-sidebar-bottom>button');
+  await page.screenshot({ path: join(output, 'round1-ui-settings-mobile.png') });
+  check('mobile settings dialog fits viewport', await page.$eval('.cc-dialog', element => { const r = element.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; }));
+  await page.click('[aria-label="关闭设置"]');
+  await page.goto(url + '/?legacy=1', { waitUntil: 'networkidle2' });
+  check('legacy page remains reachable', await page.$('.app-shell'));
+  check('no browser errors', errors.length === 0);
+  await writeFile(join(output, 'round1-ui-validation.json'), JSON.stringify({ date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()), scope: 'Browser + real HTTP + SQLite; injected runtime fixture, no live model', checks: checks.length, passed: checks, browserErrors: errors }, null, 2) + '\n');
+  console.log(JSON.stringify({ checks: checks.length, browserErrors: errors.length, output }));
+} finally {
+  await browser?.close(); await app?.close(); await rm(dataDir, { recursive: true, force: true });
+}

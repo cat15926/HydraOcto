@@ -1,0 +1,74 @@
+/** Isolated browser acceptance with held synthetic adapters; no model calls. */
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createApplication } from '../dist/server/index.js';
+const root = resolve(import.meta.dirname, '..');
+const output = resolve(process.env.VALIDATION_OUTPUT_DIR || `.local-data/validation/n4-ui/${new Date().toISOString().replace(/[:.]/g, '-')}`);
+const temp = await mkdtemp(join(tmpdir(), 'n4-ui-'));
+const { default: puppeteer } = await import(pathToFileURL(process.env.PUPPETEER_PATH || '/Users/ruhonglin/lhz/clowder-ai-latest/packages/api/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js').href);
+const checks = [], calls = [], errors = [], releases = new Map();
+const check = (name, value) => { assert.ok(value, name); checks.push(name); };
+const runtime = { probe: async () => [], async invoke(r) {
+  calls.push(r); r.onEvent({ kind: 'accepted', detail: {} });
+  const number = calls.length;
+  if (number === 3) {
+    const { tasks } = await r.onToolCall('task_list', {}, 'read'); const t = tasks[0];
+    await r.onToolCall('task_update', { taskId: t.id, expectedRevision: t.revision, expectedOwnerRevision: t.ownerRevision, status: 'done', reason: 'Explicit synthetic completion' }, 'done');
+  }
+  if (number > 1) await new Promise(resolve => releases.set(number, resolve));
+  r.onEvent({ kind: 'process_exit', detail: { confirmed: true } }); return { text: '合成执行已退出。', continuity: 'fresh' };
+} };
+let app, browser;
+try {
+  await mkdir(output, { recursive: true });
+  app = await createApplication({ port: 0, dataDir: temp, staticDir: join(root, 'dist/web'), collaborationRuntime: runtime }); const { url } = await app.start();
+  browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
+  const page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message)); await page.setViewport({ width: 1512, height: 982 });
+  const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label).click(), label, scope); };
+  await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
+  check('natural composer has no required task or routing options', !(await page.$('.cc-composer select')));
+  await page.type('#cc-message-input', '@codex 一条普通聊天'); await page.click('.cc-send-button'); await page.waitForSelector('.cc-status-succeeded'); await page.click('.cc-monitor-button');
+  check('ordinary chat creates no mandatory task', (await page.$$('.cc-task-card')).length === 0);
+  await click('新建任务'); await page.type('.cc-task-dialog input[name=title]', 'N4 正式交接验收'); await page.type('.cc-task-dialog textarea[name=description]', '这是一项有独立负责人和执行证据的合成任务。');
+  await page.select('.cc-task-dialog select[name=ownerMemberId]', 'codex'); await click('保存', '.cc-task-dialog');
+  await page.waitForFunction(() => document.querySelector('.cc-task-card')?.textContent.includes('准确任务执行进行中'));
+  await page.click('.cc-task-card > summary');
+  const cid = app.collaborationStore.list()[0].id, taskId = app.collaborationStore.tasks.list(cid)[0].id;
+  check('task card distinguishes owner and exact executor', (await page.$eval('.cc-task-card', e => e.textContent)).includes('当前执行者') && !!app.collaborationStore.tasks.getTask(taskId).executionRef);
+  const transfer = async (stop) => { await click('正式转交'); await page.select('.cc-task-dialog select[name=targetMemberId]', 'claude'); await page.type('.cc-task-dialog textarea[name=reason]', '请 Claude 完成后续核验'); if (stop) await page.click('[name=stopCurrent]'); await click('保存', '.cc-task-dialog'); await page.waitForFunction(() => document.querySelector('.cc-task-card')?.textContent.includes('拟接任成员')); };
+  await transfer(false);
+  check('handoff is visible while original owner remains', app.collaborationStore.tasks.getTask(taskId).ownerMemberId === 'codex' && calls.length === 2);
+  await page.screenshot({ path: join(output, 'handoff-waiting-desktop.png') });
+  await click('撤销交接'); await click('确认撤销交接', '.cc-task-dialog'); await page.waitForFunction(() => !document.querySelector('.cc-task-card')?.textContent.includes('拟接任成员'));
+  check('cancel handoff preserves old owner and withdraws the exact source', app.collaborationStore.tasks.handoffs(cid)[0].state === 'cancelled' && app.collaborationStore.tasks.getTask(taskId).ownerMemberId === 'codex');
+  await transfer(true);
+  check('stop request aborts old adapter without premature ownership transfer', calls[1].signal.aborted && app.collaborationStore.tasks.getTask(taskId).ownerMemberId === 'codex');
+  releases.get(2)();
+  await page.waitForFunction(() => document.querySelector('.cc-task-card')?.textContent.includes('已完成') && document.querySelector('.cc-task-card')?.textContent.includes('原执行尚未释放'));
+  check('explicit target completion does not imply adapter exit', app.collaborationStore.tasks.getTask(taskId).status === 'done' && !!app.collaborationStore.tasks.getTask(taskId).executionRef);
+  check('owner changes exactly once and new execution belongs to Claude', app.collaborationStore.tasks.getTask(taskId).ownerRevision === 2 && calls[2].member.id === 'claude');
+  await page.screenshot({ path: join(output, 'completed-before-exit-desktop.png') }); releases.get(3)();
+  await page.waitForFunction(() => document.querySelector('.cc-task-card')?.textContent.includes('当前无执行绑定'));
+  await page.reload({ waitUntil: 'networkidle2' }); await page.click('.cc-monitor-button'); await page.waitForSelector('.cc-task-card');
+  check('task state and handoff history survive reload', (await page.$eval('.cc-task-card', e => e.textContent)).includes('已完成') && (await page.$eval('.cc-task-card', e => e.textContent)).includes('交接记录 · 2'));
+  await click('新建任务'); await page.type('.cc-task-dialog input[name=title]', '未分配任务与版本冲突'); await click('保存', '.cc-task-dialog');
+  await page.waitForFunction(() => document.querySelectorAll('.cc-task-card').length === 2); const free = app.collaborationStore.tasks.list(cid)[1];
+  check('unassigned task creates no extra execution', free.ownerMemberId === null && calls.length === 3);
+  await page.click(`.cc-task-card[data-task-id="${free.id}"] > summary`); await click('更新状态', `.cc-task-card[data-task-id="${free.id}"]`); await page.select('.cc-task-dialog select[name=status]', 'done');
+  app.collaborationStore.tasks.update(free.id, { requestId: crypto.randomUUID(), expectedRevision: free.revision, expectedOwnerRevision: free.ownerRevision, status: 'blocked', reason: 'Concurrent edit' });
+  await click('保存', '.cc-task-dialog'); await page.waitForSelector('.cc-task-error');
+  check('concurrent task revision produces actionable conflict', (await page.$eval('.cc-task-error', e => e.textContent)).includes('版本已变化'));
+  await click('读取最新版本', '.cc-task-dialog'); await click('保存', '.cc-task-dialog'); await page.waitForFunction(() => !document.querySelector('.cc-task-dialog'));
+  check('explicit refresh and retry preserves newest task revision', app.collaborationStore.tasks.getTask(free.id).status === 'done');
+  await page.setViewport({ width: 390, height: 844 }); await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0);
+  check('mobile tasks do not overflow horizontally', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  await page.screenshot({ path: join(output, 'tasks-mobile.png') });
+  check('task modal fits mobile viewport', await (async () => { await click('新建任务'); return page.$eval('.cc-task-dialog', e => e.getBoundingClientRect().left >= 0 && e.getBoundingClientRect().right <= innerWidth); })());
+  await page.screenshot({ path: join(output, 'task-create-mobile.png') });
+  check('no browser runtime errors', errors.length === 0); check('exactly three synthetic invocations, no implicit callback', calls.length === 3);
+  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, testedAt: new Date().toISOString(), version: '0.5.0-n4', checks, runtimeInvocations: calls.length, runtime: 'synthetic fixture', errors }, null, 2) + '\n');
+  console.log(JSON.stringify({ passed: true, checks: checks.length, output }));
+} finally { for (const release of releases.values()) release(); await browser?.close(); await app?.close(); await rm(temp, { recursive: true, force: true }); }

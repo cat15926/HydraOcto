@@ -1,0 +1,104 @@
+<div id="clowder-source-trace">
+  <style>
+    #clowder-source-trace .trace-heading { padding-inline-end: 92px; }
+    #clowder-source-trace .trace-operation { overflow-wrap: anywhere; }
+    #clowder-source-trace pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    #clowder-source-trace table { table-layout: fixed; width: 100%; }
+    #clowder-source-trace td, #clowder-source-trace th { overflow-wrap: anywhere; }
+    #clowder-source-trace .trace-field { width: 34%; }
+    #clowder-source-trace details { margin-block: 12px; }
+  </style>
+  <h3 class="trace-heading">Clowder 源码实跑：逐步查看数据变化</h3>
+  <div class="viz-controls">
+    <label class="form-label">场景 <select class="form-select" data-role="scenario"></select></label>
+    <label class="form-label">步骤 <select class="form-select" data-role="step"></select></label>
+  </div>
+  <div class="viz-row">
+    <button type="button" class="btn" data-role="previous">上一步</button>
+    <button type="button" class="btn" data-role="next">下一步</button>
+    <span class="text-small tabular-nums" data-role="position"></span>
+  </div>
+  <p class="trace-operation"><code data-role="call"></code></p>
+  <div aria-live="polite"><span data-role="outcome"></span></div>
+  <table class="table table-sm">
+    <thead><tr><th class="trace-field">变更字段</th><th>调用前</th><th>调用后</th></tr></thead>
+    <tbody data-role="changes"></tbody>
+  </table>
+  <details><summary>输入与真实返回值</summary><pre><code data-role="raw"></code></pre></details>
+  <details><summary>完整前后快照</summary><pre><code data-role="snapshots"></code></pre></details>
+  <details><summary>验证范围与已通过的检查</summary><p data-role="scope"></p><ul data-role="checks"></ul></details>
+  <span class="text-small" data-role="baseline"></span>
+  <script type="application/json" data-role="data">__TRACE_DATA__</script>
+  <script>
+  (() => {
+    const root = document.getElementById('clowder-source-trace');
+    const q = name => root.querySelector(`[data-role="${name}"]`);
+    const data = JSON.parse(q('data').textContent);
+    let scenarioIndex = 0, stepIndex = 0;
+    const missing = Symbol('missing');
+    function values(value, path = '', out = {}) {
+      if (value && typeof value === 'object' && Object.keys(value).length && !('$js' in value)) {
+        Object.entries(value).forEach(([key, v]) => values(v, Array.isArray(value) ? `${path}[${key}]` : path ? path + '.' + key : key, out));
+      } else out[path || '(整体)'] = value;
+      return out;
+    }
+    const json = v => v === missing ? '（未设置）' : JSON.stringify(v, null, 2);
+    const summary = result => {
+      if (result === null || typeof result !== 'object') return json(result);
+      const fields = ['kind', 'outcome', 'reason', 'status', 'ok', 'accepted', 'applied', 'error'];
+      const selected = Object.fromEntries(fields.filter(k => k in result).map(k => [k, result[k]]));
+      return Object.keys(selected).length ? JSON.stringify(selected) : '返回对象已记录';
+    };
+    function remember() {
+      if (window.openai?.setWidgetState) window.openai.setWidgetState({
+        modelContent: { scenario: data.scenarios[scenarioIndex].id, step: stepIndex + 1 },
+        privateContent: { scenarioIndex, stepIndex }
+      }).catch(() => {});
+    }
+    function restore(state) {
+      const saved = state?.privateContent;
+      if (Number.isInteger(saved?.scenarioIndex) && data.scenarios[saved.scenarioIndex]) scenarioIndex = saved.scenarioIndex;
+      stepIndex = Number.isInteger(saved?.stepIndex) && data.scenarios[scenarioIndex].steps[saved.stepIndex] ? saved.stepIndex : 0;
+      render(true);
+    }
+    function render(rebuildSteps = false) {
+      const scenario = data.scenarios[scenarioIndex], step = scenario.steps[stepIndex];
+      q('scenario').value = String(scenarioIndex);
+      if (rebuildSteps) q('step').replaceChildren(...scenario.steps.map((s, i) => new Option(`${i + 1}. ${s.label}`, String(i))));
+      q('step').value = String(stepIndex);
+      q('position').textContent = `${stepIndex + 1} / ${scenario.steps.length}`;
+      q('previous').disabled = stepIndex === 0;
+      q('next').disabled = stepIndex === scenario.steps.length - 1;
+      q('call').textContent = step.call;
+      q('outcome').textContent = summary(step.result);
+      const before = values(step.before), after = values(step.after);
+      const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+      const changed = keys.filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]) || !(k in before) || !(k in after));
+      const rows = changed.map(key => {
+        const row = document.createElement('tr');
+        for (const text of [key, json(key in before ? before[key] : missing), json(key in after ? after[key] : missing)]) {
+          const cell = document.createElement('td'); cell.textContent = text; row.append(cell);
+        }
+        return row;
+      });
+      if (!rows.length) {
+        const row = document.createElement('tr'), cell = document.createElement('td');
+        cell.colSpan = 3; cell.textContent = '状态未变化'; row.append(cell); rows.push(row);
+      }
+      q('changes').replaceChildren(...rows);
+      q('raw').textContent = JSON.stringify({ input: step.input, result: step.result }, null, 2);
+      q('snapshots').textContent = JSON.stringify({ before: step.before, after: step.after }, null, 2);
+      q('scope').textContent = scenario.scope;
+      q('checks').replaceChildren(...step.checks.map(text => { const li = document.createElement('li'); li.textContent = text; return li; }));
+    }
+    q('scenario').replaceChildren(...data.scenarios.map((s, i) => new Option(s.title, String(i))));
+    q('scenario').addEventListener('change', () => { scenarioIndex = Number(q('scenario').value); stepIndex = 0; render(true); remember(); });
+    q('step').addEventListener('change', () => { stepIndex = Number(q('step').value); render(); remember(); });
+    q('previous').addEventListener('click', () => { stepIndex--; render(); remember(); });
+    q('next').addEventListener('click', () => { stepIndex++; render(); remember(); });
+    q('baseline').textContent = `实跑 ${data.totals.scenarios} 场景 / ${data.totals.steps} 步 · ${data.baseline.commit.slice(0, 7)} · 合成输入，未接真实模型`;
+    window.addEventListener('openai:set_globals', event => { if (event.detail?.globals?.widgetState) restore(event.detail.globals.widgetState); });
+    restore(window.openai?.widgetState);
+  })();
+  </script>
+</div>
