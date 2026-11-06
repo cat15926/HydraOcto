@@ -24,7 +24,7 @@ export interface RoutingResolution {
 /** Syntax only: policy filtering and busy-member scheduling are separate concerns. */
 export function parseMentions(content: string, conversation: Conversation, members: Member[], lineStart = false): string[] {
   const participants = members.filter(member => conversation.memberIds.includes(member.id));
-  const aliases = participants.flatMap(member => [...new Set([member.id, member.name])].filter(Boolean).map(alias => ({ alias, targets: [member.id] })));
+  const aliases = participants.flatMap(member => [...new Set([member.id, member.name, ...(member.aliases ?? [])])].filter(Boolean).map(alias => ({ alias, targets: [member.id] })));
   for (const alias of ['all', '全体', 'thread', '本帖']) aliases.push({ alias, targets: conversation.memberIds.filter(id => participants.some(member => member.id === id)) });
   aliases.sort((a, b) => b.alias.length - a.alias.length);
   const clean = content.replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, '').replace(/`[^`\n]*`/g, '');

@@ -1,3 +1,4 @@
+import { verifyWorkspace } from './workbench.js';
 import { ARTIFACT_TOOL_SPECS } from './artifact-tools.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
@@ -61,6 +62,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
+    if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);
     const path = args.path ?? '.';
     if (isAbsolute(path)) throw new Error('Only workspace-relative paths are allowed.');
     const root = await realpath(request.cwd), actual = await realpath(resolve(root, path));

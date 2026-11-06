@@ -5,7 +5,7 @@ import { canonical } from '../store.js';
 export const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 export function sessionFingerprint(contract: ExecutionContractSnapshot, identity: NativeSessionIdentity): string {
   const m = contract.memberSnapshot, a = contract.accountMetadataSnapshot;
-  return digest({ carrier: m.carrier, account: a, model: m.model, instructions: m.instructions,
+  return digest({ carrier: m.carrier, account: a, model: m.model, effort: m.effort, instructions: m.instructions,
     workspace: contract.workspaceScope, tools: contract.toolPolicyVersion,
     adapter: contract.adapterCapabilityVersion, runtime: identity.fingerprint });
 }

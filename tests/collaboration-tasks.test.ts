@@ -227,7 +227,7 @@ test('N4: schema 3 upgrade preserves old contracts and does not fabricate tasks;
     h.owner.db.prepare('UPDATE cc_contracts SET value=? WHERE id=?').run(JSON.stringify(c), c.id);
     h.owner.db.exec('DROP TABLE cc_task_handoffs; DROP TABLE cc_ordinary_tasks; UPDATE cc_schema SET version=3');
     const store = new CollaborationStore(h.owner); assert.deepEqual(store.contract(i.id), c); assert.deepEqual(store.tasks.list(h.c.id), []);
-    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 6);
+    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 7);
     store.startInvocation(i.id); assert.throws(() => store.tasks.tool(i.id, 'task_list', {}, 'old-policy'));
   } finally { h.owner.close(); }
 });

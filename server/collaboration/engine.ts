@@ -1,4 +1,5 @@
 import type { AppendDispatcher, AppendObservation, InputHandoff, NativeSessionIdentity, CollaborationInvocation, CollaborationRuntime, RuntimeEvent, RecoveryRequest, RuntimeInspection } from '../../shared/collaboration.js';
+import { verifyWorkspace } from './workbench.js';
 import { AppError } from '../store.js';
 import { CollaborationStore } from './store.js';
 
@@ -57,6 +58,7 @@ export class CollaborationEngine {
     try {
       this.store.prepareInput(invocation.id);
       const frozen = this.store.contract(invocation.id);
+      if (frozen.workspaceGrant) verifyWorkspace(frozen.workspaceGrant);
       let identity: NativeSessionIdentity;
       try { identity = frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
         ? await this.runtime.sessionIdentity({ member: frozen.memberSnapshot, account: frozen.accountMetadataSnapshot, cwd: frozen.workspaceScope || this.options.workspace })
@@ -79,7 +81,7 @@ export class CollaborationEngine {
       const prompt = this.store.prompt(i.id);
       const input = this.store.input(i.id)!; const contract = this.store.contract(i.id);
       onEvent({ kind: 'exposed', detail: { source: 'platform_prompt', characters: prompt.length, manifestId: input.manifest.id, renderDigest: input.manifest.renderDigest, providerAcceptance: false } });
-      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, signal: controller.signal, onEvent,
+      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, signal: controller.signal, onEvent,
         onAppendReady: dispatcher => { if (contract.toolPolicyVersion === 'cooperation-v2' && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
         onInputRead: observation => {
           const h = this.store.cooperation.handoffs(i.conversationId).find(h => h.invocationId === i.id && h.nativeDeliveryId === observation.nativeDeliveryId);

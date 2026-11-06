@@ -26,10 +26,14 @@ const runtime = {
 let app, browser;
 try {
   await mkdir(output, { recursive: true });
-  app = await createApplication({ port: 0, dataDir: temp, staticDir: join(root, 'dist/web'), collaborationRuntime: runtime });
+  app = await createApplication({ port: 0, dataDir: temp, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || join(root, 'dist/web')), collaborationRuntime: runtime });
   const { url } = await app.start();
   const boot = await (await fetch(`${url}/api/collaboration/bootstrap`)).json();
-  const post = async (path, body) => { const r = await fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': boot.csrfToken }, body: JSON.stringify(body) }); assert.ok(r.ok); return r.json(); };
+  const post = async (path, body) => {
+    if (path === '/api/members') {
+      body = { ...body, expectedRevision: app.collaborationStore.members().find(m => m.id === body.id)?.revision ?? 0, requestId: crypto.randomUUID() };
+      if (body.model) { const { account, ticket } = app.collaborationStore.workbench.beginProbe(body.accountId); app.collaborationStore.workbench.finishProbe(account, ticket, { accountId: account.id, accountRevision: account.revision ?? 1, checkedAt: new Date().toISOString(), installed: true, configured: true, connection: 'reachable', identity: { state: 'unknown' }, models: [{ id: body.model, name: body.model, efforts: [] }], catalogSource: 'synthetic-ui-fixture', quota: { state: 'unknown' } }); }
+    } const r = await fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': boot.csrfToken }, body: JSON.stringify(body) }); assert.ok(r.ok); return r.json(); };
   const member = { ...boot.members.find(m => m.id === 'codex'), model: 'fixture-model' }; await post('/api/members', member);
   browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
   const page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message)); await page.setViewport({ width: 1512, height: 982 });

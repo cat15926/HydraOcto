@@ -1,3 +1,5 @@
+import { verifyWorkspace } from './workbench.js';
+import { discoverAccount } from './account-discovery.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { CollaborationRuntime, RuntimeCapability, RuntimeRequest } from '../../shared/collaboration.js';
@@ -18,6 +20,7 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
   const codex = options.codexPath ?? process.env.COLLAB_CODEX_PATH ?? 'codex';
   const claude = options.claudePath ?? process.env.COLLAB_CLAUDE_PATH ?? 'claude';
   return withRuntimeInspection({
+    discoverAccount: account => discoverAccount(account, { codex, claude }),
     sessionIdentity: input => describeNativeSession(input, input.member.carrier === 'codex-app-server' ? codex : claude),
     async invoke(input: RuntimeRequest) {
       const timeout = AbortSignal.timeout(options.timeoutMs ?? 180_000);
@@ -33,6 +36,7 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
       const expectedProvider = ({ 'codex-app-server': 'codex', 'claude-cli': 'claude', 'openai-api': 'openai', 'anthropic-api': 'anthropic' } as const)[request.member.carrier];
       if (request.account.provider !== expectedProvider) throw new Error('Account provider does not match runtime.');
       request.signal.throwIfAborted();
+      if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);
       if (request.sessionPlan?.identity?.supported) {
         const identity = await describeNativeSession(request, request.member.carrier === 'codex-app-server' ? codex : claude);
         if (!identity.supported || identity.fingerprint !== request.sessionPlan.identity.fingerprint) throw new Error('原生身份在计划与发送之间发生变化；本次没有发送输入，请核对配置。');

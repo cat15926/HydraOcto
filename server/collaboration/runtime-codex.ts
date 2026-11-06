@@ -173,7 +173,7 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
     const continuity = resumeId ? 'resumed' : 'fresh';
     request.onEvent({ kind: 'session', detail: { nativeSessionId, continuity, evidence: resumeId ? 'thread/resume response + saved turn anchor' : 'thread/start response', previousAnchor: resumeId ? request.sessionPlan?.previousAnchor : undefined, ...(api ? { authentication: 'api', modelProvider: session.modelProvider, model: session.model } : { authentication: 'cli' }) } });
     request.onEvent({ kind: 'exposed', detail: { nativeSessionId, clientUserMessageId: request.invocationId } });
-    const started = await proc.call('turn/start', { threadId: nativeSessionId, clientUserMessageId: request.invocationId, input: [{ type: 'text', text: request.prompt, text_elements: [] }] });
+    const started = await proc.call('turn/start', { threadId: nativeSessionId, clientUserMessageId: request.invocationId, ...(request.member.effort ? { effort: request.member.effort } : {}), input: [{ type: 'text', text: request.prompt, text_elements: [] }] });
     if (typeof started.turn?.id !== 'string') throw new Error('Missing native turn identity.');
     if (nativeTurnId && started.turn.id !== nativeTurnId) throw new Error('Native turn identity mismatch.');
     nativeTurnId = started.turn.id;

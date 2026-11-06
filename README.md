@@ -2,7 +2,9 @@
 
 本地多 Agent 持续协作平台。用户在同一会话中直接提问、追问或 @成员，成员结合自己的职责，通过持久投递和工具调用请求其他成员协助。平台保存来源、执行、输入与结果之间的关系，让协作过程可以追踪和核查。
 
-当前产品为 **0.7.0，已交付 N0–N6 的当前范围**：持续协作内核、Codex/Claude Code 接入、运行契约与输入冻结、执行核查、原生会话延续、可选任务交接、版本化产物审批、固定版本评审，以及来源排序、多来源消费、精确 Codex 活动追加与多人征询。N6 已通过 GPT-6.1 Terra 独立复验并升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
+当前产品为 **0.8.0，已交付 N0–N7 的当前范围**：持续协作内核、Codex/Claude Code 接入、运行契约与输入冻结、执行核查、原生会话延续、可选任务交接、版本化产物审批、固定版本评审，以及来源排序、多来源消费、精确 Codex 活动追加与多人征询，以及会话整理、文本附件、项目授权和成员账户管理。N7 已通过 GPT-6.1 Terra 独立验收及补验，已升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
+
+N7 已验证 223 项自动化、97 项浏览器断言和双 CLI API 纯附件实机链路；官方订阅模式推理仍未验证，具体限制见实施进度。
 
 本项目根据独立设计实现。Clowder AI 用于研究业务行为，没有搬迁其源码、Prompt、数据库或品牌素材。
 
@@ -25,6 +27,9 @@
 ```mermaid
 flowchart LR
   UI["React 工作台"] -->|"HTTP 命令与查询"| HTTP["Node.js HTTP 层"]
+  HTTP --> WORKBENCH["会话整理 / 附件与引用 / 工作区授权 / 配置版本"]
+  WORKBENCH <--> DB
+  WORKBENCH --> DISCOVERY["只读账户与模型目录探测"]
   HTTP --> CORE["协作内核<br/>Store 事务与 Engine 调度"]
   CORE --> ROUTE["自然路由"]
   CORE <--> COOP["来源排位 / 输入归并 / 精确追加 / 多人征询"]
@@ -58,6 +63,7 @@ flowchart LR
 | 持久协作内核 | [store.ts](server/collaboration/store.ts) | 幂等命令、来源领取、责任关联、冻结输入、终态及恢复事务 |
 | 任务责任 | [tasks.ts](server/collaboration/tasks.ts)、[TaskPanel.tsx](web/TaskPanel.tsx) | 任务状态、准确执行授权、等待释放的交接与责任投影 |
 | 产物与交互 | [artifacts.ts](server/collaboration/artifacts.ts)、[artifact-files.ts](server/collaboration/artifact-files.ts)、[interactions.ts](server/collaboration/interactions.ts)、[ArtifactPanel.tsx](web/ArtifactPanel.tsx) | 精确审批、不可变文件、评审失效、原作业核查与有界提问 |
+| N7 工作台与配置 | [workbench.ts](server/collaboration/workbench.ts)、[account-discovery.ts](server/collaboration/account-discovery.ts)、[WorkbenchPanel.tsx](web/WorkbenchPanel.tsx) | 附件正文和来源摘要、授权目录身份、成员账户 CRUD、默认配置 CAS、目录/身份/额度分离 |
 | N6 协作分支 | [cooperation.ts](server/collaboration/cooperation.ts)、[CooperationPanel.tsx](web/CooperationPanel.tsx) | 来源排序、抑制/退避、准确多来源消费、追加交付状态和多人征询收集 |
 | 调度执行 | [engine.ts](server/collaboration/engine.ts) | 在数据库事务外调用承载，处理工具回调、取消与核查结果 |
 | 原生连续性 | [continuity.ts](server/collaboration/continuity.ts)、[runtime-session.ts](server/collaboration/runtime-session.ts) | 配置指纹、CLI 身份、准确历史证明；持久绑定由协作 Store 管理 |
@@ -76,6 +82,14 @@ SQLite 短事务保证命令幂等、来源领取、回复关联和合格失败�
 6. 原生回执、工具调用、使用量和退出证据陆续落库，结果保存到原回复。页面通过 SSE 获取变化，断线后按事件游标补取。
 
 新执行工具为 `workspace_list`、`workspace_read`、`collaboration_request`，`task_list`、`task_create`、`task_update`、`task_handoff`，以及 `artifact_list`、`artifact_read`、`artifact_propose`、`review_request`、`review_submit`、`user_question`；N6 增加 `conversation_pending`、`conversation_read`、`multi_mention`。旧冻结契约保留原工具集合，权限变化会使旧原生会话重建。工作区访问限制在配置目录内，读取工具只读，拒绝越界及软链接逃逸；任意 Shell 和工作区写入不开放。产物审批只允许将固定版本保存到平台数据目录。
+
+## N7 的日常工作台与配置
+
+会话标题下的“会话与项目”提供改名、置顶、归档恢复以及项目只读授权。授权先预览规范路径，再显式应用；有未释放执行或待投递来源时不能切换目录。执行和文件读取都会核对目录身份。附件通过输入栏上传，当前支持每个 32 KiB、单条合计 48 KiB 的 UTF-8 文本；纯附件可发送，正文进入实际输入快照，历史追问仍可引用。图片/PDF 暂不支持。引用回复绑定稳定消息 ID，引用和附件内的 @ 不改变本条消息路由。
+
+成员可以设置稳定别名，账户和模型分别选择跟随运行时默认或保留成员例外。默认设置先展示影响范围，再按版本应用；在途执行保留冻结配置。删除成员保留历史身份，仍被有效配置引用的账户不能删除。新模型和推理强度需从所选账户实际目录选择，目录未返回的能力不虚构支持。
+
+“账户与登录”分别显示配置、连接、官方身份、最近调用与额度。探测不会启动模型。API 密钥沿用环境变量引用；官方登录由用户在终端执行 codex login 或 claude auth login 后刷新，平台不提取订阅 token。不同 CLI 账户名称仍共享本机单个官方身份，多托管身份隔离不属于本轮。
 
 ## N6 的连续输入与多人征询
 
@@ -135,7 +149,7 @@ sequenceDiagram
 
 - 双 CLI 支持有证据的原生续接；模型未固定、身份不可核验或旧契约执行保守新建。API 直连使用平台公开历史。N6 支持经过本机协议发现的 Codex 精确当前轮追加；Claude/API 直连仍排队。accepted、read 与任务完成独立，未知不自动重发，追加核查目前限原活动句柄。
 - 执行核查使用本服务进程保留的准确观察。服务重启、缓存丢失或承载无法查询时，明确保留未知，不自动重发。
-- 普通任务支持同会话交接；跨会话委托、Action 专用责任与外部条件自动唤醒尚未实现。N5 的本地受管产物写入已实现，任意外部作业恢复未实现；N6 多人征询收齐后发一次普通汇总，超时不发部分汇总、重启停止收集；附件、私聊、长期记忆和其他承载追加属于后续范围。
+- 普通任务支持同会话交接；跨会话委托、Action 专用责任与外部条件自动唤醒尚未实现。N5 的本地受管产物写入已实现，任意外部作业恢复未实现；N6 多人征询收齐后发一次普通汇总，超时不发部分汇总、重启停止收集；N7 已支持文本附件，图片/PDF、私聊、长期记忆和其他承载追加属于后续范围。
 - `/?legacy=1` 保留早期顺序任务原型。它与持续协作共用服务连接和租约，但使用独立数据表、API 与业务状态，其审批和产物能力不计入持续协作入口。
 
 ## 快速启动

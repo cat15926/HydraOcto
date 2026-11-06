@@ -31,6 +31,10 @@ const check = (name, pass) => { assert.ok(pass, name); checks.push(name); };
 let app, browser, page;
 let url, boot;
 const post = async (path, body) => {
+    if (path === '/api/members') {
+      body = { ...body, expectedRevision: app.collaborationStore.members().find(m => m.id === body.id)?.revision ?? 0, requestId: crypto.randomUUID() };
+      if (body.model) { const { account, ticket } = app.collaborationStore.workbench.beginProbe(body.accountId); app.collaborationStore.workbench.finishProbe(account, ticket, { accountId: account.id, accountRevision: account.revision ?? 1, checkedAt: new Date().toISOString(), installed: true, configured: true, connection: 'reachable', identity: { state: 'unknown' }, models: [{ id: body.model, name: body.model, efforts: [] }], catalogSource: 'synthetic-ui-fixture', quota: { state: 'unknown' } }); }
+    }
   const response = await fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': boot.csrfToken }, body: JSON.stringify(body) });
   const result = await response.json(); assert.ok(response.ok, `${path}: ${response.status} ${result.error || ''}`); return result;
 };
@@ -38,7 +42,7 @@ const read = async path => (await fetch(url + path)).json();
 const errors = [];
 try {
   await mkdir(output, { recursive: true });
-  app = await createApplication({ dataDir, port: 0, staticDir: join(root, 'dist/web'), collaborationRuntime: runtime });
+  app = await createApplication({ dataDir, port: 0, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || join(root, 'dist/web')), collaborationRuntime: runtime });
   ({ url } = await app.start()); boot = await read('/api/collaboration/bootstrap');
   browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
   page = await browser.newPage(); page.on('pageerror', error => errors.push(error.message));

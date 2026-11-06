@@ -51,6 +51,8 @@ function memberInput(body: unknown): Member {
   const b = object(body);
   if (!carriers.includes(b.carrier as Carrier) || typeof b.enabled !== 'boolean') throw new AppError(400, '成员运行时或启用状态无效。');
   return { id: id(b.id), name: field(b.name, '成员名称', 80), instructions: field(b.instructions, '成员说明', 10_000, true), carrier: b.carrier as Carrier, accountId: id(b.accountId), enabled: b.enabled,
+    ...(b.aliases !== undefined ? { aliases: Array.isArray(b.aliases) ? b.aliases.map(a => field(a, '别名', 40)) : (() => { throw new AppError(400, '别名需要数组。'); })() } : {}),
+    ...(b.accountBinding !== undefined ? { accountBinding: b.accountBinding as Member['accountBinding'] } : {}), ...(b.modelBinding !== undefined ? { modelBinding: b.modelBinding as Member['modelBinding'] } : {}), ...(b.effort ? { effort: field(b.effort, '推理强度', 30) } : {}),
     ...(b.model !== undefined && b.model !== '' ? { model: field(b.model, '模型', 200) } : {}) };
 }
 interface HttpDependencies {
@@ -69,7 +71,7 @@ export function collaborationHttp(deps: HttpDependencies) {
     return probeCache.promise;
   };
   const publicAccount = (account: CollaborationAccount, runtimes: Awaited<ReturnType<CollaborationRuntime['probe']>> = []) => ({ ...account,
-    configured: account.auth === 'api' ? Boolean(account.apiKeyEnv && process.env[account.apiKeyEnv]?.trim()) : runtimes.some(runtime => runtime.carrier === (account.provider === 'codex' ? 'codex-app-server' : 'claude-cli') && runtime.available),
+    configured: account.auth === 'api' ? Boolean(account.apiKeyEnv && process.env[account.apiKeyEnv]?.trim()) : true,
   });
   return {
     close() { for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
@@ -79,7 +81,7 @@ export function collaborationHttp(deps: HttpDependencies) {
       const { store, engine, json } = deps;
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.7.0-n6', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), accounts: store.accounts().map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.8.0-n7', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
@@ -117,8 +119,29 @@ export function collaborationHttp(deps: HttpDependencies) {
         } else json(response, 200, result);
         return true;
       }
+      const attachment = /^\/api\/conversations\/([^/]+)\/attachments\/([^/]+)$/.exec(path);
+      if (request.method === 'GET' && attachment) { const result = store.workbench.attachmentContent(attachment[2]!); if (result.attachment.conversationId !== attachment[1]) throw new AppError(404, '附件不属于此会话。'); json(response, 200, result); return true; }
+      if (request.method === 'GET' && path === '/api/collaboration/event-page') { const after = Number(url.searchParams.get('after') ?? '0'); if (!Number.isSafeInteger(after) || after < 0) throw new AppError(400, '事件游标无效。'); const events = store.events(after, undefined, 1000); json(response, 200, { events, nextCursor: events.at(-1)?.id ?? after, hasMore: !!events.length && events.at(-1)!.id < store.cursor() }); return true; }
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const body = object(await deps.readJson(request));
+        const workbenchCommand = /^\/api\/conversations\/([^/]+)\/(organize|attachments|workspace-preview|workspace-apply)$/.exec(path);
+        if (workbenchCommand) {
+          const cid = workbenchCommand[1]!, action = workbenchCommand[2];
+          const result = action === 'organize' ? store.workbench.organize(cid, body) : action === 'attachments' ? store.workbench.upload(cid, body) : action === 'workspace-preview' ? store.workbench.previewWorkspace(cid, body) : store.workbench.applyPreview(body, cid);
+          json(response, action === 'attachments' ? 201 : 200, result); return true;
+        }
+        if (path === '/api/collaboration/default-preview') { json(response, 200, store.workbench.previewDefault(body)); return true; }
+        if (path === '/api/collaboration/default-apply') { json(response, 200, store.workbench.applyPreview(body)); return true; }
+        const deletion = /^\/api\/(members|accounts)\/([^/]+)\/delete$/.exec(path);
+        if (deletion) { json(response, 200, store.workbench.remove(deletion[1] as 'members' | 'accounts', deletion[2]!, body)); engine.kick(); return true; }
+        const accountProbe = /^\/api\/accounts\/([^/]+)\/probe$/.exec(path);
+        if (accountProbe) {
+          if (Object.keys(body).length) throw new AppError(400, '探测身份和证据由服务端取得。');
+          if (!deps.runtime.discoverAccount) throw new AppError(503, '当前运行时不支持账户探测。');
+          const { account, ticket } = store.workbench.beginProbe(accountProbe[1]!);
+          const result = await deps.runtime.discoverAccount(account);
+          json(response, 200, store.workbench.finishProbe(account, ticket, result)); probeCache = undefined; return true;
+        }
         const queueCommand = /^\/api\/conversations\/([^/]+)\/(queue-order|cancel-all|mention-groups)$/.exec(path);
         const sourceCommand = /^\/api\/sources\/([^/]+)\/(withdraw|priority)$/.exec(path);
         const groupCancel = /^\/api\/mention-groups\/([^/]+)\/cancel$/.exec(path);
@@ -179,7 +202,7 @@ export function collaborationHttp(deps: HttpDependencies) {
         if (send) {
           if (body.deliveryMode !== undefined && !['next_turn', 'continue_current'].includes(String(body.deliveryMode))) throw new AppError(400, '输入投递模式无效。');
           if (body.resolveWhenIdle !== undefined && typeof body.resolveWhenIdle !== 'boolean') throw new AppError(400, '空闲解析必须为布尔值。');
-          const result = store.send(send[1]!, { content: field(body.content, '消息', 20_000), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
+          const result = store.send(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
           engine.kick(); json(response, result.replayed ? 200 : 201, result); return true;
         }
         const preview = /^\/api\/conversations\/([^/]+)\/route-preview$/.exec(path);
@@ -197,8 +220,8 @@ export function collaborationHttp(deps: HttpDependencies) {
           if (body.routingMode !== undefined && !['normal', 'concierge'].includes(String(body.routingMode))) throw new AppError(400, '路由模式无效。');
           json(response, 200, { conversation: store.updateConversation(settings[1]!, { memberIds: memberIds(body.memberIds), defaultMemberId: id(body.defaultMemberId), ...(body.preferredMemberIds !== undefined ? { preferredMemberIds: Array.isArray(body.preferredMemberIds) && !body.preferredMemberIds.length ? [] : memberIds(body.preferredMemberIds) } : {}), ...(body.routingMode !== undefined ? { routingMode: body.routingMode as 'normal' | 'concierge' } : {}) }) }); return true;
         }
-        if (path === '/api/members') { const member = store.saveMember(memberInput(body)); engine.kick(); json(response, 200, { member }); return true; }
-        if (path === '/api/accounts') { const account = store.saveAccount(accountInput(body)); probeCache = undefined; json(response, 200, { account: publicAccount(account, await probe()) }); return true; }
+        if (path === '/api/members') { const member = store.workbench.saveMember(memberInput(body), body.expectedRevision, body.requestId).result; engine.kick(); json(response, 200, { member }); return true; }
+        if (path === '/api/accounts') { const account = store.workbench.saveAccount(accountInput(body), body.expectedRevision, body.requestId).result; probeCache = undefined; json(response, 200, { account: publicAccount(account, await probe()) }); return true; }
         const cancel = /^\/api\/invocations\/([^/]+)\/cancel$/.exec(path);
         if (cancel) { engine.cancel(cancel[1]!); json(response, 200, { ok: true }); return true; }
       }

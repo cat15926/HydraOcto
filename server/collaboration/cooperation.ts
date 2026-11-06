@@ -88,7 +88,7 @@ export class CooperationService {
     if (s.bindingState !== 'unresolved' || s.kind !== 'user' || s.withdrawnAt) return false;
     const c = this.data.get<Conversation>('cc_conversations', s.conversationId);
     try {
-      const route = this.store.previewRoute(s.conversationId, s.content); s.requestedTargets = route.targets; s.bindingState = 'bound'; s.revision++;
+      const route = this.store.previewRoute(s.conversationId, s.routingContent ?? s.content); s.requestedTargets = route.targets; s.bindingState = 'bound'; s.revision++;
       for (const memberId of route.targets) { const d: Delivery = { id: randomUUID(), sourceId: s.id, memberId, status: 'pending', revision: 1 }; this.store.db.prepare('INSERT INTO cc_deliveries VALUES(?,?,?,?,?,?)').run(d.id, s.id, memberId, null, d.status, JSON.stringify(d)); }
       route.id = randomUUID(); route.sourceId = s.id; s.routingDecisionId = route.id; this.store.db.prepare('INSERT INTO cc_routing VALUES(?,?,?)').run(route.id, s.id, JSON.stringify(route));
       this.putSource(s); this.changed(c.id); this.newUserInput(c.id, route.targets); this.port.event(c.id, 'source.targets_resolved', { sourceId: s.id, targets: route.targets }); return true;

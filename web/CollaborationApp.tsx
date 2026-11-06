@@ -1,9 +1,10 @@
+import { WorkbenchPanel, DefaultConfiguration, type WorkbenchCommand } from './WorkbenchPanel';
 import { CooperationPanel } from './CooperationPanel';
 import { ArtifactPanel } from './ArtifactPanel';
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type {
   Carrier, CollaborationAccount, CollaborationBootstrap, CollaborationInvocation,
-  Conversation, ConversationDetail, Delivery, HoldRecheck, InputManifest, Member, RecoveryCheck, RecoveryRequest, RoutingDecision, SendMessage,
+  Conversation, ConversationDetail, ConversationAttachment, Delivery, HoldRecheck, InputManifest, Member, RecoveryCheck, RecoveryRequest, RoutingDecision, SendMessage,
 } from '../shared/collaboration';
 
 import { TaskPanel } from './TaskPanel';
@@ -65,7 +66,8 @@ function Modal({ title, children, onClose, wide = false }: { title: string; chil
   return <dialog ref={ref} className={`cc-dialog ${wide ? 'cc-dialog-wide' : ''}`} onCancel={e => { e.preventDefault(); onClose(); }} aria-labelledby="cc-dialog-title"><header><div><span className="cc-eyebrow">工作空间设置</span><h2 id="cc-dialog-title">{title}</h2></div><button className="cc-icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button></header>{children}</dialog>;
 }
 
-function Settings({ data, saving, onSaveMember, onSaveAccount, onRefresh, onClose }: {
+function Settings({ data, saving, onSaveMember, onSaveAccount, onRefresh, onClose, command }: {
+  command: WorkbenchCommand;
   data: CollaborationBootstrap; saving: boolean;
   onSaveMember: (member: Member) => Promise<void>; onSaveAccount: (account: CollaborationAccount) => Promise<void>;
   onRefresh: () => Promise<void>; onClose: () => void;
@@ -75,6 +77,9 @@ function Settings({ data, saving, onSaveMember, onSaveAccount, onRefresh, onClos
   const [editAccount, setEditAccount] = useState<CollaborationAccount>();
   const [carrier, setCarrier] = useState<Carrier>('codex-app-server');
   const [memberAccountId, setMemberAccountId] = useState('');
+  const [binding, setBinding] = useState<'follow' | 'override'>('override'), [modelBinding, setModelBinding] = useState<'follow' | 'override'>('override');
+  const [model, setModel] = useState(''), [effort, setEffort] = useState(''), [probing, setProbing] = useState(false);
+  const defaultConfig = data.defaults?.find(d => d.carrier === carrier);
   const [provider, setProvider] = useState<CollaborationAccount['provider']>('codex');
   const [auth, setAuth] = useState<CollaborationAccount['auth']>('cli');
   const [error, setError] = useState('');
@@ -82,26 +87,31 @@ function Settings({ data, saving, onSaveMember, onSaveAccount, onRefresh, onClos
   const nativeProvider = provider === 'codex' || provider === 'claude';
   const expectedProvider = carrier === 'codex-app-server' ? 'codex' : carrier === 'claude-cli' ? 'claude' : carrier === 'openai-api' ? 'openai' : 'anthropic';
   const matchingAccounts = data.accounts.filter(a => a.provider === expectedProvider);
-  const selectedAccountId = matchingAccounts.some(a => a.id === memberAccountId) ? memberAccountId : matchingAccounts[0]?.id ?? '';
+  const selectedAccountId = binding === 'follow' ? defaultConfig?.accountId ?? '' : matchingAccounts.some(a => a.id === memberAccountId) ? memberAccountId : matchingAccounts[0]?.id ?? '';
   const selectedAccount = matchingAccounts.find(a => a.id === selectedAccountId);
-  const modelRequired = selectedAccount?.auth === 'api';
+  const modelRequired = selectedAccount?.auth === 'api' && modelBinding !== 'follow';
+  const observed = data.accountObservations?.find(o => o.accountId === selectedAccountId);
+  const catalog = observed?.models ?? [];
+  const editObservation = data.accountObservations?.find(o => o.accountId === editAccount?.id);
+  async function probeAccount(accountId: string) { setError(''); setProbing(true); try { await command(`/api/accounts/${accountId}/probe`, {}); await onRefresh(); } catch (e) { setError((e as Error).message); } finally { setProbing(false); } }
+  async function remove(kind: 'members' | 'accounts') { const value = kind === 'members' ? editMember : editAccount; if (!value) return; try { await command(`/api/${kind}/${value.id}/delete`, { expectedRevision: value.revision ?? 1, requestId: crypto.randomUUID() }); await onRefresh(); kind === 'members' ? newMember() : newAccount(); } catch (e) { setError((e as Error).message); } }
   const keyDefaults = { codex: 'COLLAB_CODEX_API_KEY', claude: 'COLLAB_CLAUDE_API_KEY', openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY' };
   const urlExamples = { codex: 'https://api.deepseek.com', claude: 'https://open.bigmodel.cn/api/anthropic', openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1' };
-  function newMember() { setEditMember(undefined); setCarrier('codex-app-server'); setMemberAccountId(''); setError(''); }
+  function newMember() { setEditMember(undefined); setCarrier('codex-app-server'); setMemberAccountId(''); setBinding('override'); setModelBinding('override'); setModel(''); setEffort(''); setError(''); }
   function newAccount() { setEditAccount(undefined); setProvider('codex'); setAuth('cli'); setError(''); }
   async function saveMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); const form = new FormData(event.currentTarget);
-    const model = String(form.get('model')).trim();
-    if (modelRequired && !model) { setError('API 认证需要填写服务实际支持的模型名称。'); return; }
+    const selectedModel = modelBinding === 'follow' ? '' : model.trim();
+    if (modelRequired && !selectedModel) { setError('API 认证需要填写服务实际支持的模型名称。'); return; }
     try {
-      await onSaveMember({ id: editMember?.id ?? crypto.randomUUID(), name: String(form.get('name')), instructions: String(form.get('instructions')), carrier, accountId: selectedAccountId, model: model || undefined, enabled: form.get('enabled') === 'on' });
+      await onSaveMember({ id: editMember?.id ?? crypto.randomUUID(), name: String(form.get('name')), instructions: String(form.get('instructions')), carrier, accountId: selectedAccountId, model: selectedModel || undefined, effort: modelBinding === 'follow' ? undefined : effort || undefined, accountBinding: binding, modelBinding, aliases: String(form.get('aliases') ?? '').split(/[,，\s]+/).filter(Boolean), revision: editMember?.revision, enabled: form.get('enabled') === 'on' });
       newMember(); setFormRevision(value => value + 1);
     } catch (e) { setError((e as Error).message); }
   }
   async function saveAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); const form = new FormData(event.currentTarget);
     try {
-      await onSaveAccount({ id: editAccount?.id ?? crypto.randomUUID(), name: String(form.get('name')), provider, auth, ...(auth === 'api' ? { apiKeyEnv: String(form.get('apiKeyEnv')), baseUrl: String(form.get('baseUrl')).trim() || undefined } : {}) });
+      await onSaveAccount({ id: editAccount?.id ?? crypto.randomUUID(), name: String(form.get('name')), revision: editAccount?.revision, provider, auth, ...(auth === 'api' ? { apiKeyEnv: String(form.get('apiKeyEnv')), baseUrl: String(form.get('baseUrl')).trim() || undefined } : {}) });
       newAccount(); setFormRevision(value => value + 1);
     } catch (e) { setError((e as Error).message); }
   }
@@ -110,24 +120,29 @@ function Settings({ data, saving, onSaveMember, onSaveAccount, onRefresh, onClos
     {error && <p className="cc-form-error" role="alert">{error}</p>}
     {tab === 'members' ? <div className="cc-settings-grid"><section className="cc-settings-list">
       <h3>协作成员 <span>{data.members.length}</span></h3>
-      {data.members.map(m => <button key={m.id} className={`cc-settings-item ${editMember?.id === m.id ? 'selected' : ''}`} onClick={() => { setEditMember(m); setCarrier(m.carrier); setMemberAccountId(m.accountId); setError(''); }}><Avatar member={m} /><span><strong>{m.name}</strong><small>{carrierNames[m.carrier]}</small></span><span className="cc-member-enabled">{m.enabled ? '已启用' : '已停用'}</span></button>)}
+      {data.members.filter(m => !m.deletedAt).map(m => <button key={m.id} className={`cc-settings-item ${editMember?.id === m.id ? 'selected' : ''}`} onClick={() => { setEditMember(m); setCarrier(m.carrier); setMemberAccountId(m.accountId); setBinding(m.accountBinding ?? 'override'); setModelBinding(m.modelBinding ?? 'override'); setModel(m.model ?? ''); setEffort(m.effort ?? ''); setError(''); }}><Avatar member={m} /><span><strong>{m.name}</strong><small>{carrierNames[m.carrier]}</small></span><span className="cc-member-enabled">{m.enabled ? '已启用' : '已停用'}</span></button>)}
       <button className="cc-text-button" onClick={newMember}><Icon name="plus" size={15} />添加成员</button><p className="cc-note">成员的职责由你定义。协作中的交接由实际请求触发，不预设固定执行顺序。</p>
     </section><form key={`${editMember?.id ?? 'new-member'}-${formRevision}`} onSubmit={saveMember} className="cc-settings-form">
       <h3>{editMember ? `编辑 ${editMember.name}` : '添加协作成员'}</h3>
       <label>成员名称<input name="name" required maxLength={60} defaultValue={editMember?.name ?? ''} placeholder="例如：产品分析师" /></label>
-      <label>职责与工作方式<textarea name="instructions" rows={4} required maxLength={10000} defaultValue={editMember?.instructions ?? ''} placeholder="描述擅长的工作、协作方式和交付要求。" /></label>
-      <label>运行时<select value={carrier} onChange={e => { setCarrier(e.target.value as Carrier); setMemberAccountId(''); }}>{Object.entries(carrierNames).map(([id, label]) => <option value={id} key={id}>{label}</option>)}</select></label>
-      <label>使用账户<select name="accountId" required value={selectedAccountId} onChange={e => setMemberAccountId(e.target.value)}><option value="" disabled>请选择相应账户</option>{matchingAccounts.map(a => <option value={a.id} key={a.id}>{a.name} · {a.auth === 'api' ? 'API 密钥' : '官方登录'}</option>)}</select></label>
+      <label>提及别名<input name="aliases" defaultValue={editMember?.aliases?.join(", ") ?? ""} placeholder="用逗号分隔，如 reviewer, 评审" maxLength={328} /></label>
+      <label>职责与工作方式<textarea name="instructions" rows={4} maxLength={10000} defaultValue={editMember?.instructions ?? ''} placeholder="描述擅长的工作、协作方式和交付要求。" /></label>
+      <label>运行时<select value={carrier} onChange={e => { setCarrier(e.target.value as Carrier); setMemberAccountId(''); setModel(''); setEffort(''); }}>{Object.entries(carrierNames).map(([id, label]) => <option value={id} key={id}>{label}</option>)}</select></label>
+      <label>账户绑定<select value={binding} onChange={e => { setBinding(e.target.value as typeof binding); setModel(''); setEffort(''); }}><option value="override">成员独立账户</option><option value="follow">跟随运行时默认账户</option></select></label>
+      <label>使用账户<select name="accountId" disabled={binding === 'follow'} required value={selectedAccountId} onChange={e => { setMemberAccountId(e.target.value); setModel(''); setEffort(''); }}><option value="" disabled>请选择相应账户</option>{matchingAccounts.map(a => <option value={a.id} key={a.id}>{a.name} · {a.auth === 'api' ? 'API 密钥' : '官方登录'}</option>)}</select></label>
       {!matchingAccounts.length && <p className="cc-note">请先在「账户与登录」添加匹配的账户。</p>}
       {selectedAccount && <p className="cc-note">{selectedAccount.auth === 'api' ? '使用此账户的 API 密钥启动运行时，不要求本机官方账号登录。' : '使用本机官方 CLI 登录。'}</p>}
-      <label>模型 <span className="cc-optional">{modelRequired ? '必填，使用 API 服务支持的模型标识' : '可选，留空使用运行时默认值'}</span><input name="model" required={modelRequired} maxLength={200} defaultValue={editMember?.model ?? ''} placeholder={modelRequired ? 'API 模型名称' : '默认模型'} /></label>
+      <label>模型绑定<select value={modelBinding} onChange={e => setModelBinding(e.target.value as typeof modelBinding)}><option value="override">成员独立模型</option><option value="follow">跟随运行时默认模型</option></select></label>
+      <label>模型<select name="model" value={model} disabled={modelBinding === 'follow'} required={modelRequired} onChange={e => { setModel(e.target.value); setEffort(''); }}><option value="">{modelBinding === 'follow' ? defaultConfig?.model ?? '默认模型未固定' : '运行时默认（仅官方 CLI）'}</option>{model && !catalog.some(m => m.id === model) && <option value={model}>{model} · 已保存，目录未验证</option>}{catalog.map(m => <option value={m.id} key={m.id}>{m.name}</option>)}</select></label>
+      <label>推理强度<select name="effort" value={effort} disabled={modelBinding === 'follow'} onChange={e => setEffort(e.target.value)}><option value="">模型默认</option>{effort && !catalog.find(m => m.id === model)?.efforts.includes(effort) && <option value={effort}>{effort} · 已保存</option>}{catalog.find(m => m.id === model)?.efforts.map(e => <option key={e}>{e}</option>)}</select></label>
+      <button type="button" disabled={probing || !selectedAccountId} onClick={() => void probeAccount(selectedAccountId)}>{probing ? '正在探测…' : '刷新所选账户模型目录'}</button><p className="cc-note">{observed ? `${observed.catalogSource} · ${observed.checkedAt} · ${observed.reason ?? '只读探测，不调用模型'}` : '模型选项来自所选账户实际目录；请先刷新。'}{(binding === 'follow' || modelBinding === 'follow') && !defaultConfig && ' 请先在账户页设置运行时默认账户。'}</p>
       <label className="cc-checkbox"><input type="checkbox" name="enabled" defaultChecked={editMember?.enabled ?? true} />启用此成员</label>
-      <footer><button className="cc-button-primary" disabled={saving || !matchingAccounts.length}>{saving ? '保存中…' : '保存成员'}</button></footer>
+      <footer><button className="cc-button-primary" disabled={saving || !selectedAccountId}>{saving ? '保存中…' : '保存成员'}</button>{editMember && <button type="button" onClick={() => void remove('members')} disabled={saving}>删除成员</button>}</footer>
     </form></div> : <div className="cc-settings-grid"><section className="cc-settings-list">
       <h3>运行账户 <span>{data.accounts.length}</span></h3>
-      {data.accounts.map(a => <button key={a.id} className={`cc-settings-item ${editAccount?.id === a.id ? 'selected' : ''}`} onClick={() => { setEditAccount(a); setProvider(a.provider); setAuth(a.auth); setError(''); }}><span className="cc-account-icon">{a.auth === 'cli' ? '⌘' : '↗'}</span><span><strong>{a.name}</strong><small>{a.auth === 'cli' ? (a.configured ? '官方 CLI 已登录' : '官方 CLI 尚未登录') : a.configured ? 'API 密钥环境变量已配置' : 'API 密钥环境变量未配置'}</small></span></button>)}
+      {data.accounts.map(a => <button key={a.id} className={`cc-settings-item ${editAccount?.id === a.id ? 'selected' : ''}`} onClick={() => { setEditAccount(a); setProvider(a.provider); setAuth(a.auth); setError(''); }}><span className="cc-account-icon">{a.auth === 'cli' ? '⌘' : '↗'}</span><span><strong>{a.name}</strong><small>{a.auth === 'cli' ? '使用本机官方 CLI 身份' : a.configured ? 'API 密钥环境变量已配置' : 'API 密钥环境变量未配置'}</small></span></button>)}
       <button className="cc-text-button" onClick={newAccount}><Icon name="plus" size={15} />添加账户</button>
-      <div className="cc-runtime-list"><div className="cc-section-title"><h3>本机运行时</h3><button className="cc-icon-button" onClick={() => { void onRefresh().catch(e => setError(e.message)); }} aria-label="重新检测运行时"><Icon name="refresh" size={15} /></button></div>
+      <DefaultConfiguration data={data} command={command} refresh={onRefresh} /><div className="cc-runtime-list"><div className="cc-section-title"><h3>本机运行时</h3><button className="cc-icon-button" onClick={() => { void onRefresh().catch(e => setError(e.message)); }} aria-label="重新检测运行时"><Icon name="refresh" size={15} /></button></div>
         {data.runtimes.map(r => <div key={r.carrier}><strong>{carrierNames[r.carrier]}</strong><small>{r.version ?? (r.installed ? '已安装' : '未检测到')}</small><p>{r.authentication === 'cli' ? `官方登录模式：${r.available ? '可用' : '未就绪'}。API 认证是否可用取决于所选账户和实际调用。` : r.reason || (r.available ? '协议适配器可用，密钥与模型在调用时验证。' : '当前不可用')}</p>{r.authentication === 'cli' && r.reason && <p>{r.reason}</p>}<span className="cc-proof-level">{r.verified === 'live_tested' ? '真实接入已验证' : r.verified === 'protocol_tested' ? '协议测试通过 · 尚待真实验收' : '尚待真实验收'}</span></div>)}
       </div>
     </section><form key={`${editAccount?.id ?? 'new-account'}-${formRevision}`} onSubmit={saveAccount} className="cc-settings-form">
@@ -140,7 +155,8 @@ function Settings({ data, saving, onSaveMember, onSaveAccount, onRefresh, onClos
         <label>API 地址 <span className="cc-optional">{nativeProvider ? '必填，使用供应商提供的兼容接口根地址' : '可选'}</span><input key={`url-${provider}`} name="baseUrl" type="url" required={nativeProvider} maxLength={2000} defaultValue={editAccount?.baseUrl ?? ''} placeholder={urlExamples[provider]} /></label>
         <p className="cc-note">这里只填写环境变量名称，不填写密钥。请在服务启动环境配置相应变量，修改环境后重启服务。CLI 的 API 认证使用所选服务与模型，不回退到官方登录。</p>
       </>}
-      <footer><button className="cc-button-primary" disabled={saving}>{saving ? '保存中…' : '保存账户'}</button></footer>
+      <footer><button className="cc-button-primary" disabled={saving}>{saving ? '保存中…' : '保存账户'}</button>{editAccount && <button type="button" disabled={saving} onClick={() => void remove('accounts')}>删除账户</button>}</footer>
+      {editAccount && <section className="cc-account-observation"><h4>连接与身份</h4><button type="button" disabled={probing} onClick={() => void probeAccount(editAccount.id)}>{probing ? '正在探测…' : '检查账户与模型'}</button><p>配置：{editAccount.auth === 'cli' ? '沿用本机官方登录' : data.accounts.find(a => a.id === editAccount.id)?.configured ? '密钥引用已配置' : '密钥引用未配置'}</p><p>连接：{editObservation?.connection ?? '未知'} · 安装：{editObservation ? editObservation.installed ? editObservation.version ?? '已安装' : '未检测到' : '未知'}</p><p>身份：{editObservation?.identity.state === 'authenticated' ? editObservation.identity.label ?? '官方 CLI 已认证' : editObservation?.identity.state === 'not_authenticated' ? '尚未认证' : '未知'}</p><p>最近调用：{editObservation?.latestInvocation ? `${statusNames[editObservation.latestInvocation.status]} · ${editObservation.latestInvocation.at}` : '此账户版本暂无调用证据'}</p><p>额度：{editObservation?.quota.state === 'known' ? editObservation.quota.windows?.map(w => `${w.name} 已用 ${w.usedPercent}%`).join('；') : '未知'}</p><p className="cc-note">{editObservation?.checkedAt} {editObservation?.reason}</p><p className="cc-note">官方 CLI 账户共享本机单个登录身份；不同名称不代表身份隔离。API 配置与登录、调用成功分别记录。</p></section>}
     </form></div>}
   </Modal>;
 }
@@ -275,6 +291,9 @@ export default function CollaborationApp() {
   const [detail, setDetail] = useState<ConversationDetail>();
   const [selected, setSelected] = useState<string>();
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<ConversationAttachment[]>([]);
+  const [replyTo, setReplyTo] = useState<string>();
+  const [showArchived, setShowArchived] = useState(false);
   const [error, setError] = useState('');
   const [online, setOnline] = useState(false);
   const [sending, setSending] = useState(false);
@@ -300,7 +319,7 @@ export default function CollaborationApp() {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const log = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
-  const pendingMessage = useRef<{ content: string; requestId: string; conversationId?: string; createId: string } | undefined>(undefined);
+  const pendingMessage = useRef<{ content: string; requestId: string; conversationId?: string; createId: string; attachmentIds: string[]; replyTo?: string } | undefined>(undefined);
   const pendingOperations = useRef(new Map<string, RecoveryRequest | { requestId: string; expectedDeliveryRevision: number; expectedSourceRevision: number }>());
 
   const loadDetail = useCallback(async (id: string) => {
@@ -310,15 +329,15 @@ export default function CollaborationApp() {
   }, []);
   const choose = useCallback((id?: string) => {
     selectedRef.current = id; selectionMade.current = true; requestVersion.current++;
-    setSelected(id); setDetail(undefined); setDraft(''); setMentions(false); setSidebar(false); setError(''); setOperationResult('');
+    setSelected(id); setDetail(undefined); setDraft(''); setAttachments([]); setReplyTo(undefined); setMentions(false); setSidebar(false); setError(''); setOperationResult('');
     atBottom.current = true; pendingMessage.current = undefined;
     if (id) void loadDetail(id).catch(e => setError(e.message));
   }, [loadDetail]);
   const refresh = useCallback(async () => {
     const value = await read<CollaborationBootstrap>(`${API}/collaboration/bootstrap`);
     if (!mounted.current) return;
-    csrf.current = value.csrfToken; cursor.current = Math.max(cursor.current, value.eventCursor); setData(value);
-    if (!selectionMade.current && value.conversations[0]) choose(value.conversations[0].id);
+    csrf.current = value.csrfToken; setData(value);
+    if (!selectionMade.current && value.conversations.find(c => !c.archivedAt)) choose(value.conversations.find(c => !c.archivedAt)!.id);
     else if (selectedRef.current) await loadDetail(selectedRef.current);
   }, [choose, loadDetail]);
   useEffect(() => {
@@ -368,23 +387,45 @@ export default function CollaborationApp() {
     return result as T;
   }
   async function send() {
-    const content = draft.trim(); if (!content || sending || !data) return;
+    const content = draft.trim(); if ((!content && !attachments.length) || sending || !data || detail?.conversation.archivedAt) return;
     setSending(true); setError('');
-    if (!pendingMessage.current || pendingMessage.current.content !== content || pendingMessage.current.conversationId !== selectedRef.current) pendingMessage.current = { content, requestId: crypto.randomUUID(), conversationId: selectedRef.current, createId: crypto.randomUUID() };
+    if (!pendingMessage.current || pendingMessage.current.content !== content || pendingMessage.current.conversationId !== selectedRef.current || JSON.stringify(pendingMessage.current.attachmentIds) !== JSON.stringify(attachments.map(a => a.id)) || pendingMessage.current.replyTo !== replyTo) pendingMessage.current = { content, requestId: crypto.randomUUID(), conversationId: selectedRef.current, createId: crypto.randomUUID(), attachmentIds: attachments.map(a => a.id), replyTo };
     const pending = pendingMessage.current;
     try {
       let id = pending.conversationId;
       if (!id) {
         const members = data.members.filter(m => m.enabled); if (!members.length) throw new Error('请先在「成员与运行时」启用一名成员。');
-        const result = await command<{ conversation: Conversation }>(`${API}/conversations`, { title: content.slice(0, 60), memberIds: members.map(m => m.id), defaultMemberId: members[0].id, requestId: pending.createId });
+        const result = await command<{ conversation: Conversation }>(`${API}/conversations`, { title: content.slice(0, 60) || '附件协作', memberIds: members.map(m => m.id), defaultMemberId: members[0].id, requestId: pending.createId });
         id = result.conversation.id; pending.conversationId = id; selectedRef.current = id; selectionMade.current = true; setSelected(id); setDetail(undefined);
       }
-      await command(`${API}/conversations/${encodeURIComponent(id)}/messages`, { content, requestId: pending.requestId } satisfies SendMessage);
-      pendingMessage.current = undefined; setDraft(''); setMentions(false); atBottom.current = true; await refresh(); textarea.current?.focus();
+      await command(`${API}/conversations/${encodeURIComponent(id)}/messages`, { content, requestId: pending.requestId, attachmentIds: pending.attachmentIds, replyTo: pending.replyTo } satisfies SendMessage);
+      pendingMessage.current = undefined; setDraft(''); setAttachments([]); setReplyTo(undefined); setMentions(false); atBottom.current = true; await refresh(); textarea.current?.focus();
     } catch (e) { setError((e as Error).message); } finally { setSending(false); }
   }
-  async function saveMember(member: Member) { setSaving(true); try { await command(`${API}/members`, member); await refresh(); } finally { setSaving(false); } }
-  async function saveAccount(account: CollaborationAccount) { setSaving(true); try { await command(`${API}/accounts`, account); await refresh(); } finally { setSaving(false); } }
+  async function upload(files: FileList | null) {
+    if (!files?.length || !data || sending) return;
+    const selectedFiles = Array.from(files);
+    setSending(true); setError('');
+    try {
+      if (attachments.length + files.length > 4) throw new Error('每条消息最多 4 个文本附件。');
+      let cid = selectedRef.current;
+      if (!cid) {
+        const members = data.members.filter(m => m.enabled && !m.deletedAt); if (!members.length) throw new Error('请先启用协作成员。');
+        const result = await command<{ conversation: Conversation }>('/api/conversations', { title: draft.trim().slice(0, 60) || files[0].name, memberIds: members.map(m => m.id), defaultMemberId: members[0].id, requestId: crypto.randomUUID() });
+        cid = result.conversation.id; selectedRef.current = cid; selectionMade.current = true; setSelected(cid); setDetail(undefined);
+      }
+      for (const file of selectedFiles) {
+        if (!file.size || file.size > 32768) throw new Error('每个文本附件需要 1–32 KiB。');
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
+        const result = await command<{ result: ConversationAttachment }>(`/api/conversations/${cid}/attachments`, { requestId: crypto.randomUUID(), name: file.name, mediaType: file.type, base64: btoa(binary) });
+        setAttachments(old => [...old, result.result]);
+      }
+      await refresh();
+    } catch (e) { setError((e as Error).message); } finally { setSending(false); }
+  }
+  async function saveMember(member: Member) { setSaving(true); try { await command(`${API}/members`, { ...member, expectedRevision: member.revision ?? 0, requestId: crypto.randomUUID() }); await refresh(); } finally { setSaving(false); } }
+  async function saveAccount(account: CollaborationAccount) { setSaving(true); try { await command(`${API}/accounts`, { ...account, expectedRevision: account.revision ?? 0, requestId: crypto.randomUUID() }); await refresh(); } finally { setSaving(false); } }
   async function saveConversation(memberIds: string[], defaultMemberId: string) {
     if (!selectedRef.current) return;
     await command(`${API}/conversations/${encodeURIComponent(selectedRef.current)}/settings`, { memberIds, defaultMemberId }); await refresh();
@@ -430,29 +471,29 @@ export default function CollaborationApp() {
   }
 
   const members = data?.members ?? [];
-  const availableMembers = members.filter(m => detail ? detail.conversation.memberIds.includes(m.id) : m.enabled);
+  const availableMembers = members.filter(m => m.enabled && !m.deletedAt && (detail ? detail.conversation.memberIds.includes(m.id) : true));
   const defaultMember = members.find(m => m.id === detail?.conversation.defaultMemberId) ?? availableMembers[0];
   const currentPreview = routePreview && routePreview.conversationId === selected && routePreview.content === draft.trim() ? routePreview : undefined;
   const running = detail?.invocations.filter(active) ?? [];
   const waiting = detail?.deliveries.filter(d => d.status === 'pending' || d.status === 'held') ?? [];
   const missingMessages = detail?.responses.filter(response => !detail.messages.some(m => m.responseId === response.id)) ?? [];
   const conversationTitle = detail?.conversation.title ?? (selected ? '正在读取会话…' : '新的协作');
-  const filtered = data?.conversations.filter(c => c.title.toLowerCase().includes(query.toLowerCase())) ?? [];
+  const filtered = data?.conversations.filter(c => c.title.toLowerCase().includes(query.toLowerCase()) && Boolean(c.archivedAt) === showArchived).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.updatedAt.localeCompare(a.updatedAt)) ?? [];
   function mention(member: Member) { setDraft(value => `${value}${value && !/\s$/.test(value) ? ' ' : ''}@${member.name} `); setMentions(false); textarea.current?.focus(); }
   return <div className="cc-shell">
     {sidebar && <button className="cc-mobile-scrim" onClick={() => setSidebar(false)} aria-label="关闭会话列表" />}
-    <aside className={`cc-sidebar ${sidebar ? 'cc-open' : ''}`}><a className="cc-brand" href="/" aria-label="协作工坊首页"><span className="cc-brand-mark"><i /><i /><i /></span><span>协作工坊<small>CONTINUOUS COLLABORATION</small></span></a><button className="cc-new-button" onClick={() => choose()} disabled={sending}><Icon name="plus" size={17} />新的协作<span>＋</span></button><div className="cc-sidebar-heading"><span>会话</span><span>{data?.conversations.length ?? 0}</span></div><label className="cc-search"><span className="cc-visually-hidden">搜索会话</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索会话…" /></label><nav className="cc-conversation-list" aria-label="会话列表">{filtered.length ? filtered.map(c => <button key={c.id} disabled={sending} className={selected === c.id ? 'selected' : ''} onClick={() => choose(c.id)}><Icon name="chat" size={16} /><span><strong>{c.title}</strong><small>{date(c.updatedAt)}</small></span></button>) : <p>{query ? '没有匹配的会话。' : '从一条消息开始，协作过程会保留在这里。'}</p>}</nav><div className="cc-sidebar-bottom"><button onClick={() => setSettings(true)} disabled={!data}><Icon name="settings" />成员与运行时<Icon name="chevron" size={13} /></button><div className="cc-local-status"><span className={online ? 'connected' : ''} />{online ? '本地服务已连接' : data ? '快照同步中' : '正在连接本地服务'}<small>v{data?.version.split('-')[0] ?? '0.5.0'}</small></div></div></aside>
+    <aside className={`cc-sidebar ${sidebar ? 'cc-open' : ''}`}><a className="cc-brand" href="/" aria-label="协作工坊首页"><span className="cc-brand-mark"><i /><i /><i /></span><span>协作工坊<small>CONTINUOUS COLLABORATION</small></span></a><button className="cc-new-button" onClick={() => choose()} disabled={sending}><Icon name="plus" size={17} />新的协作<span>＋</span></button><div className="cc-sidebar-heading"><span>会话</span><span>{data?.conversations.length ?? 0}</span></div><label className="cc-search"><span className="cc-visually-hidden">搜索会话</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索会话…" /></label><button className="cc-archive-filter" onClick={() => setShowArchived(v => !v)}>{showArchived ? '返回进行中的会话' : '查看归档会话'}</button><nav className="cc-conversation-list" aria-label="会话列表">{filtered.length ? filtered.map(c => <button key={c.id} disabled={sending} className={selected === c.id ? 'selected' : ''} onClick={() => choose(c.id)}><Icon name="chat" size={16} /><span><strong>{c.pinned ? '↑ ' : ''}{c.title}</strong><small>{date(c.updatedAt)}</small></span></button>) : <p>{query ? '没有匹配的会话。' : '从一条消息开始，协作过程会保留在这里。'}</p>}</nav><div className="cc-sidebar-bottom"><button onClick={() => setSettings(true)} disabled={!data}><Icon name="settings" />成员与运行时<Icon name="chevron" size={13} /></button><div className="cc-local-status"><span className={online ? 'connected' : ''} />{online ? '本地服务已连接' : data ? '快照同步中' : '正在连接本地服务'}<small>v{data?.version.split('-')[0] ?? '0.5.0'}</small></div></div></aside>
     <main className="cc-main"><header className="cc-topbar"><button className="cc-icon-button cc-mobile-menu" onClick={() => setSidebar(true)} aria-label="打开会话列表"><Icon name="menu" /></button><div className="cc-conversation-heading"><span>工作空间 <span>/</span> 持续协作</span><h1>{conversationTitle}</h1></div><div className="cc-topbar-actions">{detail && <button className="cc-icon-button cc-conversation-settings-button" onClick={() => setConversationSettings(true)} aria-label="设置会话成员与默认成员"><Icon name="settings" size={17} /></button>}<span className="cc-topbar-members">{availableMembers.slice(0, 4).map(m => <span key={m.id} title={m.name}><Avatar member={m} small /></span>)}</span><button className={`cc-monitor-button ${monitor ? 'selected' : ''}`} onClick={() => setMonitor(value => !value)} aria-expanded={monitor} aria-controls="cc-monitor"><Icon name="activity" size={17} /><span>协作动态</span>{running.length > 0 && <b>{running.length}</b>}</button></div></header>
       {error && <div className="cc-error-banner" role="alert"><span>{error}</span><button className="cc-icon-button" onClick={() => setError('')} aria-label="关闭提示"><Icon name="close" size={15} /></button></div>}
       {operationResult && <div className="cc-result-banner" role="status"><span>{operationResult}</span><button className="cc-icon-button" onClick={() => setOperationResult('')} aria-label="关闭操作结果"><Icon name="close" size={15} /></button></div>}
-      <div className="cc-main-content"><div className="cc-chat-column"><div className="cc-chat-scroll" ref={log} onScroll={() => { const element = log.current; if (element) atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }}>
+      <div className="cc-main-content"><div className="cc-chat-column">{detail && <WorkbenchPanel key={detail.conversation.id} detail={detail} workspace={data?.workspace ?? ''} command={command} refresh={refresh} />}<div className="cc-chat-scroll" ref={log} onScroll={() => { const element = log.current; if (element) atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }}>
         {!detail?.messages.length && !missingMessages.length ? <div className="cc-welcome"><div className="cc-welcome-symbol"><span>⌘</span><i /><span>✳</span></div><span className="cc-eyebrow">一个会话，持续推进</span><h2>把下一件事，<br />一起做好。</h2><p>说出你的目标，成员会在这里开展协作。<br />随时补充想法，或用 @ 邀请另一位成员。</p><div className="cc-welcome-members">{availableMembers.map(m => <button key={m.id} onClick={() => mention(m)} title={`在消息中提及 ${m.name}`}><Avatar member={m} small /><span>{m.name}<small>{carrierNames[m.carrier]}</small></span><Icon name="plus" size={12} /></button>)}</div><p className="cc-welcome-note">连接真实运行时 · 对话与执行记录保存在本机</p></div> : <div className="cc-message-list" aria-label="会话消息">{detail?.messages.map(message => {
           const member = members.find(m => m.id === message.memberId); const run = detail.invocations.find(i => i.responseId === message.responseId);
           const source = detail.sources.find(s => s.id === message.sourceId);
-          return <article className={`cc-message cc-message-${message.author}`} key={message.id}><Avatar member={member} user={message.author === 'user'} /><div className="cc-message-content"><div className="cc-message-meta"><strong>{message.author === 'user' ? '你' : message.author === 'system' ? '协作记录' : member?.name ?? '成员'}</strong><time>{date(message.createdAt)}</time>{source?.kind === 'a2a' && <span className="cc-message-tag">协作请求</span>}{run && <Status status={run.status} warning={uncertain(run)} />}</div><div className="cc-prose">{message.content || (run && active(run) ? '正在执行，等待输出…' : '暂无正文')}</div>{source?.requestedTargets.length ? <div className="cc-message-route"><Icon name="arrow" size={12} />{source.requestedTargets.map(id => members.find(m => m.id === id)?.name ?? id).join('、')}</div> : null}</div></article>;
+          return <article className={`cc-message cc-message-${message.author}`} id={`message-${message.id}`} key={message.id}><Avatar member={member} user={message.author === 'user'} /><div className="cc-message-content"><div className="cc-message-meta"><strong>{message.author === 'user' ? '你' : message.author === 'system' ? '协作记录' : member?.name ?? '成员'}</strong><time>{date(message.createdAt)}</time>{source?.kind === 'a2a' && <span className="cc-message-tag">协作请求</span>}{run && <Status status={run.status} warning={uncertain(run)} />}</div>{message.replyTo && <a className="cc-reply-reference" href={`#message-${message.replyTo}`}>引用：{detail.messages.find(m => m.id === message.replyTo)?.content.slice(0, 100) || '原消息附件'}</a>}<div className="cc-prose">{message.content || (message.attachmentIds?.length ? '已发送附件' : run && active(run) ? '正在执行，等待输出…' : '暂无正文')}</div>{message.attachmentIds?.map(id => { const a = detail.attachments?.find(a => a.id === id); return <button className="cc-attachment" key={id} onClick={() => { void read<{ content: string; attachment: ConversationAttachment }>(`/api/conversations/${detail.conversation.id}/attachments/${id}`).then(({ content, attachment }) => { const blob = new Blob([content], { type: 'text/plain;charset=utf-8' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = attachment.name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }).catch(e => setError(e.message)); }}>{a?.name ?? id} · {a?.bytes} B</button>; })}<button className="cc-reply-button" disabled={sending || !!detail.conversation.archivedAt} onClick={() => { setReplyTo(message.id); textarea.current?.focus(); }}>引用回复</button>{source?.requestedTargets.length ? <div className="cc-message-route"><Icon name="arrow" size={12} />{source.requestedTargets.map(id => members.find(m => m.id === id)?.name ?? id).join('、')}</div> : null}</div></article>;
         })}{missingMessages.map(response => { const member = members.find(m => m.id === response.memberId); const run = detail?.invocations.find(i => i.id === response.invocationId); return <article className="cc-message cc-message-member" key={response.id}><Avatar member={member} /><div className="cc-message-content"><div className="cc-message-meta"><strong>{member?.name ?? '成员'}</strong><time>{date(response.createdAt)}</time><Status status={response.status} warning={run && uncertain(run)} /></div><div className={`cc-prose ${!response.content ? 'cc-prose-pending' : ''}`}>{response.content || run?.error || (response.status === 'prepared' ? '已分配输入，准备启动。' : (run && active(run)) ? '正在执行，等待输出…' : '本次执行没有输出正文。')}</div></div></article>; })}</div>}
-      </div><div className="cc-composer-wrap">{(running.length > 0 || waiting.length > 0) && <div className="cc-live-summary"><span className={running.length ? 'cc-pulse' : ''} /><strong>{running.length ? `${running.map(r => members.find(m => m.id === r.memberId)?.name ?? '成员').join('、')} 正在推进` : '消息等待投递'}</strong>{waiting.length > 0 && <small>{waiting.length} 项待投递</small>}<button onClick={() => setMonitor(true)}>查看动态 <Icon name="chevron" size={12} /></button></div>}<form className="cc-composer" onSubmit={event => { event.preventDefault(); void send(); }}><label htmlFor="cc-message-input" className="cc-visually-hidden">发送消息</label><textarea id="cc-message-input" ref={textarea} rows={3} maxLength={20000} value={draft} disabled={sending} onChange={e => setDraft(e.target.value)} placeholder={selected ? '继续讨论，或 @成员邀请协作…' : '描述你想完成的事…'} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); } }} /><div className="cc-composer-bottom"><div className="cc-mention-wrap"><button type="button" className="cc-mention-button" onClick={() => setMentions(value => !value)} aria-label="提及成员" aria-expanded={mentions} disabled={sending}>@</button>{mentions && <div className="cc-mention-menu"><small>邀请成员参与</small>{availableMembers.map(m => <button type="button" key={m.id} onClick={() => mention(m)}><Avatar member={m} small /><strong>{m.name}</strong><small>{carrierNames[m.carrier]}</small></button>)}</div>}</div><span className="cc-composer-hint">Enter 发送 · Shift + Enter 换行</span><button className="cc-send-button" type="submit" disabled={!draft.trim() || sending || !data || (!selected && !availableMembers.length)} aria-label={sending ? '正在发送' : '发送消息'}>{sending ? <span className="cc-send-loading" /> : <Icon name="send" size={19} />}</button></div></form><div className="cc-route-preview" aria-live="polite" aria-atomic="true">{selected && draft.trim() ? previewing ? '正在确认本条消息的目标…' : currentPreview?.routing ? <><Icon name="arrow" size={12} /><span>预计交给 {currentPreview.routing.targets.map(id => members.find(m => m.id === id)?.name ?? id).join('、') || '暂无可用成员'}<small>{routingNames[currentPreview.routing.reason] ?? currentPreview.routing.reason} · 发送时再次核验</small></span></> : <span className="cc-preview-note">{currentPreview?.error || '发送时由服务端解析目标。'}</span> : <span>{selected ? '沿会话历史继续讨论，@ 可明确指定成员' : defaultMember ? `新会话默认由 ${defaultMember.name} 接收，@ 可指定成员` : '先在设置中启用协作成员'}</span>}</div><div className="cc-composer-footnote"><span>直接输入即可，无需选择消息类型</span><span>按承载能力追加或排队</span></div></div></div>
+      </div><div className="cc-composer-wrap">{(running.length > 0 || waiting.length > 0) && <div className="cc-live-summary"><span className={running.length ? 'cc-pulse' : ''} /><strong>{running.length ? `${running.map(r => members.find(m => m.id === r.memberId)?.name ?? '成员').join('、')} 正在推进` : '消息等待投递'}</strong>{waiting.length > 0 && <small>{waiting.length} 项待投递</small>}<button onClick={() => setMonitor(true)}>查看动态 <Icon name="chevron" size={12} /></button></div>}<form className="cc-composer" onSubmit={event => { event.preventDefault(); void send(); }}>{replyTo && <div className="cc-composer-reference">引用：{detail?.messages.find(m => m.id === replyTo)?.content.slice(0, 100) || '原消息附件'}<button type="button" disabled={sending} onClick={() => setReplyTo(undefined)}>取消引用</button></div>}{attachments.map(a => <div key={a.id} className="cc-composer-attachment">{a.name} · {a.bytes} B<button type="button" disabled={sending} onClick={() => setAttachments(old => old.filter(x => x.id !== a.id))}>移除附件</button></div>)}<label htmlFor="cc-message-input" className="cc-visually-hidden">发送消息</label><textarea id="cc-message-input" ref={textarea} rows={3} maxLength={20000} value={draft} disabled={sending || !!detail?.conversation.archivedAt} onChange={e => setDraft(e.target.value)} placeholder={selected ? '继续讨论，或 @成员邀请协作…' : '描述你想完成的事…'} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); } }} /><div className="cc-composer-bottom"><div className="cc-mention-wrap"><button type="button" className="cc-mention-button" onClick={() => setMentions(value => !value)} aria-label="提及成员" aria-expanded={mentions} disabled={sending}>@</button>{mentions && <div className="cc-mention-menu"><small>邀请成员参与</small>{availableMembers.map(m => <button type="button" key={m.id} onClick={() => mention(m)}><Avatar member={m} small /><strong>{m.name}</strong><small>{carrierNames[m.carrier]}</small></button>)}</div>}</div><label className="cc-upload-button">＋ 附件<input aria-label="上传文本附件" type="file" multiple accept="text/*,.md,.json,.csv,.ts,.tsx,.js,.py,.txt,.yaml,.yml" disabled={sending || !!detail?.conversation.archivedAt} onChange={e => { void upload(e.target.files); e.target.value = ''; }} /></label><span className="cc-composer-hint">Enter 发送 · Shift + Enter 换行</span><button className="cc-send-button" type="submit" disabled={(!draft.trim() && !attachments.length) || !!detail?.conversation.archivedAt || sending || !data || (!selected && !availableMembers.length)} aria-label={sending ? '正在发送' : '发送消息'}>{sending ? <span className="cc-send-loading" /> : <Icon name="send" size={19} />}</button></div></form><div className="cc-route-preview" aria-live="polite" aria-atomic="true">{selected && draft.trim() ? previewing ? '正在确认本条消息的目标…' : currentPreview?.routing ? <><Icon name="arrow" size={12} /><span>预计交给 {currentPreview.routing.targets.map(id => members.find(m => m.id === id)?.name ?? id).join('、') || '暂无可用成员'}<small>{routingNames[currentPreview.routing.reason] ?? currentPreview.routing.reason} · 发送时再次核验</small></span></> : <span className="cc-preview-note">{currentPreview?.error || '发送时由服务端解析目标。'}</span> : <span>{selected ? '沿会话历史继续讨论，@ 可明确指定成员' : defaultMember ? `新会话默认由 ${defaultMember.name} 接收，@ 可指定成员` : '先在设置中启用协作成员'}</span>}</div><div className="cc-composer-footnote"><span>直接输入即可，无需选择消息类型</span><span>文本附件 ≤32 KiB/文件</span></div></div></div>
         <aside id="cc-monitor" className={`cc-monitor ${monitor ? 'cc-open' : ''}`}><header><div><span className="cc-eyebrow">协作过程</span><h2>发生了什么</h2></div><button className="cc-icon-button" onClick={() => setMonitor(false)} aria-label="收起协作动态"><Icon name="close" size={17} /></button></header><div className="cc-monitor-scroll">{detail && <CooperationPanel key={`cooperation-${detail.conversation.id}`} detail={detail} members={members} command={command} refresh={refresh} />}{detail && <ArtifactPanel key={`artifacts-${detail.conversation.id}`} detail={detail} members={members} command={command} refresh={refresh} />}{detail && <TaskPanel key={detail.conversation.id} detail={detail} members={members} command={command} refresh={refresh} />}<ExecutionPanel detail={detail} members={members} cancelling={cancelling} operating={operating} notices={notices} onCancel={id => { void cancel(id); }} onReconcile={run => { void reconcile(run); }} onRecheck={delivery => { void recheck(delivery); }} /></div><footer>排队、执行与接受证据分别记录。</footer></aside>
-      </div></main>{conversationSettings && detail && <ConversationSettings conversation={detail.conversation} members={members} onSave={saveConversation} onClose={() => setConversationSettings(false)} />}{settings && data && <Settings data={data} saving={saving} onSaveMember={saveMember} onSaveAccount={saveAccount} onRefresh={refresh} onClose={() => setSettings(false)} />}
+      </div></main>{conversationSettings && detail && <ConversationSettings conversation={detail.conversation} members={members} onSave={saveConversation} onClose={() => setConversationSettings(false)} />}{settings && data && <Settings data={data} command={command} saving={saving} onSaveMember={saveMember} onSaveAccount={saveAccount} onRefresh={refresh} onClose={() => setSettings(false)} />}
   </div>;
 }

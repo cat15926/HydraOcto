@@ -4,20 +4,23 @@ export type ExecutionMode = 'serial' | 'parallel';
 export type InvocationStatus = 'prepared' | 'running' | 'succeeded' | 'failed' | 'interrupted' | 'cancel_requested' | 'cancelled';
 export interface CollaborationAccount {
   id: string; name: string; provider: 'codex' | 'claude' | 'openai' | 'anthropic';
-  auth: 'cli' | 'api'; apiKeyEnv?: string; baseUrl?: string; revision?: number;
+  auth: 'cli' | 'api'; apiKeyEnv?: string; baseUrl?: string; revision?: number; deletedAt?: string;
 }
 export interface Member {
   id: string; name: string; instructions: string; carrier: Carrier; accountId: string;
-  model?: string; enabled: boolean; revision?: number;
+  model?: string; enabled: boolean; revision?: number; aliases?: string[]; deletedAt?: string;
+  accountBinding?: 'follow' | 'override'; modelBinding?: 'follow' | 'override'; effort?: string;
 }
 export interface Conversation {
   id: string; title: string; memberIds: string[]; defaultMemberId: string;
   createdAt: string; updatedAt: string; revision?: number;
   preferredMemberIds?: string[]; routingMode?: 'normal' | 'concierge';
+  pinned?: boolean; archivedAt?: string; workspaceGrant?: WorkspaceGrant;
 }
 export interface ConversationMessage {
   id: string; conversationId: string; author: 'user' | 'member' | 'system';
   memberId?: string; sourceId?: string; responseId?: string; content: string; createdAt: string; sequence?: number;
+  attachmentIds?: string[]; replyTo?: string;
 }
 export interface SourceWork {
   id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result' | 'multi_mention';
@@ -28,6 +31,24 @@ export interface SourceWork {
   reviewRef?: { reviewId: string; versionId: string; digest: string };
   position?: number; priority?: 'normal' | 'urgent'; enqueuedAt?: string; orderRevision?: number;
   withdrawnAt?: string; groupId?: string;
+  routingContent?: string; attachmentIds?: string[]; replyTo?: string;
+}
+export interface WorkspaceGrant { path: string; device: number; inode: number; authorizedAt: string; revision: number; mode: 'read-only' }
+export interface ConversationAttachment { id: string; conversationId: string; name: string; mediaType: 'text/plain'; bytes: number; digest: string; createdAt: string }
+export interface RuntimeModel { id: string; name: string; efforts: string[]; isDefault?: boolean }
+export interface AccountObservation {
+  accountId: string; accountRevision: number; checkedAt: string; installed: boolean; version?: string;
+  configured: boolean; connection: 'reachable' | 'unavailable' | 'unknown';
+  identity: { state: 'authenticated' | 'not_authenticated' | 'unknown'; label?: string };
+  models: RuntimeModel[]; catalogSource: string; reason?: string;
+  quota: { state: 'known' | 'unknown'; windows?: { name: string; usedPercent: number; resetsAt?: string }[] };
+  latestInvocation?: { id: string; status: InvocationStatus; at: string; accountRevision: number };
+}
+export interface RuntimeDefault { carrier: Carrier; accountId: string; model?: string; effort?: string; revision: number }
+export interface ConfigurationPreview {
+  id: string; kind: 'default' | 'workspace'; configurationRevision: number; expiresAt: string;
+  value: RuntimeDefault | WorkspaceGrant; conversationId?: string; conversationRevision?: number;
+  affectedMemberIds: string[]; unaffectedMemberIds: string[]; appliedAt?: string;
 }
 export interface Delivery {
   id: string; sourceId: string; memberId: string; status: 'pending' | 'consumed' | 'held' | 'withdrawn';
@@ -76,6 +97,7 @@ export interface ConversationDetail {
   artifacts?: ManagedArtifact[]; artifactVersions?: ArtifactVersion[]; artifactApprovals?: ArtifactApproval[];
   reviews?: ArtifactReview[]; jobs?: ManagedJob[]; interactions?: RuntimeInteraction[];
   queue?: QueueState; groups?: MentionGroup[]; inputExposures?: InputExposure[]; inputHandoffs?: InputHandoff[];
+  attachments?: ConversationAttachment[];
 }
 export interface QueueState {
   revision: number; sources: SourceWork[];
@@ -226,6 +248,7 @@ export interface ExecutionContractSnapshot {
   taskSnapshot?: OrdinaryTask;
   reviewSnapshot?: ArtifactReview;
   primarySourceId?: string;
+  workspaceGrant?: WorkspaceGrant;
 }
 export interface InputManifestItem {
   kind: string; reference: string; representation: string; reason?: string; characters: number; complete: boolean;
@@ -272,11 +295,12 @@ export interface CollaborationBootstrap {
   version: string; workspace: string; csrfToken: string; members: Member[];
   accounts: (CollaborationAccount & { configured: boolean })[];
   conversations: Conversation[]; runtimes: RuntimeCapability[]; eventCursor: number;
+  defaults?: RuntimeDefault[]; accountObservations?: AccountObservation[]; configurationRevision?: number;
 }
 export interface CreateConversation {
   title: string; memberIds: string[]; defaultMemberId: string; requestId: string;
 }
-export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean }
+export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean; attachmentIds?: string[]; replyTo?: string }
 export interface RuntimeEvent {
   kind: 'prepared' | 'exposed' | 'accepted' | 'not_accepted' | 'session' | 'session_replaced' | 'usage' | 'text' | 'tool' | 'process_exit' | 'transport_settled' | 'diagnostic';
   detail: Record<string, unknown>;
@@ -290,6 +314,7 @@ export interface RuntimeRequest {
   onInteractionResolved?: (providerRequestId: string) => void;
   onAppendReady?: (dispatcher: AppendDispatcher) => void;
   onInputRead?: (observation: AppendObservation) => void;
+  workspaceGrant?: WorkspaceGrant;
 }
 export interface RuntimeResult {
   text: string; nativeSessionId?: string; nativeTurnId?: string; continuity: 'fresh' | 'resumed' | 'unknown';
@@ -297,6 +322,7 @@ export interface RuntimeResult {
 export interface CollaborationRuntime {
   invoke(request: RuntimeRequest): Promise<RuntimeResult>;
   probe(): Promise<RuntimeCapability[]>;
+  discoverAccount?(account: CollaborationAccount): Promise<AccountObservation>;
   inspect?(request: RuntimeInspectionRequest): Promise<RuntimeInspection>;
   sessionIdentity?(request: Pick<RuntimeRequest, 'member' | 'account' | 'cwd'>): Promise<NativeSessionIdentity>;
 }

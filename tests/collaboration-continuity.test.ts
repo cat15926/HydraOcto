@@ -117,7 +117,7 @@ test('N3: schema v2 upgrades without rewriting old contracts or fabricating nati
     h.owner.db.prepare('UPDATE cc_contracts SET value=? WHERE id=?').run(JSON.stringify(c), c.id);
     h.owner.db.exec('DROP TABLE cc_native_sessions; UPDATE cc_schema SET version=2');
     const store = new CollaborationStore(h.owner);
-    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 6);
+    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 7);
     assert.deepEqual(store.contract(i.id), c); assert.deepEqual(store.nativeSessions(h.conversation.id), []);
     assert.equal(store.prepareSession(i.id, identity).mode, 'unsupported');
   } finally { h.owner.close(); }

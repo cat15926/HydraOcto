@@ -19,6 +19,15 @@ async function harness(runtime: CollaborationRuntime = { probe, invoke: noInvoke
   let address = await app.start();
   let bootstrap = await (await fetch(address.url + '/api/collaboration/bootstrap')).json() as CollaborationBootstrap;
   const api = async (path: string, body?: unknown, headers: Record<string, string> = {}) => {
+    if (body && ['/api/members', '/api/accounts'].includes(path)) {
+      const input = body as any;
+      const rows = path === '/api/members' ? app.collaborationStore.members() : app.collaborationStore.accounts();
+      body = { ...input, expectedRevision: rows.find(x => x.id === input.id)?.revision ?? 0, requestId: crypto.randomUUID() };
+      if (path === '/api/members' && input.model && app.collaborationStore.accounts().some(a => a.id === input.accountId)) {
+        const { account, ticket } = app.collaborationStore.workbench.beginProbe(input.accountId);
+        app.collaborationStore.workbench.finishProbe(account, ticket, { accountId: account.id, accountRevision: account.revision ?? 1, checkedAt: new Date().toISOString(), configured: true, installed: true, connection: 'reachable', identity: { state: 'unknown' }, models: [{ id: input.model, name: input.model, efforts: [] }], catalogSource: 'synthetic-http-fixture', quota: { state: 'unknown' } });
+      }
+    }
     const response = await fetch(address.url + path, {
       method: body === undefined ? 'GET' : 'POST',
       headers: body === undefined ? headers : { 'content-type': 'application/json', 'x-csrf-token': bootstrap.csrfToken, ...headers },

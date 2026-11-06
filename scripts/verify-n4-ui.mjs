@@ -24,7 +24,7 @@ const runtime = { probe: async () => [], async invoke(r) {
 let app, browser;
 try {
   await mkdir(output, { recursive: true });
-  app = await createApplication({ port: 0, dataDir: temp, staticDir: join(root, 'dist/web'), collaborationRuntime: runtime }); const { url } = await app.start();
+  app = await createApplication({ port: 0, dataDir: temp, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || join(root, 'dist/web')), collaborationRuntime: runtime }); const { url } = await app.start();
   browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
   const page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message)); await page.setViewport({ width: 1512, height: 982 });
   const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label).click(), label, scope); };

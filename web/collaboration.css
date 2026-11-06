@@ -41,3 +41,31 @@
 .cc-cooperation-panel>details{margin:12px 0}.cc-cooperation-panel summary{cursor:pointer;font-size:11px;line-height:1.7}.cc-cooperation-card{padding:10px;margin:8px 0;border:1px solid #e0e7d5;border-radius:6px;overflow-wrap:anywhere}.cc-cooperation-card p{font-size:11px;white-space:pre-wrap;line-height:1.6;max-height:180px;overflow:auto}.cc-cooperation-card small,.cc-cooperation-card code{display:block;font-size:10px;margin:5px 0}.cc-cooperation-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.cc-cooperation-panel button{font-size:10px}.cc-group-form{display:grid;gap:10px;padding:10px 0;font-size:11px}.cc-group-form label{display:grid;gap:5px}.cc-group-form textarea{min-height:60px;resize:vertical;width:100%}.cc-group-form fieldset label{display:flex;align-items:center;gap:6px;margin:7px 0}.cc-group-form input[type=checkbox]{width:auto}
 
 .cc-group-form textarea,.cc-group-form input[type=number]{border:1px solid #dfe7d8;border-radius:6px;background:#fff;color:#496043;font:inherit;line-height:1.7;padding:8px}.cc-group-form fieldset{border:1px solid #dfe7d8;border-radius:6px;padding:8px}.cc-group-form legend{color:#687e59}.cc-group-form label{color:#526846}
+
+/* N7 workbench: optional project controls leave the conversation composer direct. */
+.cc-workbench { border-bottom: 1px solid #e5e5e3; background: #fafaf8; font-size: 12px; flex-shrink: 0; max-height: 45vh; overflow: auto; }
+.cc-workbench summary { cursor: pointer; padding: 9px 24px; color: #58635d; }
+.cc-workbench summary span { margin-left: 12px; font-size: 11px; }
+.cc-workbench-body { padding: 0 24px 14px; display: grid; gap: 9px; }
+.cc-workbench form { display: flex; gap: 8px; align-items: end; }
+.cc-workbench label, .cc-default-settings label { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.cc-workbench input, .cc-default-settings select { width: 100%; min-width: 0; padding: 7px; border: 1px solid #dadeda; border-radius: 6px; background: white; }
+.cc-workbench button, .cc-default-settings button, .cc-account-observation button { border: 1px solid #d6dcd7; background: #fff; padding: 7px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+.cc-workbench-actions { display: flex; gap: 8px; }
+.cc-workbench-preview { padding: 12px; border: 1px solid #c8d7cb; border-radius: 8px; background: #f1f6f1; overflow-wrap: anywhere; }
+.cc-workbench-preview code { display: block; }
+.cc-default-settings { margin: 18px 0; display: grid; gap: 9px; font-size: 12px; }
+.cc-default-settings summary { cursor: pointer; margin-bottom: 10px; font-weight: 600; }
+.cc-default-settings label, .cc-default-settings button { margin-bottom: 8px; }
+.cc-account-observation { font-size: 12px; border-top: 1px solid #e0e4e0; padding-top: 12px; overflow-wrap: anywhere; }
+.cc-archive-filter { background: none; border: none; color: #718071; text-align: left; font-size: 11px; margin: 6px 20px; cursor: pointer; }
+.cc-reply-button { border: none; background: none; color: #849084; font-size: 11px; padding: 5px 0; display: block; cursor: pointer; }
+.cc-reply-reference { display: block; border-left: 2px solid #cad6ca; padding: 6px 10px; font-size: 12px; color: #6b7a6b; text-decoration: none; margin-bottom: 8px; }
+.cc-attachment { background: #f3f6f3; border: 1px solid #dce4dc; border-radius: 6px; padding: 6px 10px; margin: 5px 5px 5px 0; color: #526352; font-size: 12px; cursor: pointer; }
+.cc-upload-button { cursor: pointer; font-size: 12px; color: #627462; margin-left: 10px; white-space: nowrap; }
+.cc-upload-button input { width: 1px; height: 1px; opacity: 0; position: absolute; }
+.cc-upload-button:focus-within { outline: 2px solid #6c936c; }
+.cc-composer-reference, .cc-composer-attachment { padding: 5px 12px; border-left: 2px solid #b6cdb6; margin: 6px 12px; background: #f5f8f4; font-size: 12px; overflow-wrap: anywhere; }
+.cc-composer-reference button, .cc-composer-attachment button { background: none; border: none; margin-left: 10px; font-size: 11px; color: #6e7e6e; cursor: pointer; }
+.cc-message:target { background: #f1f6ec; }
+@media (max-width: 600px) { .cc-workbench summary { padding: 8px 14px; } .cc-workbench-body { padding: 0 14px 12px; } .cc-workbench form { flex-wrap: wrap; } .cc-workbench summary span { display: block; margin: 4px 0 0; } .cc-composer-hint { display: none; } }

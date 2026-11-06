@@ -6,6 +6,7 @@ import { parseMentions, resolveRouting } from './routing.js';
 import { assembleContext, CONTEXT_POLICY_VERSION } from './context.js';
 import { nativeUsage, sessionFingerprint } from './continuity.js';
 import { resolve } from 'node:path';
+import { WorkbenchService } from './workbench.js';
 import { ArtifactService } from './artifacts.js';
 import { InteractionService } from './interactions.js';
 import { CooperationService, compareSources } from './cooperation.js';
@@ -26,6 +27,7 @@ export class CollaborationStore {
   readonly artifacts: ArtifactService;
   readonly interactions: InteractionService;
   readonly cooperation: CooperationService;
+  readonly workbench: WorkbenchService;
   private listeners = new Set<(events: CollaborationEvent[]) => void>();
   private emitted: CollaborationEvent[] | undefined;
   constructor(readonly owner: Store, readonly options: { workspace?: string; artifactDir?: string; clock?: () => number } = {}) {
@@ -36,6 +38,7 @@ export class CollaborationStore {
     this.artifacts = new ArtifactService({ db: this.db, tasks: this.tasks, tx: fn => this.tx(fn), command: (key, input, fn) => this.command(key, input, fn), invocation: key => this.invocation(key), contract: key => this.contract(key), addSource: input => this.addSource(input), event: (cid, type, data) => this.event(cid, type, data) }, options.artifactDir ?? resolve('.local-data/collaboration-artifacts'), options.workspace ?? '');
     this.interactions = new InteractionService(this.artifacts);
     this.cooperation = new CooperationService(this, options.clock);
+    this.workbench = new WorkbenchService(this);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS cc_accounts (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_members (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES cc_accounts(id), value TEXT NOT NULL);
@@ -84,11 +87,16 @@ export class CollaborationStore {
         INSERT INTO cc_queue_versions(conversation_id,revision) VALUES((SELECT conversation_id FROM cc_sources WHERE id=NEW.source_id),1)
         ON CONFLICT(conversation_id) DO UPDATE SET revision=revision+1;
       END`);
+      this.db.exec(`CREATE TABLE IF NOT EXISTS cc_attachments(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS cc_attachment_contents(attachment_id TEXT PRIMARY KEY REFERENCES cc_attachments(id), content TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS cc_configuration_previews(id TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS cc_runtime_defaults(carrier TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS cc_account_observations(id TEXT PRIMARY KEY REFERENCES cc_accounts(id), value TEXT NOT NULL)`);
       const version = (this.db.prepare('SELECT version FROM cc_schema').get() as { version: number } | undefined)?.version ?? 1;
-      if (version > 6) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 7) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
-      if (version === 6) return;
-      if (version === 2 || version === 3 || version === 4 || version === 5) { this.db.exec('UPDATE cc_schema SET version=6'); return; }
+      if (version === 7) return;
+      if (version === 2 || version === 3 || version === 4 || version === 5 || version === 6) { this.db.exec('UPDATE cc_schema SET version=7'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -105,7 +113,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(6)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(7)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }
@@ -120,7 +128,7 @@ export class CollaborationStore {
     const detail = this.detail(i.conversationId); const source = detail.sources.find(s => s.id === batch.sourceId)!;
     const consumed = new Set(detail.consumptions.filter(c => c.memberId === i.memberId).map(c => c.sourceId));
     const cutoff = batch.historyCutoff ?? this.messageCursor(i.conversationId);
-    const historySnapshot = detail.messages.filter(m => (m.sequence ?? 0) <= cutoff && m.sourceId !== source.id && (m.responseId ? detail.responses.some(r => r.id === m.responseId && terminal.has(r.status)) : (snapshotOrigin === 'admission' && m.author === 'user') || !!m.sourceId && consumed.has(m.sourceId) && detail.sources.some(s => s.id === m.sourceId && s.sequence < source.sequence)));
+    const historySnapshot = detail.messages.filter(m => (m.sequence ?? 0) <= cutoff && m.sourceId !== source.id && (m.responseId ? detail.responses.some(r => r.id === m.responseId && terminal.has(r.status)) : (snapshotOrigin === 'admission' && m.author === 'user') || !!m.sourceId && consumed.has(m.sourceId) && detail.sources.some(s => s.id === m.sourceId && s.sequence < source.sequence))).map(m => { const attachmentSource = (m.attachmentIds?.length || m.replyTo) && detail.sources.find(s => s.id === m.sourceId && s.kind === 'user'); return attachmentSource ? { ...m, content: attachmentSource.content } : m; });
     const historyMessageIds = historySnapshot.map(m => m.id);
     const historySourceIds = new Set(historySnapshot.flatMap(m => m.sourceId ? [m.sourceId] : []));
     const historySourceSnapshots: NonNullable<ExecutionContractSnapshot['historySourceSnapshots']> = detail.sources.filter(s => historySourceIds.has(s.id)).map(s => ({
@@ -132,10 +140,10 @@ export class CollaborationStore {
       })),
     }));
     const routing = detail.routingDecisions?.find(r => r.sourceId === source.id);
-    return { id: id(), invocationId: i.id, primarySourceId: source.id, behaviorVersion: '0.7.0', routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-public-context-cooperation-v4', toolPolicyVersion: 'cooperation-v2', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: this.options.workspace ?? '', roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
+    return { id: id(), invocationId: i.id, primarySourceId: source.id, behaviorVersion: '0.8.0', routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-public-context-cooperation-v4', toolPolicyVersion: 'cooperation-v2', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private validateContract(c: ExecutionContractSnapshot): void {
-    if (!['0.2.1', '0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0'].includes(c.behaviorVersion) || !['legacy-history-40-v1', CONTEXT_POLICY_VERSION, 'bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4'].includes(c.contextPolicyVersion) || !['readonly-v1', 'readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2'].includes(c.toolPolicyVersion) || !['native-fresh-v1', 'native-continuity-v1'].includes(c.adapterCapabilityVersion)) throw new AppError(503, '此执行的冻结规则版本不受当前服务支持，已保留待处理。', 'contract_not_supported');
+    if (!['0.2.1', '0.3.0', '0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.8.0'].includes(c.behaviorVersion) || !['legacy-history-40-v1', CONTEXT_POLICY_VERSION, 'bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4'].includes(c.contextPolicyVersion) || !['readonly-v1', 'readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2'].includes(c.toolPolicyVersion) || !['native-fresh-v1', 'native-continuity-v1'].includes(c.adapterCapabilityVersion)) throw new AppError(503, '此执行的冻结规则版本不受当前服务支持，已保留待处理。', 'contract_not_supported');
   }
   blockInvocation(invocationId: string, reason: string): void { this.tx(() => { const i = this.invocation(invocationId); if (i.status !== 'prepared' || i.dispatchStarted) return; i.blockedReason = reason; this.saveInvocation(i); this.event(i.conversationId, 'invocation.blocked', { invocationId, reason }); }); }
   private tx<T>(fn: () => T): T {
@@ -172,17 +180,25 @@ export class CollaborationStore {
     if (input.auth === 'api' && ['codex', 'claude'].includes(input.provider) && !input.baseUrl?.trim()) throw new AppError(400, 'CLI API accounts require an explicit API base URL.');
     if (input.baseUrl) { try { const url = new URL(input.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('invalid URL'); } catch { throw new AppError(400, 'Invalid API base URL.'); } }
     const account: CollaborationAccount = { id: input.id, name: input.name, provider: input.provider, auth: input.auth, ...(input.auth === 'api' ? { apiKeyEnv: input.apiKeyEnv, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) } : {}) };
-    return this.tx(() => { const old = this.accounts().find(a => a.id === input.id); if (old && (old.auth !== input.auth || old.provider !== input.provider) && this.members().some(m => m.accountId === input.id)) throw new AppError(409, 'Referenced account cannot change authentication kind.'); account.revision = (old?.revision ?? 0) + 1; this.db.prepare('INSERT INTO cc_accounts VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(account.id, JSON.stringify(account)); this.configurationChanged(); return account; });
+    return this.tx(() => { const old = this.accounts().find(a => a.id === input.id); if (old?.deletedAt) throw new AppError(409, '已删除账户的 ID 不能复用。'); if (old && (old.auth !== input.auth || old.provider !== input.provider) && (this.members().some(m => !m.deletedAt && m.accountBinding !== 'follow' && m.accountId === input.id) || this.workbench.defaults().some(d => d.accountId === input.id))) throw new AppError(409, 'Referenced account cannot change authentication kind.'); account.revision = (old?.revision ?? 0) + 1; this.db.prepare('INSERT INTO cc_accounts VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(account.id, JSON.stringify(account)); this.configurationChanged(); return account; });
   }
   saveMember(input: Member): Member {
     checkText(input.id, 'id', 100); checkText(input.name, 'name', 100); if (typeof input.instructions !== 'string' || input.instructions.length > 10000) throw new AppError(400, 'instructions must contain at most 10000 characters.');
     if (!/^[A-Za-z0-9_-]+$/.test(input.id) || !supported.includes(input.carrier) || typeof input.enabled !== 'boolean') throw new AppError(400, 'Invalid member.');
+    if (this.members().some(m => m.id === input.id && m.deletedAt)) throw new AppError(409, '已删除成员的 ID 不能复用。');
+    const aliases = input.aliases ?? [];
+    if (!Array.isArray(aliases) || aliases.length > 8 || aliases.some(a => typeof a !== 'string' || !/^[\p{L}\p{N}_-]{1,40}$/u.test(a))) throw new AppError(400, '别名最多 8 个，每个为 1–40 位文字、数字、下划线或连字符。');
+    const names = [input.id, input.name, ...aliases].map(v => v.toLocaleLowerCase());
+    if (new Set(aliases.map(a => a.toLocaleLowerCase())).size !== aliases.length || names.some(n => ['all', '全体', 'thread', '本帖'].includes(n)) || this.members().some(m => m.id !== input.id && [m.id, m.name, ...(m.aliases ?? [])].some(n => names.includes(n.toLocaleLowerCase())))) throw new AppError(409, '名称或别名与其他成员/保留提及冲突。');
+    if (input.accountBinding && !['follow', 'override'].includes(input.accountBinding) || input.modelBinding && !['follow', 'override'].includes(input.modelBinding)) throw new AppError(400, '配置跟随模式无效。');
+    if (input.effort !== undefined) checkText(input.effort, 'effort', 30);
     if (input.model !== undefined) checkText(input.model, 'model', 200);
-    const account = this.get<CollaborationAccount>('cc_accounts', input.accountId);
+    const effective = this.workbench.resolveMember(input);
+    const account = this.get<CollaborationAccount>('cc_accounts', effective.accountId);
     const expected = { 'codex-app-server': 'codex', 'claude-cli': 'claude', 'openai-api': 'openai', 'anthropic-api': 'anthropic' }[input.carrier];
     if (account.provider !== expected) throw new AppError(400, 'Member runtime and account do not match.');
-    if (account.auth === 'api' && !input.model?.trim()) throw new AppError(400, 'API 认证的成员需要明确填写模型名称。');
-    const member: Member = { id: input.id, name: input.name, instructions: input.instructions, carrier: input.carrier, accountId: input.accountId, enabled: input.enabled, ...(input.model ? { model: input.model } : {}) };
+    if (account.auth === 'api' && !effective.model?.trim()) throw new AppError(400, 'API 认证的成员需要明确填写模型名称。');
+    const member: Member = { id: input.id, name: input.name, instructions: input.instructions, carrier: input.carrier, accountId: input.accountId, enabled: input.enabled, aliases, ...(input.accountBinding ? { accountBinding: input.accountBinding } : {}), ...(input.modelBinding ? { modelBinding: input.modelBinding } : {}), ...(input.effort ? { effort: input.effort } : {}), ...(input.model ? { model: input.model } : {}) };
     return this.tx(() => { member.revision = (this.members().find(m => m.id === member.id)?.revision ?? 0) + 1; this.db.prepare('INSERT INTO cc_members VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,value=excluded.value').run(member.id, member.accountId, JSON.stringify(member)); this.configurationChanged(); return member; });
   }
   private command<T>(requestId: string, input: unknown, work: () => T): { result: T; replayed: boolean } {
@@ -227,16 +243,19 @@ export class CollaborationStore {
     return { id: hash({ conversationId, content, ...routing }), ...routing };
   }
   send(conversationId: string, input: SendMessage): { source: SourceWork; routing?: RoutingDecision; replayed: boolean } {
-    checkText(input.content, 'content'); checkText(input.requestId, 'requestId', 200);
+    checkText(input.requestId, 'requestId', 200);
     return this.tx(() => {
       const result = this.command(`message:${input.requestId}`, { conversationId, ...input }, () => {
+        const content = this.workbench.compose(conversationId, input);
+        const routingContent = input.content.trim() || '请处理附件内容。';
         let routing: RoutingDecision | undefined;
-        if (!input.resolveWhenIdle) { try { routing = this.previewRoute(conversationId, input.content); } catch (e) { if (!(e instanceof AppError) || e.code !== 'no_routable_member') throw e; } }
-        const source = this.addSource({ conversationId, kind: 'user', content: input.content, requestedTargets: routing?.targets ?? [], depth: 0, ...(routing ? {} : { bindingState: 'unresolved' as const }) });
+        if (!input.resolveWhenIdle) { try { routing = this.previewRoute(conversationId, routingContent); } catch (e) { if (!(e instanceof AppError) || e.code !== 'no_routable_member') throw e; } }
+        const source = this.addSource({ conversationId, kind: 'user', content, requestedTargets: routing?.targets ?? [], depth: 0, ...(routing ? {} : { bindingState: 'unresolved' as const }) });
+        source.routingContent = routingContent; source.attachmentIds = input.attachmentIds; source.replyTo = input.replyTo; this.put('cc_sources', source);
         if (routing) { routing.id = id(); routing.sourceId = source.id; source.routingDecisionId = routing.id;
         this.db.prepare('INSERT INTO cc_routing VALUES(?,?,?)').run(routing.id, source.id, JSON.stringify(routing)); this.put('cc_sources', source); }
         this.cooperation.bindContinuation(source, input.deliveryMode);
-        this.addMessage({ conversationId, author: 'user', sourceId: source.id, content: input.content }); return source;
+        this.addMessage({ conversationId, author: 'user', sourceId: source.id, content: input.content, attachmentIds: input.attachmentIds, replyTo: input.replyTo }); return source;
       }); if (!result.replayed) this.cooperation.newUserInput(conversationId, result.result.requestedTargets); return { source: result.result, routing: this.rows<RoutingDecision>('cc_routing', 'WHERE source_id=?', [result.result.id])[0], replayed: result.replayed };
     });
   }
@@ -265,7 +284,7 @@ export class CollaborationStore {
     const conversation = this.get<Conversation>('cc_conversations', conversationId);
     const sources = this.rows<SourceWork>('cc_sources', 'WHERE conversation_id=? ORDER BY sequence', [conversationId]);
     const sourcesIds = new Set(sources.map(s => s.id)); const invocations = this.invocations(conversationId); const invocationIds = new Set(invocations.map(i => i.id));
-    return { conversation, ...this.artifacts.detail(conversationId), ...this.cooperation.detail(conversationId), interactions: this.interactions.list(conversationId), messages: this.rows<ConversationMessage>('cc_messages', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), sources,
+    return { conversation, attachments: this.workbench.attachments(conversationId), ...this.artifacts.detail(conversationId), ...this.cooperation.detail(conversationId), interactions: this.interactions.list(conversationId), messages: this.rows<ConversationMessage>('cc_messages', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), sources,
       deliveries: this.rows<Delivery>('cc_deliveries', 'ORDER BY rowid').filter(d => sourcesIds.has(d.sourceId)), batches: this.rows<DispatchBatch>('cc_batches', 'ORDER BY rowid').filter(b => sourcesIds.has(b.sourceId)), invocations,
       responses: this.rows<CollaborationResponse>('cc_responses', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), consumptions: this.rows<Consumption>('cc_consumptions', 'ORDER BY rowid').filter(c => sourcesIds.has(c.sourceId)),
       evidence: this.rows<AcceptanceEvidence>('cc_evidence', 'ORDER BY rowid').filter(e => invocationIds.has(e.invocationId)), events: this.events(0, conversationId),
@@ -300,6 +319,7 @@ export class CollaborationStore {
           if (taskHold) { for (const d of outstanding) if (d.status === 'pending') { d.status = 'held'; d.holdReason = taskHold; d.revision++; this.saveDelivery(d); } continue; }
           // Bound recipients never silently fall back to a new default member.
           for (const d of outstanding) if (d.status === 'pending' && (!this.get<Member>('cc_members', d.memberId).enabled || !conversation.memberIds.includes(d.memberId))) { d.status = 'held'; d.holdReason = '成员已禁用或离开会话；需要显式恢复。'; d.revision++; this.saveDelivery(d); this.event(conversation.id, 'delivery.held', { deliveryId: d.id }); }
+          for (const d of outstanding.filter(d => d.status === 'pending')) { try { this.workbench.resolveMember(this.get<Member>('cc_members', d.memberId)); } catch { d.status = 'held'; d.holdReason = '成员账户或默认模型不可用；请修正配置后重验。'; d.revision++; this.saveDelivery(d); } }
           const eligible = outstanding.filter(d => d.status === 'pending'); if (!eligible.length) continue;
           const targets = outstanding.some(d => d.status === 'held') ? eligible.slice(0, 1) : eligible;
           if (this.cooperation.delayed(source.id) || targets.some(d => busy.has(d.memberId) || held.has(d.memberId) || this.cooperation.suppressed(conversation.id, d.memberId))) { for (const d of targets) held.add(d.memberId); continue; }
@@ -309,7 +329,7 @@ export class CollaborationStore {
           this.db.prepare('INSERT INTO cc_batches VALUES(?,?,?,?)').run(batch.id, source.id, claimId, JSON.stringify(batch));
           const invocations: CollaborationInvocation[] = [];
           for (const delivery of targets) {
-            const member = this.get<Member>('cc_members', delivery.memberId); const account = this.get<CollaborationAccount>('cc_accounts', member.accountId);
+            const member = this.workbench.resolveMember(this.get<Member>('cc_members', delivery.memberId)); const account = this.get<CollaborationAccount>('cc_accounts', member.accountId);
             const invocation: CollaborationInvocation = { id: id(), conversationId: conversation.id, batchId: batch.id, responseId: id(), memberId: member.id, member, status: 'prepared', acceptance: 'unknown', continuity: 'unknown', teardown: 'unknown', dispatchStarted: false, createdAt, invocationRevision: 1, cancelRevision: 0, recoveryState: 'none' };
             const response: CollaborationResponse = { id: invocation.responseId, invocationId: invocation.id, conversationId: conversation.id, memberId: member.id, status: 'prepared', content: '', inputSourceIds: [source.id], inputRevision: 1, createdAt };
             this.db.prepare('INSERT INTO cc_invocations VALUES(?,?,?,?,?,?,?)').run(invocation.id, invocation.conversationId, batch.id, member.id, response.id, JSON.stringify(account), JSON.stringify(invocation));
@@ -595,8 +615,9 @@ export class CollaborationStore {
         const taskHold = this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
         if (d.handoffId && this.cooperation.handoffs().some(h => h.id === d.handoffId && h.state !== 'not_accepted')) throw new AppError(409, '此投递须核查原追加，不可恢复为新执行。');
         if (source.withdrawnAt) throw new AppError(409, '来源已撤回。');
-        const available = member.enabled && conversation.memberIds.includes(d.memberId) && !taskHold;
-        if (available) { d.status = 'pending'; delete d.holdReason; } else d.holdReason = taskHold || '成员未启用或不再属于该会话，仍保留原目标。';
+        let accountHold: string | undefined; try { this.workbench.resolveMember(member); } catch { accountHold = '成员账户或默认模型不可用，请先修正配置。'; }
+        const available = member.enabled && conversation.memberIds.includes(d.memberId) && !taskHold && !accountHold;
+        if (available) { d.status = 'pending'; delete d.holdReason; } else d.holdReason = taskHold || accountHold || '成员未启用或不再属于该会话，仍保留原目标。';
         d.revision++; this.saveDelivery(d);
         const check: HoldRecheck = { id: id(), requestId: input.requestId, sourceId: source.id, deliveryId: d.id, memberId: d.memberId, expectedDeliveryRevision: input.expectedDeliveryRevision, expectedSourceRevision: input.expectedSourceRevision, outcome: available ? 'pending' : 'held', reason: available ? '已恢复原投递待调度；是否启动仍由原来源组及占用规则决定。' : d.holdReason!, createdAt: now() };
         this.db.prepare('INSERT INTO cc_hold_rechecks VALUES(?,?,?)').run(check.id, d.id, JSON.stringify(check)); this.event(source.conversationId, 'delivery.rechecked', { deliveryId: d.id, checkId: check.id, outcome: check.outcome, reason: check.reason });

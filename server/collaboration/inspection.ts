@@ -50,6 +50,7 @@ export function withRuntimeInspection(base: CollaborationRuntime, options: { max
   };
   return {
     probe: () => base.probe(),
+    ...(base.discoverAccount ? { discoverAccount: base.discoverAccount.bind(base) } : {}),
     ...(base.sessionIdentity ? { sessionIdentity: base.sessionIdentity.bind(base) } : {}),
     async invoke(input: RuntimeRequest) {
       // In-process retries must never silently create a second provider call.
