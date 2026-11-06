@@ -54,10 +54,11 @@ export class OrdinaryTaskService {
     if (!source || source.conversationId !== i.conversationId || source.revision !== c.sourceRevision || digest(source.content) !== c.sourceDigest || r.invocationId !== i.id || r.memberId !== i.memberId || r.conversationId !== i.conversationId || delivery?.status !== 'consumed' || delivery.responseId !== i.responseId || delivery.memberId !== i.memberId) fail('任务操作缺少准确且有效的消费来源。', 'task_source_conflict');
     return source!;
   }
-  actor(invocationId?: string): TaskActor {
+  actor(invocationId?: string, allowPrivate = false): TaskActor {
     if (!invocationId) return { kind: 'user' };
     const i = this.port.invocation(invocationId);
-    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
+    if (!allowPrivate && this.port.contract(i.id).visibility?.kind === 'private' && !this.port.contract(i.id).visibility?.revealedAt) fail('私聊执行不能写入公开任务。');
+    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
     this.target(i.conversationId, i.memberId);
     const s = this.sourceFor(i);
     return { kind: 'agent', invocationId, memberId: i.memberId, sourceId: s.id, sourceRevision: s.revision, cancelRevision: i.cancelRevision ?? 0 };

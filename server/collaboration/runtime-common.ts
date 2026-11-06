@@ -33,7 +33,18 @@ export const COOPERATION_TOOL_SPECS = [
   { name: 'conversation_read', description: 'Read 1–8 complete pending sources and accept responsibility for them in THIS response. Exact deliveries and failure callers are bound atomically; other recipients remain pending.', inputSchema: { type: 'object', properties: { sourceIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 } }, required: ['sourceIds'], additionalProperties: false } },
   { name: 'multi_mention', description: 'Ask 2–8 OTHER members one question. Only all results produce an ordinary summary. Timeout posts no partial summary and never wakes the caller. Active participants cannot create nested groups.', inputSchema: { type: 'object', properties: { targets: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 8 }, question: { type: 'string', maxLength: 10000 }, context: { type: 'string', maxLength: 10000 }, timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000 } }, required: ['targets', 'question'], additionalProperties: false } },
 ];
-export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion'>) { return request.toolPolicyVersion === 'cooperation-v2' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS] : request.toolPolicyVersion === 'managed-artifacts-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS] : request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS; }
+export const MEMORY_TOOL_SPECS = [
+  { name: 'memory_read', description: 'Read a bounded page of materialized memories authorized for THIS execution. Candidate/approved-only versions are not recalled. Use nextOffset while hasMore is true.', inputSchema: { type: 'object', properties: { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50 } }, additionalProperties: false } },
+  { name: 'memory_propose', description: 'Propose a conversation memory candidate for human review. Scope and owner derive from this execution. Approval and materialization are separate human steps; do not claim it is saved for recall.', inputSchema: { type: 'object', properties: { key: { type: 'string', maxLength: 120 }, content: { type: 'string', maxLength: 16000 }, entryId: { type: 'string' }, expectedRevision: { type: 'integer' } }, required: ['key', 'content'], additionalProperties: false } },
+  { name: 'material_search', description: 'Lexical search in authorized current-conversation messages, sent text attachments, published artifacts, materialized memories, and platform response history. No native private transcript access. semantic/hybrid is unavailable.', inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, kinds: { type: 'array', items: { type: 'string', enum: ['threads', 'docs', 'memory', 'sessions'] } }, mode: { type: 'string', enum: ['lexical'] } }, required: ['query'], additionalProperties: false } },
+];
+export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion' | 'visibility'>) {
+  if (request.toolPolicyVersion === 'visibility-memory-v1') {
+    const tools = [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS, ...MEMORY_TOOL_SPECS];
+    return request.visibility?.kind === 'private' && !request.visibility.revealedAt ? tools.filter(t => ['workspace_list', 'workspace_read', 'user_question', 'conversation_pending', 'conversation_read', 'memory_read', 'memory_propose', 'material_search'].includes(t.name)) : tools;
+  }
+  return request.toolPolicyVersion === 'cooperation-v2' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS] : request.toolPolicyVersion === 'managed-artifacts-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS] : request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS;
+}
 export function cliEnv(): NodeJS.ProcessEnv {
   // Accounts can reference arbitrary variable names (DS_KEY, MY_TOKEN, etc.). A deny-list
   // cannot isolate them. Native hosts inherit only OS, path, locale and network settings.
@@ -59,7 +70,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention') result = await request.onToolCall(name, args, callId);
+  if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);

@@ -38,7 +38,7 @@ test('N4: admission atomically binds source/input/fence and freezes task context
   const h = setup(); try {
     const t = h.create(), i = h.run(), bound = h.get(t), contract = h.store.contract(i.id);
     assert.equal(bound.executionRef?.invocationId, i.id); assert.equal(i.taskBindings?.[0]?.fence, bound.executionRef?.fence);
-    assert.deepEqual(contract.taskSnapshot, bound); assert.equal(contract.toolPolicyVersion, 'cooperation-v2');
+    assert.deepEqual(contract.taskSnapshot, bound); assert.equal(contract.toolPolicyVersion, 'visibility-memory-v1');
     assert.ok(h.store.prompt(i.id).includes(t.id)); assert.ok(h.store.input(i.id)!.manifest.items.some(x => x.kind === 'task'));
     h.finish(i.id, 'The task is done.');
     assert.equal(h.get(t).status, 'todo'); assert.equal(h.get(t).executionRef, undefined);
@@ -227,7 +227,7 @@ test('N4: schema 3 upgrade preserves old contracts and does not fabricate tasks;
     h.owner.db.prepare('UPDATE cc_contracts SET value=? WHERE id=?').run(JSON.stringify(c), c.id);
     h.owner.db.exec('DROP TABLE cc_task_handoffs; DROP TABLE cc_ordinary_tasks; UPDATE cc_schema SET version=3');
     const store = new CollaborationStore(h.owner); assert.deepEqual(store.contract(i.id), c); assert.deepEqual(store.tasks.list(h.c.id), []);
-    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 7);
+    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 8);
     store.startInvocation(i.id); assert.throws(() => store.tasks.tool(i.id, 'task_list', {}, 'old-policy'));
   } finally { h.owner.close(); }
 });

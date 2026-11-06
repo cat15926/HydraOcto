@@ -65,7 +65,7 @@ export class CollaborationEngine {
         : { supported: false, reason: '承载未提供原生会话身份探测，保留新建行为。' }; }
       catch (error) {
         const current = this.store.invocation(invocation.id);
-        if (!controller.signal.aborted && current.status === 'prepared' && !current.dispatchStarted && frozen.toolPolicyVersion === 'cooperation-v2') { this.store.cooperation.defer(current); return; }
+        if (!controller.signal.aborted && current.status === 'prepared' && !current.dispatchStarted && ['cooperation-v2', 'visibility-memory-v1'].includes(frozen.toolPolicyVersion ?? '')) { this.store.cooperation.defer(current); return; }
         throw error;
       }
       this.store.prepareSession(invocation.id, identity);
@@ -81,8 +81,8 @@ export class CollaborationEngine {
       const prompt = this.store.prompt(i.id);
       const input = this.store.input(i.id)!; const contract = this.store.contract(i.id);
       onEvent({ kind: 'exposed', detail: { source: 'platform_prompt', characters: prompt.length, manifestId: input.manifest.id, renderDigest: input.manifest.renderDigest, providerAcceptance: false } });
-      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, signal: controller.signal, onEvent,
-        onAppendReady: dispatcher => { if (contract.toolPolicyVersion === 'cooperation-v2' && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
+      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, visibility: contract.visibility, signal: controller.signal, onEvent,
+        onAppendReady: dispatcher => { if (['cooperation-v2', 'visibility-memory-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
         onInputRead: observation => {
           const h = this.store.cooperation.handoffs(i.conversationId).find(h => h.invocationId === i.id && h.nativeDeliveryId === observation.nativeDeliveryId);
           if (h) this.store.cooperation.appendResult(h.id, observation);
@@ -91,7 +91,10 @@ export class CollaborationEngine {
         onInteractionResolved: requestId => this.store.interactions.resolved(i.id, requestId),
         onToolCall: async (name, args, callId) => {
           const current = this.store.invocation(i.id); if (current.status !== 'running' || controller.signal.aborted) throw new AppError(409, 'Invocation no longer accepts callbacks.');
+          this.store.visibility.assertTool(i.id, name);
           this.store.bindToolCall(i.id, name, args, callId);
+          if (name.startsWith('memory_')) return this.store.memory.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
+          if (name === 'material_search') { if (Object.keys(args).some(k => !['query', 'kinds', 'mode'].includes(k))) throw new AppError(400, '搜索不能指定其他身份或会话。'); return this.store.memory.search({ query: String(args.query ?? ''), kinds: args.kinds as string[] | undefined, mode: args.mode as string | undefined, invocationId: i.id, signal: controller.signal }); }
           if (['conversation_pending', 'conversation_read', 'multi_mention'].includes(name)) {
             this.store.cooperation.actor(current);
             if (name === 'conversation_pending') {

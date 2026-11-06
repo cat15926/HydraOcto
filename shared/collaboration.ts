@@ -16,11 +16,15 @@ export interface Conversation {
   createdAt: string; updatedAt: string; revision?: number;
   preferredMemberIds?: string[]; routingMode?: 'normal' | 'concierge';
   pinned?: boolean; archivedAt?: string; workspaceGrant?: WorkspaceGrant;
+  deletedAt?: string; favorite?: boolean; branch?: { conversationId: string; messageId: string; cutoff: number };
+  memberGroups?: { name: string; memberIds: string[] }[];
 }
 export interface ConversationMessage {
   id: string; conversationId: string; author: 'user' | 'member' | 'system';
   memberId?: string; sourceId?: string; responseId?: string; content: string; createdAt: string; sequence?: number;
   attachmentIds?: string[]; replyTo?: string;
+  visibility?: MessageVisibility; revision?: number; deletedAt?: string; excerptRefs?: MessageExcerpt[];
+  branchOrigin?: { conversationId: string; messageId: string }; excerptConversationId?: string;
 }
 export interface SourceWork {
   id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result' | 'multi_mention';
@@ -32,7 +36,17 @@ export interface SourceWork {
   position?: number; priority?: 'normal' | 'urgent'; enqueuedAt?: string; orderRevision?: number;
   withdrawnAt?: string; groupId?: string;
   routingContent?: string; attachmentIds?: string[]; replyTo?: string;
+  visibility?: MessageVisibility; excerptRefs?: MessageExcerpt[];
 }
+/** Absence is public for legacy records. Private scope is an immutable audience until explicit reveal. */
+export interface MessageVisibility { kind: 'private'; memberIds: string[]; revealedAt?: string }
+export interface MessageExcerpt { messageId: string; revision: number; digest: string; start: number; end: number }
+export interface ReadCursor { conversationId: string; sequence: number; updatedAt: string }
+export interface MemoryEntry { id: string; conversationId: string; key: string; scope: 'conversation' | 'library'; visibility?: MessageVisibility; owner: string; revision: number; headVersionId?: string; createdAt: string; updatedAt: string; revokedAt?: string }
+export interface MemoryVersion { id: string; entryId: string; conversationId: string; number: number; baseRevision: number; content: string; digest: string; state: 'candidate' | 'approved' | 'materialized' | 'rejected' | 'revoked' | 'stale'; revision: number; createdAt: string; approvedAt?: string; materializedAt?: string; revokedAt?: string; origin: { kind: 'user' | 'agent'; invocationId?: string; memberId?: string }; sourceRefs: MessageExcerpt[] }
+export interface MemorySnapshot { entryId: string; versionId: string; revision: number; key: string; content: string; digest: string }
+export interface SearchHit { kind: 'threads' | 'docs' | 'memory' | 'sessions'; conversationId: string; id: string; title: string; excerpt: string }
+export interface SearchResult { mode: 'lexical'; hits: SearchHit[]; truncated: boolean; scanned: number; degraded: false; scope: string }
 export interface WorkspaceGrant { path: string; device: number; inode: number; authorizedAt: string; revision: number; mode: 'read-only' }
 export interface ConversationAttachment { id: string; conversationId: string; name: string; mediaType: 'text/plain'; bytes: number; digest: string; createdAt: string }
 export interface RuntimeModel { id: string; name: string; efforts: string[]; isDefault?: boolean }
@@ -98,6 +112,7 @@ export interface ConversationDetail {
   reviews?: ArtifactReview[]; jobs?: ManagedJob[]; interactions?: RuntimeInteraction[];
   queue?: QueueState; groups?: MentionGroup[]; inputExposures?: InputExposure[]; inputHandoffs?: InputHandoff[];
   attachments?: ConversationAttachment[];
+  memories?: MemoryEntry[]; memoryVersions?: MemoryVersion[]; readCursor?: ReadCursor;
 }
 export interface QueueState {
   revision: number; sources: SourceWork[];
@@ -249,6 +264,7 @@ export interface ExecutionContractSnapshot {
   reviewSnapshot?: ArtifactReview;
   primarySourceId?: string;
   workspaceGrant?: WorkspaceGrant;
+  visibility?: MessageVisibility; visibilityEpoch?: number; materialDigest?: string; memorySnapshot?: MemorySnapshot[];
 }
 export interface InputManifestItem {
   kind: string; reference: string; representation: string; reason?: string; characters: number; complete: boolean;
@@ -300,7 +316,7 @@ export interface CollaborationBootstrap {
 export interface CreateConversation {
   title: string; memberIds: string[]; defaultMemberId: string; requestId: string;
 }
-export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean; attachmentIds?: string[]; replyTo?: string }
+export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean; attachmentIds?: string[]; replyTo?: string; privateTo?: string[]; excerptRefs?: MessageExcerpt[]; excerptTargets?: string[] }
 export interface RuntimeEvent {
   kind: 'prepared' | 'exposed' | 'accepted' | 'not_accepted' | 'session' | 'session_replaced' | 'usage' | 'text' | 'tool' | 'process_exit' | 'transport_settled' | 'diagnostic';
   detail: Record<string, unknown>;
@@ -314,7 +330,7 @@ export interface RuntimeRequest {
   onInteractionResolved?: (providerRequestId: string) => void;
   onAppendReady?: (dispatcher: AppendDispatcher) => void;
   onInputRead?: (observation: AppendObservation) => void;
-  workspaceGrant?: WorkspaceGrant;
+  workspaceGrant?: WorkspaceGrant; visibility?: MessageVisibility;
 }
 export interface RuntimeResult {
   text: string; nativeSessionId?: string; nativeTurnId?: string; continuity: 'fresh' | 'resumed' | 'unknown';

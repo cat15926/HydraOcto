@@ -81,13 +81,23 @@ export function collaborationHttp(deps: HttpDependencies) {
       const { store, engine, json } = deps;
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.8.0-n7', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.9.0-n8', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
       if (request.method === 'GET' && path === '/api/conversations') { json(response, 200, { conversations: store.list() }); return true; }
       const conversation = /^\/api\/conversations\/([^/]+)$/.exec(path);
-      if (request.method === 'GET' && conversation) { json(response, 200, store.detail(conversation[1]!)); return true; }
+      if (request.method === 'GET' && conversation) {
+        const cid = conversation[1]!, viewer = url.searchParams.get('viewer');
+        if (viewer) json(response, 200, store.visibility.view(cid, viewer));
+        else { const detail = store.detail(cid); detail.messages = detail.messages.filter(m => !m.deletedAt).map(m => store.visibility.projectedMessage(m)); json(response, 200, detail); } return true;
+      }
+      const exportConversation = /^\/api\/conversations\/([^/]+)\/export$/.exec(path);
+      if (request.method === 'GET' && exportConversation) { const value = store.visibility.export(exportConversation[1]!, url.searchParams.get('viewer') ?? undefined, url.searchParams.get('messageIds')?.split(',')); response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename=conversation.json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value, null, 2)); return true; }
+      if (request.method === 'GET' && path === '/api/collaboration/search') {
+        const controller = new AbortController(); const abort = () => controller.abort(); response.once('close', abort);
+        try { json(response, 200, await store.memory.search({ query: url.searchParams.get('q') ?? '', mode: url.searchParams.get('mode') ?? 'lexical', conversationId: url.searchParams.get('conversationId') ?? undefined, memberId: url.searchParams.get('viewer') ?? undefined, kinds: url.searchParams.get('kinds')?.split(','), signal: controller.signal })); } finally { response.off('close', abort); } return true;
+      }
       const inputSnapshot = /^\/api\/invocations\/([^/]+)\/input$/.exec(path);
       if (request.method === 'GET' && inputSnapshot) { json(response, 200, store.input(inputSnapshot[1]!) ?? { manifest: null, prompt: null, reason: '历史执行未捕获实际输入；不事后重建。' }); return true; }
       if (request.method === 'GET' && path === '/api/collaboration/events') {
@@ -124,6 +134,11 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'GET' && path === '/api/collaboration/event-page') { const after = Number(url.searchParams.get('after') ?? '0'); if (!Number.isSafeInteger(after) || after < 0) throw new AppError(400, '事件游标无效。'); const events = store.events(after, undefined, 1000); json(response, 200, { events, nextCursor: events.at(-1)?.id ?? after, hasMore: !!events.length && events.at(-1)!.id < store.cursor() }); return true; }
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const body = object(await deps.readJson(request));
+        const visibilityCommand = /^\/api\/conversations\/([^/]+)\/(branch|read-cursor|visibility-organize|memory-candidates)$/.exec(path);
+        if (visibilityCommand) { const cid = visibilityCommand[1]!, action = visibilityCommand[2]; const result = action === 'branch' ? store.visibility.branch(cid, body) : action === 'read-cursor' ? store.visibility.markRead(cid, body.sequence) : action === 'memory-candidates' ? store.memory.propose(cid, body) : store.visibility.organize(cid, body); json(response, 200, result); return true; }
+        const messagePolicy = /^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/visibility$/.exec(path);
+        if (messagePolicy) { json(response, 200, store.visibility.messageCommand(messagePolicy[1]!, messagePolicy[2]!, body)); return true; }
+        if (path === '/api/collaboration/memory-transition') { json(response, 200, store.memory.transition(field(body.versionId, '记忆版本'), body)); return true; }
         const workbenchCommand = /^\/api\/conversations\/([^/]+)\/(organize|attachments|workspace-preview|workspace-apply)$/.exec(path);
         if (workbenchCommand) {
           const cid = workbenchCommand[1]!, action = workbenchCommand[2];
@@ -202,7 +217,7 @@ export function collaborationHttp(deps: HttpDependencies) {
         if (send) {
           if (body.deliveryMode !== undefined && !['next_turn', 'continue_current'].includes(String(body.deliveryMode))) throw new AppError(400, '输入投递模式无效。');
           if (body.resolveWhenIdle !== undefined && typeof body.resolveWhenIdle !== 'boolean') throw new AppError(400, '空闲解析必须为布尔值。');
-          const result = store.send(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
+          const result = store.send(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.privateTo !== undefined ? { privateTo: memberIds(body.privateTo) } : {}), ...(body.excerptRefs !== undefined ? { excerptRefs: body.excerptRefs as import('../../shared/collaboration.js').MessageExcerpt[] } : {}), ...(body.excerptTargets !== undefined ? { excerptTargets: memberIds(body.excerptTargets) } : {}), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
           engine.kick(); json(response, result.replayed ? 200 : 201, result); return true;
         }
         const preview = /^\/api\/conversations\/([^/]+)\/route-preview$/.exec(path);

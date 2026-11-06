@@ -159,7 +159,7 @@ test('N7: schema 6 upgrade keeps existing business JSON byte-for-byte and restor
     h.owner.db.exec('UPDATE cc_schema SET version=6'); h.owner.close();
     const owner = new Store(h.db); try { const store = new CollaborationStore(owner, { workspace: h.workspace, artifactDir: join(h.root, 'private', 'artifacts') });
       assert.deepEqual(owner.db.prepare('SELECT value FROM cc_conversations').all(), before);
-      assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 7);
+      assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 8);
       assert.equal(store.workbench.attachmentContent(store.workbench.attachments(h.c.id)[0]!.id).content, 'persistent');
     } finally { owner.close(); }
   } finally { rmSync(h.root, { recursive: true, force: true }); }

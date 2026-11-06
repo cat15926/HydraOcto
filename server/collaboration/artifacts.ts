@@ -22,13 +22,14 @@ export class ArtifactService {
     this.port.event(value.conversationId, event, { id: value.id });
   }
   target(conversationId: string, memberId: string) { const c = this.get<Conversation>('cc_conversations', conversationId), m = this.get<Member>('cc_members', memberId); if (!c.memberIds.includes(memberId) || !m.enabled) fail('目标不属于当前会话的已启用成员。'); }
-  origin(conversationId: string, invocationId?: string, taskId?: string): ArtifactOrigin {
+  origin(conversationId: string, invocationId?: string, taskId?: string, allowPrivate = false): ArtifactOrigin {
     this.get<Conversation>('cc_conversations', conversationId);
-    const actor = this.port.tasks.actor(invocationId);
+    const actor = this.port.tasks.actor(invocationId, allowPrivate);
     const origin: ArtifactOrigin = { actor };
     if (actor.kind === 'agent') {
       const i = this.port.invocation(actor.invocationId), contract = this.port.contract(i.id);
-      if (i.conversationId !== conversationId || !['managed-artifacts-v1', 'cooperation-v2'].includes(contract.toolPolicyVersion) || i.acceptance !== 'accepted') fail('此准确执行没有产物权限或接受证据。');
+      if (!allowPrivate && contract.visibility?.kind === 'private' && !contract.visibility.revealedAt) fail('私聊执行不能写入公开产物。');
+      if (i.conversationId !== conversationId || !['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(contract.toolPolicyVersion) || i.acceptance !== 'accepted') fail('此准确执行没有产物权限或接受证据。');
       const r = this.get<CollaborationResponse>('cc_responses', i.responseId);
       origin.responseId = r.id; origin.inputRevision = r.inputRevision; origin.sourceDigest = contract.sourceDigest;
     }

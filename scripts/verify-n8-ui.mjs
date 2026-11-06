@@ -1,0 +1,77 @@
+/** N8 browser acceptance. Isolated database, temporary service, synthetic runtime only. */
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createApplication } from '../dist/server/index.js';
+const output = resolve(process.env.VALIDATION_OUTPUT_DIR || '.local-data/validation/n8-ui/' + new Date().toISOString().replace(/[:.]/g, '-'));
+const temp = await mkdtemp(join(tmpdir(), 'n8-ui-')), project = join(temp, 'project');
+const { default: puppeteer } = await import(pathToFileURL(process.env.PUPPETEER_PATH || '/Users/ruhonglin/lhz/clowder-ai-latest/packages/api/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js').href);
+const calls = [], checks = [], errors = []; const check = (label, ok) => { assert.ok(ok, label); checks.push(label); };
+let app, browser;
+try {
+  await mkdir(output, { recursive: true }); await mkdir(project);
+  app = await createApplication({ port: 0, dataDir: join(temp, 'private'), workspace: project, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || 'dist/web'), collaborationRuntime: {
+    probe: async () => [], invoke: async r => { calls.push(r); r.onEvent({ kind: 'accepted', detail: { source: 'synthetic-browser' } }); r.onEvent({ kind: 'process_exit', detail: { confirmed: true } }); return { text: r.visibility ? '私密合成回复' : '公开合成回复', continuity: 'fresh' }; },
+  } }); const { url } = await app.start();
+  browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
+  const page = await browser.newPage(); page.on('pageerror', e => errors.push(e.stack || e.message)); await page.setViewport({ width: 1512, height: 982 });
+  const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label && !b.disabled).click(), label, scope); };
+  const fill = async (selector, text) => { await page.click(selector); await page.$eval(selector, el => el.select()); await page.keyboard.press('Backspace'); await page.type(selector, text); };
+  const until = async fn => { const end = Date.now() + 10000; while (!fn()) { if (Date.now() > end) throw new Error('N8 UI fixture timed out'); await new Promise(r => setTimeout(r, 20)); } };
+  const selectCheckbox = async (scope, label) => page.evaluate((scope, label) => [...document.querySelectorAll(scope + ' label')].find(l => l.textContent.trim() === label).querySelector('input').click(), scope, label);
+  const formField = async (scope, label, value) => { const element = await page.evaluateHandle((scope, label) => [...document.querySelectorAll(scope + ' label')].find(l => l.firstChild.textContent.trim() === label)?.querySelector('input,textarea'), scope, label); const e = element.asElement(); await e.click(); await e.evaluate(el => el.select()); await page.keyboard.press('Backspace'); await e.type(value); await element.dispose(); };
+  await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
+  check('ordinary composer still has no required recipient/type selects', !(await page.$('.cc-composer select')));
+  await click('私聊', '.cc-private-composer'); await selectCheckbox('.cc-private-composer', 'Codex');
+  await page.type('#cc-message-input', 'PRIVATE_BROWSER_TOKEN 保密数据'); await page.click('.cc-send-button'); await until(() => calls.length === 1); await page.waitForSelector('.cc-private-badge');
+  const cid = calls[0].conversationId;
+  check('private-first message never becomes shared conversation title', !app.collaborationStore.visibility.view(cid, 'claude').conversation.title.includes('PRIVATE_BROWSER_TOKEN'));
+  check('optional private composer persists exact audience and actual prompt', calls[0].visibility.memberIds.join() === 'codex' && calls[0].prompt.includes('PRIVATE_BROWSER_TOKEN'));
+  await click('返回公开会话'); await page.type('#cc-message-input', '@claude PUBLIC_BROWSER_TOKEN'); await page.click('.cc-send-button'); await until(() => calls.length === 2);
+  check('public run cannot receive private prior content', !calls[1].prompt.includes('PRIVATE_BROWSER_TOKEN') && calls[1].member.id === 'claude');
+  await page.click('.cc-knowledge summary'); await click('可见范围', '.cc-knowledge'); await page.select('select[aria-label="成员视角预览"]', 'claude'); await page.waitForSelector('.cc-view-message');
+  check('member preview hides private body and reply', !(await page.$eval('.cc-knowledge', e => e.textContent)).includes('PRIVATE_BROWSER_TOKEN') && !(await page.$eval('.cc-knowledge', e => e.textContent)).includes('私密合成回复'));
+  await click('查找材料', '.cc-knowledge'); await fill('input[aria-label="搜索材料"]', 'PUBLIC_BROWSER_TOKEN'); await click('查找', '.cc-knowledge'); await page.waitForSelector('[aria-label="检索结果"] article');
+  check('lexical search returns persisted source and locatable result', (await page.$eval('[aria-label="检索结果"]', e => e.textContent)).includes('PUBLIC_BROWSER_TOKEN'));
+  await click('标为已读', '.cc-knowledge'); await until(() => app.collaborationStore.visibility.readCursor(cid).sequence > 0);
+  check('human read cursor persists independently of model delivery', app.collaborationStore.visibility.readCursor(cid).sequence === app.collaborationStore.detail(cid).messages.at(-1).sequence);
+  await click('收藏会话', '.cc-knowledge'); await until(() => app.collaborationStore.visibility.conversation(cid).favorite);
+  check('favorite is a persisted conversation attribute', app.collaborationStore.visibility.conversation(cid).favorite);
+  await click('成员组', '.cc-knowledge'); await formField('.cc-knowledge', '成员组名称', '评审组'); await selectCheckbox('.cc-knowledge', 'Codex'); await selectCheckbox('.cc-knowledge', 'Claude Code'); await click('保存成员组', '.cc-knowledge'); await until(() => app.collaborationStore.visibility.conversation(cid).memberGroups?.length === 1);
+  check('member group stores stable IDs', app.collaborationStore.visibility.conversation(cid).memberGroups[0].memberIds.length === 2);
+  await click('记忆治理', '.cc-knowledge'); await page.click('.cc-memory-create summary'); await formField('.cc-knowledge', '新记忆名称', '项目决定'); await formField('.cc-knowledge', '记忆正文', 'MEMORY_BROWSER_TOKEN'); await click('创建记忆候选', '.cc-knowledge'); await page.waitForSelector('.cc-memory-entry');
+  check('candidate is not yet recalled', app.collaborationStore.memory.current(cid).length === 0);
+  await click('批准', '.cc-memory-entry'); await page.waitForFunction(() => document.querySelector('.cc-memory-entry').textContent.includes('已批准，未收录'));
+  check('approval alone is explicitly not materialized', app.collaborationStore.memory.current(cid).length === 0);
+  await click('实际收录', '.cc-memory-entry'); await until(() => app.collaborationStore.memory.current(cid).length === 1);
+  await page.screenshot({ path: join(output, 'memory-desktop.png') });
+  await page.click('.cc-knowledge summary'); await page.type('#cc-message-input', '验证记忆'); await page.click('.cc-send-button'); await until(() => calls.length === 3);
+  check('materialized memory reaches actual subsequent prompt', calls[2].prompt.includes('MEMORY_BROWSER_TOKEN'));
+  await page.click('.cc-knowledge summary'); await click('撤销', '.cc-memory-entry'); await until(() => app.collaborationStore.memory.current(cid).length === 0);
+  check('revoked memory stops recall while version evidence remains', app.collaborationStore.memory.versions()[0].state === 'revoked');
+  await page.click('.cc-knowledge summary');
+  const first = app.collaborationStore.detail(cid).messages[0], messageScope = '#message-' + first.id;
+  await page.$eval(messageScope + ' .cc-message-actions summary', e => e.click()); await click('选段分享', messageScope);
+  const start = first.content.indexOf('保密数据'), end = first.content.length;
+  await page.$eval(messageScope + ' textarea', (el, range) => { el.focus(); el.setSelectionRange(range.start, range.end); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); }, { start, end });
+  await page.waitForFunction((scope, start, end) => document.querySelector(scope + ' .cc-message-actions .cc-note').textContent.includes(`${start}–${end}`), {}, messageScope, start, end);
+  await selectCheckbox(messageScope + ' .cc-message-actions', 'Claude Code'); await click('分享选段', messageScope); await until(() => calls.length === 4);
+  check('selected-share UI sends refs-only and excludes unselected secret', calls[3].prompt.includes('保密数据') && !calls[3].prompt.includes('PRIVATE_BROWSER_TOKEN') && app.collaborationStore.detail(cid).sources.at(-1).excerptRefs.length === 1);
+  await click('从此处分支', messageScope); await fill(messageScope + ' input[aria-label="分支名称"]', 'N8 独立分支'); await click('创建分支', messageScope); await page.waitForFunction(() => document.querySelector('h1').textContent === 'N8 独立分支');
+  const branch = app.collaborationStore.list().find(c => c.title === 'N8 独立分支');
+  check('branch UI creates independent history without triggering a model', branch.branch.messageId === first.id && calls.length === 4 && app.collaborationStore.detail(branch.id).sources.length === 0);
+  await page.click('.cc-knowledge summary'); await click('移入回收站', '.cc-knowledge'); await until(() => !!app.collaborationStore.visibility.conversation(branch.id).deletedAt); await page.waitForFunction(() => document.querySelector('#cc-message-input').disabled);
+  check('trash blocks typing and preserves branch records', await page.$eval('#cc-message-input', e => e.disabled) && app.collaborationStore.detail(branch.id).messages.length > 0);
+  await click('从回收站恢复', '.cc-knowledge'); await until(() => !app.collaborationStore.visibility.conversation(branch.id).deletedAt);
+  check('conversation restore keeps original ID', app.collaborationStore.visibility.conversation(branch.id).id === branch.id);
+  await page.click('.cc-knowledge summary'); await page.reload({ waitUntil: 'networkidle2' }); await page.waitForSelector('.cc-message-list');
+  await page.screenshot({ path: join(output, 'conversation-desktop.png') });
+  check('reload retains server-side knowledge and visibility', app.collaborationStore.visibility.readCursor(cid).sequence > 0 && app.collaborationStore.memory.versions().length === 1);
+  await page.setViewport({ width: 390, height: 844 }); await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0); await page.screenshot({ path: join(output, 'mobile.png') });
+  check('mobile input remains visible and no horizontal overflow', await page.$eval('.cc-send-button', e => { const r = e.getBoundingClientRect(); return r.right <= innerWidth && r.bottom <= innerHeight && r.top >= 0; }) && await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  check('no browser exceptions', errors.length === 0);
+  await writeFile(join(output, 'result.json'), JSON.stringify({ ok: true, checks, syntheticCalls: calls.length, errors }, null, 2)); console.log(JSON.stringify({ ok: true, checks: checks.length, syntheticCalls: calls.length, output }));
+} catch (e) { await writeFile(join(output, 'failure.json'), JSON.stringify({ error: e.stack, checks, errors }, null, 2)); console.error(e); process.exitCode = 1; }
+finally { await browser?.close(); await app?.close(); await rm(temp, { recursive: true, force: true }); }

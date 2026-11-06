@@ -6,6 +6,7 @@ export const digest = (value: unknown) => createHash('sha256').update(canonical(
 export function sessionFingerprint(contract: ExecutionContractSnapshot, identity: NativeSessionIdentity): string {
   const m = contract.memberSnapshot, a = contract.accountMetadataSnapshot;
   return digest({ carrier: m.carrier, account: a, model: m.model, effort: m.effort, instructions: m.instructions,
+    ...(contract.visibilityEpoch !== undefined ? { visibility: contract.visibility, visibilityEpoch: contract.visibilityEpoch } : {}),
     workspace: contract.workspaceScope, tools: contract.toolPolicyVersion,
     adapter: contract.adapterCapabilityVersion, runtime: identity.fingerprint });
 }

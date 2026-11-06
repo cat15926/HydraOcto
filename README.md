@@ -2,9 +2,9 @@
 
 本地多 Agent 持续协作平台。用户在同一会话中直接提问、追问或 @成员，成员结合自己的职责，通过持久投递和工具调用请求其他成员协助。平台保存来源、执行、输入与结果之间的关系，让协作过程可以追踪和核查。
 
-当前产品为 **0.8.0，已交付 N0–N7 的当前范围**：持续协作内核、Codex/Claude Code 接入、运行契约与输入冻结、执行核查、原生会话延续、可选任务交接、版本化产物审批、固定版本评审，以及来源排序、多来源消费、精确 Codex 活动追加与多人征询，以及会话整理、文本附件、项目授权和成员账户管理。N7 已通过 GPT-6.1 Terra 独立验收及补验，已升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
+当前产品为 **0.9.0，已交付 N0–N8 的当前范围**：持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户，以及私聊、选段分享、历史分支、记忆治理和词法检索。N8 已通过 GPT-6.1 Terra 独立复验并升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
 
-N7 已验证 223 项自动化、97 项浏览器断言和双 CLI API 纯附件实机链路；官方订阅模式推理仍未验证，具体限制见实施进度。
+N8 修订版通过 246 项自动化和 37 项 N8/N7 浏览器复验；首轮另通过 N0–N6 的 80 项浏览器回归及双 CLI API 实机链路。实机证据对应首轮冻结版；后续引用隐私修复通过确定性输入与独立对抗检查，未新增模型调用。官方订阅推理仍未验证。
 
 本项目根据独立设计实现。Clowder AI 用于研究业务行为，没有搬迁其源码、Prompt、数据库或品牌素材。
 
@@ -34,6 +34,11 @@ flowchart LR
   CORE --> ROUTE["自然路由"]
   CORE <--> COOP["来源排位 / 输入归并 / 精确追加 / 多人征询"]
   COOP <--> DB
+  HTTP --> VISIBILITY["可见性 / 选段引用 / 历史分支"]
+  VISIBILITY <--> DB
+  CORE --> VISIBILITY
+  VISIBILITY --> MEMORY["记忆审批 / SQLite 物化 / 授权检索"]
+  MEMORY <--> DB
   CORE --> CONTEXT["契约快照与输入组装"]
   CORE <--> DB[("SQLite<br/>来源、投递、执行、证据、事件")]
   CORE --> TASK["可选任务与交接<br/>ownerRevision / executionRef"]
@@ -63,6 +68,7 @@ flowchart LR
 | 持久协作内核 | [store.ts](server/collaboration/store.ts) | 幂等命令、来源领取、责任关联、冻结输入、终态及恢复事务 |
 | 任务责任 | [tasks.ts](server/collaboration/tasks.ts)、[TaskPanel.tsx](web/TaskPanel.tsx) | 任务状态、准确执行授权、等待释放的交接与责任投影 |
 | 产物与交互 | [artifacts.ts](server/collaboration/artifacts.ts)、[artifact-files.ts](server/collaboration/artifact-files.ts)、[interactions.ts](server/collaboration/interactions.ts)、[ArtifactPanel.tsx](web/ArtifactPanel.tsx) | 精确审批、不可变文件、评审失效、原作业核查与有界提问 |
+| N8 可见性与长期资料 | [visibility.ts](server/collaboration/visibility.ts)、[memory.ts](server/collaboration/memory.ts)、[KnowledgePanel.tsx](web/KnowledgePanel.tsx) | 同一可见范围的输入与工具、引用失效、历史分支、记忆版本及词法检索 |
 | N7 工作台与配置 | [workbench.ts](server/collaboration/workbench.ts)、[account-discovery.ts](server/collaboration/account-discovery.ts)、[WorkbenchPanel.tsx](web/WorkbenchPanel.tsx) | 附件正文和来源摘要、授权目录身份、成员账户 CRUD、默认配置 CAS、目录/身份/额度分离 |
 | N6 协作分支 | [cooperation.ts](server/collaboration/cooperation.ts)、[CooperationPanel.tsx](web/CooperationPanel.tsx) | 来源排序、抑制/退避、准确多来源消费、追加交付状态和多人征询收集 |
 | 调度执行 | [engine.ts](server/collaboration/engine.ts) | 在数据库事务外调用承载，处理工具回调、取消与核查结果 |
@@ -82,6 +88,14 @@ SQLite 短事务保证命令幂等、来源领取、回复关联和合格失败�
 6. 原生回执、工具调用、使用量和退出证据陆续落库，结果保存到原回复。页面通过 SSE 获取变化，断线后按事件游标补取。
 
 新执行工具为 `workspace_list`、`workspace_read`、`collaboration_request`，`task_list`、`task_create`、`task_update`、`task_handoff`，以及 `artifact_list`、`artifact_read`、`artifact_propose`、`review_request`、`review_submit`、`user_question`；N6 增加 `conversation_pending`、`conversation_read`、`multi_mention`。旧冻结契约保留原工具集合，权限变化会使旧原生会话重建。工作区访问限制在配置目录内，读取工具只读，拒绝越界及软链接逃逸；任意 Shell 和工作区写入不开放。产物审批只允许将固定版本保存到平台数据目录。
+
+## N8 的可见性与长期资料
+
+普通输入仍可直接发送；“私聊”是可选入口，回复保留同一接收范围。公开执行不读取未公开私聊，私聊/公开切换会重建原生上下文。私聊暂不写公开任务、产物或向其他范围请求协作；可由用户在消息“更多操作”中选择片段分享。分享按准确引用重验，不依赖旧缓存正文。消息可以显式公开、删除、导出，或从指定历史点建立独立分支。公开回复前需单独公开其引用的私聊；删除引用后不再使用缓存正文，分支也保留独立引用关系。
+
+“资料与记忆”提供会话收藏/回收站、已读游标、成员组、词法检索和记忆治理。记忆先生成候选，经批准后还需“实际收录”；物化回执与条目 head 在 SQLite 同事务提交。新版本或撤销保留历史审计，不能抹去模型已经读过的信息。Agent 仅可提议本会话当前范围的候选，不能自行审批或扩大权限。
+
+新工具为 memory_read、memory_propose、material_search。检索覆盖获权消息、已发送文本附件、已发布受管产物、已收录记忆和平台回复；不读取原生 transcript、原始冻结输入审计或任意机器目录。semantic/hybrid 暂未接入，显式返回降级状态。当前 HTTP 服务仍是本机单用户；成员视角是用户审查功能，Agent 身份由准确执行绑定，不由请求里的 memberId 声明授予。
 
 ## N7 的日常工作台与配置
 
@@ -147,9 +161,9 @@ sequenceDiagram
 
 ## 当前边界
 
-- 双 CLI 支持有证据的原生续接；模型未固定、身份不可核验或旧契约执行保守新建。API 直连使用平台公开历史。N6 支持经过本机协议发现的 Codex 精确当前轮追加；Claude/API 直连仍排队。accepted、read 与任务完成独立，未知不自动重发，追加核查目前限原活动句柄。
+- 双 CLI 支持有证据的原生续接；模型未固定、身份不可核验或旧契约执行保守新建。API 直连使用平台获权历史。N6 支持经过本机协议发现的 Codex 精确当前轮追加；Claude/API 直连仍排队。accepted、read 与任务完成独立，未知不自动重发，追加核查目前限原活动句柄。
 - 执行核查使用本服务进程保留的准确观察。服务重启、缓存丢失或承载无法查询时，明确保留未知，不自动重发。
-- 普通任务支持同会话交接；跨会话委托、Action 专用责任与外部条件自动唤醒尚未实现。N5 的本地受管产物写入已实现，任意外部作业恢复未实现；N6 多人征询收齐后发一次普通汇总，超时不发部分汇总、重启停止收集；N7 已支持文本附件，图片/PDF、私聊、长期记忆和其他承载追加属于后续范围。
+- 普通任务支持同会话交接；跨会话委托、Action 专用责任与外部条件自动唤醒尚未实现。N5 的本地受管产物写入已实现，任意外部作业恢复未实现；N6 多人征询收齐后发一次普通汇总，超时不发部分汇总、重启停止收集；N7 已支持文本附件，N8 已支持私聊、历史分支及长期记忆；图片/PDF、语义检索和其他承载追加属于后续范围。
 - `/?legacy=1` 保留早期顺序任务原型。它与持续协作共用服务连接和租约，但使用独立数据表、API 与业务状态，其审批和产物能力不计入持续协作入口。
 
 ## 快速启动

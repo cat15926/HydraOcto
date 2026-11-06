@@ -12,7 +12,7 @@ export class InteractionService {
   private save(i: RuntimeInteraction) { i.revision++; this.artifacts.save('cc_runtime_interactions', i, 'interaction.changed'); }
   private active(i: RuntimeInteraction): boolean {
     try {
-      const run = this.port.invocation(i.invocationId), o = this.artifacts.origin(i.conversationId, run.id);
+      const run = this.port.invocation(i.invocationId), o = this.artifacts.origin(i.conversationId, run.id, undefined, true);
       return o.actor.kind === 'agent' && o.actor.sourceId === i.sourceId && o.actor.sourceRevision === i.sourceRevision && o.actor.cancelRevision === i.cancelRevision && o.inputRevision === i.inputRevision && (!i.nativeSessionId || run.nativeSessionId === i.nativeSessionId) && (!i.nativeTurnId || run.nativeTurnId === i.nativeTurnId);
     } catch { return false; }
   }
@@ -26,7 +26,7 @@ export class InteractionService {
   }
   create(invocationId: string, request: NativeInteractionRequest, transport: RuntimeInteraction['transport']) {
     return this.port.tx(() => {
-      const run = this.port.invocation(invocationId), o = this.artifacts.origin(run.conversationId, run.id);
+      const run = this.port.invocation(invocationId), o = this.artifacts.origin(run.conversationId, run.id, undefined, true);
       if (o.actor.kind !== 'agent') throw new AppError(409, '缺少准确执行身份。');
       stringField(request.providerRequestId, '承载请求标识');
       const payloadDigest = digest(request), existing = this.list().find(i => i.invocationId === invocationId && i.transport === transport && i.providerRequestId === request.providerRequestId);

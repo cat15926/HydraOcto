@@ -95,7 +95,8 @@ export class CooperationService {
     } catch (e) { if (e instanceof AppError && e.code === 'no_routable_member') return false; throw e; }
   }
   canConsume(i: CollaborationInvocation, s: SourceWork): boolean {
-    if (s.conversationId !== i.conversationId || s.bindingState !== 'bound' || s.withdrawnAt || s.taskRef || s.reviewRef || s.groupId || this.delayed(s.id) || this.suppressed(i.conversationId, i.memberId)) return false;
+    if (!this.store.visibility.sameScope(i.id, s) || s.conversationId !== i.conversationId || s.bindingState !== 'bound' || s.withdrawnAt || s.taskRef || s.reviewRef || s.groupId || this.delayed(s.id) || this.suppressed(i.conversationId, i.memberId)) return false;
+    if (this.store.contract(i.id).toolPolicyVersion === 'visibility-memory-v1' && this.store.visibility.admissionReason(s)) return false;
     const d = this.data.rows<Delivery>('cc_deliveries').find(d => d.sourceId === s.id && d.memberId === i.memberId);
     return d?.status === 'pending' && !d.handoffId && (!d.continuation || d.continuation.fallback === true);
   }
@@ -105,7 +106,7 @@ export class CooperationService {
     for (const s of this.sources(i.conversationId)) { if (s.bindingState === 'unresolved' && !s.withdrawnAt) break; if (this.canConsume(i, s)) out.push(s); }
     return out;
   }
-  actor(i: CollaborationInvocation) { this.port.tasks.actor(i.id); if (this.store.contract(i.id).toolPolicyVersion !== 'cooperation-v2' || i.acceptance !== 'accepted') conflict('当前执行未获得协作输入工具权限。'); }
+  actor(i: CollaborationInvocation) { this.store.visibility.assertTool(i.id, 'conversation_read'); this.port.tasks.actor(i.id, true); if (!['cooperation-v2', 'visibility-memory-v1'].includes(this.store.contract(i.id).toolPolicyVersion ?? '') || i.acceptance !== 'accepted') conflict('当前执行未获得协作输入工具权限。'); }
   read(invocationId: string, input: Record<string, unknown>, callId: string) {
     return this.port.tx(() => {
       const i = this.store.invocation(invocationId); this.actor(i);
@@ -131,7 +132,7 @@ export class CooperationService {
   groups(cid?: string) { return this.data.rows<MentionGroup>('cc_mention_groups', cid).map(g => ({ ...g, ...(g.state === 'collecting' && this.collectors.has(g.id) ? { results: [...this.collectors.get(g.id)!.values()], missing: g.targets.filter(t => !this.collectors.get(g.id)!.has(t)) } : {}) })); }
   createGroup(cid: string, input: Record<string, unknown>, invocationId?: string) {
     return this.port.tx(() => {
-      if (invocationId) this.actor(this.store.invocation(invocationId));
+      if (invocationId) { this.store.visibility.assertTool(invocationId, 'multi_mention'); this.actor(this.store.invocation(invocationId)); }
       const out = this.port.command(`multi-mention:${cid}:${stringField(input.requestId, '请求标识')}`, { input, invocationId }, () => {
         const i = invocationId ? this.store.invocation(invocationId) : undefined;
         if (i && (i.conversationId !== cid || this.groups(cid).some(g => g.state === 'collecting' && g.targets.includes(i.memberId)))) conflict('正在参与多人征询的成员不能再次创建征询组。');
@@ -181,10 +182,10 @@ export class CooperationService {
   exposures(cid?: string) { return this.data.rows<InputExposure>('cc_input_exposures', cid); }
   detail(cid: string) { return { queue: this.queue(cid), groups: this.groups(cid), inputExposures: this.exposures(cid), inputHandoffs: this.handoffs(cid) }; }
   bindContinuation(s: SourceWork, deliveryMode?: 'next_turn' | 'continue_current') {
-    if (deliveryMode === 'next_turn' || s.requestedTargets.length !== 1) return;
+    if (deliveryMode === 'next_turn' || s.excerptRefs?.length || s.requestedTargets.length !== 1) return;
     for (const d of this.data.rows<Delivery>('cc_deliveries').filter(d => d.sourceId === s.id)) {
       const i = this.store.invocations(s.conversationId).find(i => i.memberId === d.memberId && ['prepared', 'running'].includes(i.status));
-      if (!i || this.store.contract(i.id).toolPolicyVersion !== 'cooperation-v2') continue;
+      if (!i || !this.store.visibility.sameScope(i.id, s) || !['cooperation-v2', 'visibility-memory-v1'].includes(this.store.contract(i.id).toolPolicyVersion ?? '')) continue;
       d.continuation = { invocationId: i.id, responseId: i.responseId, cancelRevision: i.cancelRevision ?? 0, ...(i.member.carrier !== 'codex-app-server' ? { fallback: true, reason: '当前承载不支持活动追加，保留下一轮投递。' } : {}) };
       this.saveDelivery(d);
     }
