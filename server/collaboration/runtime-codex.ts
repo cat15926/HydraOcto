@@ -47,7 +47,7 @@ export async function isolatedCodexArgs(command: string, cwd?: string): Promise<
 }
 export async function invokeCodex(request: RuntimeRequest, command: string): Promise<RuntimeResult> {
   const api = request.account.auth === 'api' ? cliApiSettings(request) : undefined;
-  const canAppend = ['cooperation-v2', 'visibility-memory-v1'].includes(request.toolPolicyVersion ?? '') && await supportsCodexAppend(command);
+  const canAppend = ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(request.toolPolicyVersion ?? '') && await supportsCodexAppend(command);
   const args = await isolatedCodexArgs(command, request.cwd);
   const env = cliEnv();
   if (api) {
@@ -82,16 +82,16 @@ export async function invokeCodex(request: RuntimeRequest, command: string): Pro
             const result = await executeTool(request, params.tool, params.arguments, params.callId);
             proc.send({ id: message.id, result: { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] } });
           } catch { proc.send({ id: message.id, result: { success: false, contentItems: [{ type: 'inputText', text: 'Tool request was rejected by the platform.' }] } }); }
-        } else if (message.method === 'item/tool/requestUserInput' && matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(request.toolPolicyVersion ?? '')) {
+        } else if (message.method === 'item/tool/requestUserInput' && matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(request.toolPolicyVersion ?? '')) {
           const response = await request.onInteraction({ providerRequestId: String(message.id), kind: 'question', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId,
             questions: Array.isArray(params.questions) ? params.questions.map((q: Json) => ({ id: q.id, question: q.question, ...(Array.isArray(q.options) ? { options: q.options.map((o: Json) => o.label) } : {}) })) : [], payload: params });
           const answers = Object.fromEntries(Object.entries(response.state === 'answered' ? response.answers ?? {} : {}).map(([id, answer]) => [id, { answers: [answer] }]));
           if (!done && !request.signal.aborted) proc.send({ id: message.id, result: { answers } });
         } else if (message.method === 'item/commandExecution/requestApproval' || message.method === 'item/fileChange/requestApproval') {
-          if (matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(request.toolPolicyVersion ?? '')) await request.onInteraction({ providerRequestId: String(message.id), kind: 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
+          if (matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(request.toolPolicyVersion ?? '')) await request.onInteraction({ providerRequestId: String(message.id), kind: 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
           proc.send({ id: message.id, result: { decision: 'decline' } });
         } else if (message.method === 'item/permissions/requestApproval' || message.method === 'mcpServer/elicitation/request') {
-          if (matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(request.toolPolicyVersion ?? '')) await request.onInteraction({ providerRequestId: String(message.id), kind: message.method.startsWith('mcpServer') ? 'elicitation' : 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
+          if (matches(params) && nativeTurnId && request.onInteraction && ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(request.toolPolicyVersion ?? '')) await request.onInteraction({ providerRequestId: String(message.id), kind: message.method.startsWith('mcpServer') ? 'elicitation' : 'approval', operation: message.method, nativeSessionId, nativeTurnId, nativeItemId: params.itemId, payload: params });
           proc.send({ id: message.id, result: message.method.startsWith('mcpServer') ? { action: 'decline' } : { permissions: {}, scope: 'turn' } });
         } else proc.send({ id: message.id, error: { code: -32601, message: 'This client does not grant this capability.' } });
       })().catch(error => fail(error instanceof Error ? error : new Error('Tool response failed.')));

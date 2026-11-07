@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { createApplication } from '../server/index.js';
+import type { FolderPicker } from '../server/collaboration/folder-picker.js';
 import type { RuntimeRequest } from '../shared/collaboration.js';
 const rid = () => randomUUID();
-async function setup() {
+async function setup(folderPicker?: FolderPicker) {
   const root = await mkdtemp(join(tmpdir(), 'n7-http-')), workspace = join(root, 'workspace'); await mkdir(workspace);
   const calls: RuntimeRequest[] = [];
-  const app = await createApplication({ port: 0, dataDir: join(root, 'private'), workspace, collaborationRuntime: {
+  const app = await createApplication({ port: 0, folderPicker, dataDir: join(root, 'private'), workspace, collaborationRuntime: {
     probe: async () => [],
     discoverAccount: async a => ({ accountId: a.id, accountRevision: a.revision ?? 1, installed: true, configured: true, checkedAt: new Date().toISOString(), connection: 'reachable', identity: { state: 'unknown' }, models: [{ id: 'fixture-model', name: 'Synthetic model', efforts: [] }], catalogSource: 'http-fixture', quota: { state: 'unknown' } }),
     invoke: async r => { calls.push(r); r.onEvent({ kind: 'accepted', detail: { source: 'synthetic' } }); r.onEvent({ kind: 'process_exit', detail: { confirmed: true } }); return { text: 'Synthetic result containing uploaded material', continuity: 'fresh' }; },
@@ -22,7 +23,7 @@ async function setup() {
 async function until(fn: () => boolean) { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 20)); } }
 test('N7 HTTP: configure real-directory member -> explicit workspace grant -> pure attachment -> actual runtime request and reply reference', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.9.0-n8');
+    assert.equal(h.boot.version, '0.10.0-n9');
     assert.equal((await h.api('/api/accounts/codex-cli/probe', { identity: 'forged' })).status, 400);
     assert.equal((await h.api('/api/accounts/codex-cli/probe', {})).status, 200);
     const member = { ...h.boot.members[0], aliases: ['reviewer'], model: 'fixture-model', expectedRevision: 1, requestId: rid() };
@@ -65,4 +66,41 @@ test('N7 HTTP: durable event pages and SSE Last-Event-ID replay exact subsequent
     assert.ok(body.includes(`id: ${first.nextCursor}\n`)); assert.ok(!body.includes('conversation.created')); assert.ok(body.includes('user_upload'));
     assert.equal((await h.api('/api/collaboration/event-page?after=-1')).status, 400);
   } finally { await h.close(); }
+});
+
+test('desktop folder selection checks the target twice and cannot grant on open, cancel or disconnect', async () => {
+  let resolvePicker!: (value: string | null) => void, opens = 0, aborts = 0;
+  const h = await setup(signal => new Promise(resolve => {
+    ++opens; resolvePicker = resolve;
+    signal.addEventListener('abort', () => { ++aborts; resolve(null); }, { once: true });
+  }));
+  try {
+    const c = (await h.api('/api/conversations', { title: 'picker', memberIds: ['codex'], defaultMemberId: 'codex', requestId: rid() })).data.conversation;
+    const base = '/api/conversations/' + c.id, pick = base + '/workspace-pick', body = {expectedRevision: c.revision ?? 1};
+    assert.equal((await h.api(pick, body, '')).status, 403);
+    assert.equal((await h.api(pick, { ...body, path: h.workspace })).status, 400);
+    assert.equal((await h.api(pick, {expectedRevision: 99})).status, 409);
+    assert.equal(opens, 0);
+    let pending = h.api(pick, body); await until(() => opens === 1);
+    assert.equal((await h.api(pick, body)).status, 409);
+    resolvePicker(null); assert.deepEqual((await pending).data, {preview: null});
+    const controller = new AbortController();
+    const disconnected = fetch(h.url + pick, {method: 'POST', signal: controller.signal, headers: {'content-type':'application/json','x-csrf-token':h.boot.csrfToken},body:JSON.stringify(body)}).catch(() => undefined);
+    await until(() => opens === 2); controller.abort(); await disconnected; await until(() => aborts === 1);
+    pending = h.api(pick, body); await until(() => opens === 3);
+    resolvePicker(join(h.root,'private')); assert.notEqual((await pending).status, 200);
+    pending = h.api(pick, body); await until(() => opens === 4);
+    assert.equal((await h.api(base + '/organize', {action:'archive', requestId:rid(), ...body})).status, 200);
+    resolvePicker(h.workspace); assert.equal((await pending).status, 409);
+    const archived = (await h.api(base)).data.conversation;
+    assert.equal((await h.api(pick, {expectedRevision:archived.revision})).status, 409);
+    assert.equal(opens, 4); assert.ok(!archived.workspaceGrant);
+    await h.api(base + '/organize', {action:'restore',requestId:rid(),expectedRevision:archived.revision});
+    pending = h.api(pick, {expectedRevision:(await h.api(base)).data.conversation.revision});
+    await until(() => opens === 5); const dir = join(h.root,'目录 with space '); await mkdir(dir); resolvePicker(dir);
+    const { preview } = (await pending).data; assert.ok(preview.value.path.endsWith('/目录 with space '));
+    assert.ok(!(await h.api(base)).data.conversation.workspaceGrant);
+    assert.equal((await h.api(base + '/workspace-apply', {previewId:preview.id,requestId:rid()})).status,200);
+    assert.equal((await h.api(base)).data.conversation.workspaceGrant.path,preview.value.path); assert.equal(h.calls.length,0);
+  } finally { resolvePicker?.(null); await h.close(); }
 });

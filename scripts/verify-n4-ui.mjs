@@ -1,3 +1,4 @@
+import { openWorkspaceTool, closeWorkspace } from './ui-workspace.mjs';
 /** Isolated browser acceptance with held synthetic adapters; no model calls. */
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -30,7 +31,7 @@ try {
   const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label).click(), label, scope); };
   await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
   check('natural composer has no required task or routing options', !(await page.$('.cc-composer select')));
-  await page.type('#cc-message-input', '@codex 一条普通聊天'); await page.click('.cc-send-button'); await page.waitForSelector('.cc-status-succeeded'); await page.click('.cc-monitor-button');
+  await page.type('#cc-message-input', '@codex 一条普通聊天'); await page.click('.cc-send-button'); await page.waitForSelector('.cc-status-succeeded'); await openWorkspaceTool(page, 'tasks');
   check('ordinary chat creates no mandatory task', (await page.$$('.cc-task-card')).length === 0);
   await click('新建任务'); await page.type('.cc-task-dialog input[name=title]', 'N4 正式交接验收'); await page.type('.cc-task-dialog textarea[name=description]', '这是一项有独立负责人和执行证据的合成任务。');
   await page.select('.cc-task-dialog select[name=ownerMemberId]', 'codex'); await click('保存', '.cc-task-dialog');
@@ -52,7 +53,7 @@ try {
   check('owner changes exactly once and new execution belongs to Claude', app.collaborationStore.tasks.getTask(taskId).ownerRevision === 2 && calls[2].member.id === 'claude');
   await page.screenshot({ path: join(output, 'completed-before-exit-desktop.png') }); releases.get(3)();
   await page.waitForFunction(() => document.querySelector('.cc-task-card')?.textContent.includes('当前无执行绑定'));
-  await page.reload({ waitUntil: 'networkidle2' }); await page.click('.cc-monitor-button'); await page.waitForSelector('.cc-task-card');
+  await page.reload({ waitUntil: 'networkidle2' }); await openWorkspaceTool(page, 'tasks'); await page.waitForSelector('.cc-task-card');
   check('task state and handoff history survive reload', (await page.$eval('.cc-task-card', e => e.textContent)).includes('已完成') && (await page.$eval('.cc-task-card', e => e.textContent)).includes('交接记录 · 2'));
   await click('新建任务'); await page.type('.cc-task-dialog input[name=title]', '未分配任务与版本冲突'); await click('保存', '.cc-task-dialog');
   await page.waitForFunction(() => document.querySelectorAll('.cc-task-card').length === 2); const free = app.collaborationStore.tasks.list(cid)[1];

@@ -27,7 +27,7 @@ export interface ConversationMessage {
   branchOrigin?: { conversationId: string; messageId: string }; excerptConversationId?: string;
 }
 export interface SourceWork {
-  id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result' | 'multi_mention';
+  id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result' | 'multi_mention' | 'cross_message' | 'action';
   content: string; requestedTargets: string[]; bindingState: 'bound' | 'unresolved';
   parentInvocationId?: string; authorMemberId?: string; revision: number; sequence: number;
   depth: number; createdAt: string; routingDecisionId?: string;
@@ -37,12 +37,23 @@ export interface SourceWork {
   withdrawnAt?: string; groupId?: string;
   routingContent?: string; attachmentIds?: string[]; replyTo?: string;
   visibility?: MessageVisibility; excerptRefs?: MessageExcerpt[];
+  crossRef?: { transferId: string }; actionRef?: { actionId: string; generation: number };
 }
+export interface CollaborationEndpoint { conversationId: string; memberId: string }
+export interface CrossGrant { id: string; conversationId: string; home: CollaborationEndpoint; target: CollaborationEndpoint; revision: number; state: 'active' | 'revoked' | 'expired'; homeWorkspace: string; targetWorkspace: string; expiresAt: string; reason?: string; createdAt: string }
+export interface CrossTransfer { id: string; conversationId: string; grantId: string; grantRevision: number; from: CollaborationEndpoint; to: CollaborationEndpoint; sourceId: string; origin?: TaskActor; refs: MessageExcerpt[]; content: string; invalidatedAt?: string; createdAt: string }
+export interface ActionRecord { id: string; conversationId: string; title: string; content: string; grantId: string; grantRevision: number; home: CollaborationEndpoint; holder: CollaborationEndpoint; predecessor: CollaborationEndpoint; generation: number; revision: number; state: 'preparing' | 'queued' | 'active' | 'candidate' | 'waiting' | 'returning' | 'replaceable' | 'completed' | 'cancelled' | 'blocked'; completion: 'human_acceptance' | 'artifact_published'; refs: MessageExcerpt[]; origin?: TaskActor; taskId?: string; taskOwnerRevision?: number; taskRevision?: number; priorInvocationId?: string; executionId?: string; lastExecutionId?: string; currentSourceId?: string; candidateId?: string; waitId?: string; reason?: string; createdAt: string; updatedAt: string }
+export interface ActionCandidate { id: string; conversationId: string; actionId: string; generation: number; revision: number; invocationId: string; responseId: string; inputRevision: number; sourceId: string; sourceRevision: number; sourceDigest: string; summary: string; artifactVersionId?: string; artifactDigest?: string; digest: string; createdAt: string }
+export interface ActionVerdict { id: string; conversationId: string; actionId: string; generation: number; candidateId: string; candidateDigest: string; authority: 'human_acceptance' | 'artifact_published'; evidence: Record<string, unknown>; createdAt: string }
+export type WaitCondition = { kind: 'timer'; at: string } | { kind: 'signal'; name: string } | { kind: 'job_succeeded'; jobId: string } | { kind: 'artifact_published'; versionId: string; digest: string };
+export interface ActionWait { id: string; conversationId: string; actionId: string; generation: number; episode: number; revision: number; invocationId: string; sourceId: string; condition: WaitCondition; state: 'waiting' | 'ready' | 'fired' | 'expired' | 'cancelled'; deadline: string; notBefore: string; evidenceId?: string; wakeSourceId?: string; createdAt: string }
+export interface ConditionEvidence { id: string; conversationId: string; waitId: string; episode: number; eventId: string; authority: 'human_signal' | 'platform_timer' | 'managed_job' | 'artifact_receipt'; detail: Record<string, unknown>; createdAt: string }
 /** Absence is public for legacy records. Private scope is an immutable audience until explicit reveal. */
 export interface MessageVisibility { kind: 'private'; memberIds: string[]; revealedAt?: string }
 export interface MessageExcerpt { messageId: string; revision: number; digest: string; start: number; end: number }
 export interface ReadCursor { conversationId: string; sequence: number; updatedAt: string }
 export interface MemoryEntry { id: string; conversationId: string; key: string; scope: 'conversation' | 'library'; visibility?: MessageVisibility; owner: string; revision: number; headVersionId?: string; createdAt: string; updatedAt: string; revokedAt?: string }
+export interface MemoryLibraryDetail { memories: MemoryEntry[]; memoryVersions: MemoryVersion[]; conversations: Conversation[] }
 export interface MemoryVersion { id: string; entryId: string; conversationId: string; number: number; baseRevision: number; content: string; digest: string; state: 'candidate' | 'approved' | 'materialized' | 'rejected' | 'revoked' | 'stale'; revision: number; createdAt: string; approvedAt?: string; materializedAt?: string; revokedAt?: string; origin: { kind: 'user' | 'agent'; invocationId?: string; memberId?: string }; sourceRefs: MessageExcerpt[] }
 export interface MemorySnapshot { entryId: string; versionId: string; revision: number; key: string; content: string; digest: string }
 export interface SearchHit { kind: 'threads' | 'docs' | 'memory' | 'sessions'; conversationId: string; id: string; title: string; excerpt: string }
@@ -113,6 +124,7 @@ export interface ConversationDetail {
   queue?: QueueState; groups?: MentionGroup[]; inputExposures?: InputExposure[]; inputHandoffs?: InputHandoff[];
   attachments?: ConversationAttachment[];
   memories?: MemoryEntry[]; memoryVersions?: MemoryVersion[]; readCursor?: ReadCursor;
+  crossGrants?: CrossGrant[]; crossTransfers?: CrossTransfer[]; actions?: ActionRecord[]; actionCandidates?: ActionCandidate[]; actionVerdicts?: ActionVerdict[]; actionWaits?: ActionWait[]; conditionEvidence?: ConditionEvidence[];
 }
 export interface QueueState {
   revision: number; sources: SourceWork[];
@@ -199,6 +211,7 @@ export interface OrdinaryTask {
   id: string; conversationId: string; title: string; description: string; status: OrdinaryTaskStatus;
   ownerMemberId: string | null; ownerRevision: number; revision: number;
   executionRef?: TaskExecutionRef; lastExecutionRef?: TaskExecutionRef; currentSourceId?: string; pendingHandoffId?: string;
+  delegationId?: string;
   createdBy: TaskActor; createdAt: string; updatedAt: string; statusReason?: string;
   disposition?: { kind: 'frozen' | 'degraded' | 'abandoned'; reason: string; actor: TaskActor; createdAt: string };
 }

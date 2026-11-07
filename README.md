@@ -2,9 +2,9 @@
 
 本地多 Agent 持续协作平台。用户在同一会话中直接提问、追问或 @成员，成员结合自己的职责，通过持久投递和工具调用请求其他成员协助。平台保存来源、执行、输入与结果之间的关系，让协作过程可以追踪和核查。
 
-当前产品为 **0.9.0，已交付 N0–N8 的当前范围**：持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户，以及私聊、选段分享、历史分支、记忆治理和词法检索。N8 已通过 GPT-6.1 Terra 独立复验并升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
+当前产品为 **0.10.0，已交付 N0–N9 的当前范围**：持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户、私聊与历史分支、记忆治理及词法检索，以及跨会话授权、专用责任和条件等待。N9 已通过 GPT-6.1 Terra 独立复验并升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
 
-N8 修订版通过 246 项自动化和 37 项 N8/N7 浏览器复验；首轮另通过 N0–N6 的 80 项浏览器回归及双 CLI API 实机链路。实机证据对应首轮冻结版；后续引用隐私修复通过确定性输入与独立对抗检查，未新增模型调用。官方订阅推理仍未验证。
+N9 修订版通过 269 项自动化和 57 项 N9/N8/N7 浏览器复验；首轮开发与独立各通过 137 项浏览器断言及 4 次真实 CLI / 13 项断言，两个协作方向均覆盖。首轮发现的目录身份和原生上下文两项权限缺陷已修复并独立复验关闭。真实模型证据对应首轮冻结版；修复后的权限边界通过确定性输入与独立对抗检查，未新增模型调用。官方订阅推理仍未验证。
 
 本项目根据独立设计实现。Clowder AI 用于研究业务行为，没有搬迁其源码、Prompt、数据库或品牌素材。
 
@@ -44,6 +44,15 @@ flowchart LR
   CORE --> TASK["可选任务与交接<br/>ownerRevision / executionRef"]
   TASK <--> DB
   TASK -->|"释放证据齐全后提交新来源"| CORE
+  HTTP --> CROSS["两端成员授权 / 跨会话精确投递"]
+  CROSS <--> DB
+  CORE <--> CROSS
+  CROSS --> ACTION["专用 Action / 任务委托<br/>holder / generation / candidate / verdict"]
+  ACTION <--> DB
+  TASK <--> ACTION
+  ACTION --> WAIT["有类型的条件 / episode / 事实证据"]
+  WAIT -->|"条件满足且原执行确认退出"| CORE
+  WAIT <--> DB
   CORE --> SESSION["会话代次与兼容检查"]
   CORE <--> ARTIFACT["版本化产物、审批与固定材料评审"]
   ARTIFACT <--> DB
@@ -67,6 +76,7 @@ flowchart LR
 | 路由与上下文 | [routing.ts](server/collaboration/routing.ts)、[context.ts](server/collaboration/context.ts) | 自然跟聊选目标、准确 caller、公开背景与输入预算 |
 | 持久协作内核 | [store.ts](server/collaboration/store.ts) | 幂等命令、来源领取、责任关联、冻结输入、终态及恢复事务 |
 | 任务责任 | [tasks.ts](server/collaboration/tasks.ts)、[TaskPanel.tsx](web/TaskPanel.tsx) | 任务状态、准确执行授权、等待释放的交接与责任投影 |
+| N9 跨会话与专用责任 | [cross.ts](server/collaboration/cross.ts)、[actions.ts](server/collaboration/actions.ts)、[ActionPanel.tsx](web/ActionPanel.tsx) | 精确两端授权、公开材料重验、独立 holder、候选/验收分离、任务委托及条件唯一续跑 |
 | 产物与交互 | [artifacts.ts](server/collaboration/artifacts.ts)、[artifact-files.ts](server/collaboration/artifact-files.ts)、[interactions.ts](server/collaboration/interactions.ts)、[ArtifactPanel.tsx](web/ArtifactPanel.tsx) | 精确审批、不可变文件、评审失效、原作业核查与有界提问 |
 | N8 可见性与长期资料 | [visibility.ts](server/collaboration/visibility.ts)、[memory.ts](server/collaboration/memory.ts)、[KnowledgePanel.tsx](web/KnowledgePanel.tsx) | 同一可见范围的输入与工具、引用失效、历史分支、记忆版本及词法检索 |
 | N7 工作台与配置 | [workbench.ts](server/collaboration/workbench.ts)、[account-discovery.ts](server/collaboration/account-discovery.ts)、[WorkbenchPanel.tsx](web/WorkbenchPanel.tsx) | 附件正文和来源摘要、授权目录身份、成员账户 CRUD、默认配置 CAS、目录/身份/额度分离 |
@@ -89,17 +99,33 @@ SQLite 短事务保证命令幂等、来源领取、回复关联和合格失败�
 
 新执行工具为 `workspace_list`、`workspace_read`、`collaboration_request`，`task_list`、`task_create`、`task_update`、`task_handoff`，以及 `artifact_list`、`artifact_read`、`artifact_propose`、`review_request`、`review_submit`、`user_question`；N6 增加 `conversation_pending`、`conversation_read`、`multi_mention`。旧冻结契约保留原工具集合，权限变化会使旧原生会话重建。工作区访问限制在配置目录内，读取工具只读，拒绝越界及软链接逃逸；任意 Shell 和工作区写入不开放。产物审批只允许将固定版本保存到平台数据目录。
 
+## N9 的跨会话与专用责任
+
+在“协作动态 → 跨会话与专用责任”批准两个会话的准确成员和有效期后，可发送跨会话消息或建立专用责任。授权冻结双方工作区身份，撤销、过期或目录变更后不能继续投递。只携带明确正文与获准的公开引用；不会继承对端历史、私聊或项目权限。普通跨会话消息成功不会自动叫回发送者。
+
+专用责任 Action 保存主会话负责人、当前执行会话/成员和代次。可选委托已有普通任务，原任务 owner 保持不变。成员提交候选后，用户按准确候选接受结果，或核验固定版本产物的实际发布事实；回复结束本身不完成责任。返回前任、重派和取消都保留准确执行绑定，确认旧执行退出后才能开启下一代。
+
+成员可登记定时、人工命名信号、受管作业成功或已发布产物等待。平台记录事实证据，再等原执行确认退出，创建唯一的续跑来源；重复通知、重启、旧代次和过期不会重复唤醒。每个 Action 同时只有一个 holder，可以建立多个独立 Action；普通会话没有固定唯一负责人。授权和等待最多 30 天，冷却最多一小时。本轮不支持任意外部 webhook、Shell 探针或私密材料跨会话转发。
+
+新工具为 cross_routes、cross_send、action_list、action_create、action_candidate、action_return、action_wait；Agent 身份由准确执行绑定，创建授权与最终验收由本地用户操作。
+
 ## N8 的可见性与长期资料
 
 普通输入仍可直接发送；“私聊”是可选入口，回复保留同一接收范围。公开执行不读取未公开私聊，私聊/公开切换会重建原生上下文。私聊暂不写公开任务、产物或向其他范围请求协作；可由用户在消息“更多操作”中选择片段分享。分享按准确引用重验，不依赖旧缓存正文。消息可以显式公开、删除、导出，或从指定历史点建立独立分支。公开回复前需单独公开其引用的私聊；删除引用后不再使用缓存正文，分支也保留独立引用关系。
 
-“资料与记忆”提供会话收藏/回收站、已读游标、成员组、词法检索和记忆治理。记忆先生成候选，经批准后还需“实际收录”；物化回执与条目 head 在 SQLite 同事务提交。新版本或撤销保留历史审计，不能抹去模型已经读过的信息。Agent 仅可提议本会话当前范围的候选，不能自行审批或扩大权限。
+会话记忆位于右侧“工作台 → 会话资料”，与查找材料、可见范围、成员组并列；聊天区仅显示“记忆待确认”轻量提示，未读数归于会话标题。左侧“记忆库”独立管理跨会话条目，支持搜索、状态筛选、版本和来源查看；新增条目明确关联来源会话及可见成员。进入记忆库再返回会保留聊天草稿。搜索仍支持本会话/全部会话，收藏、已读、导出和回收站位于会话操作菜单。记忆先生成候选，经批准后还需“实际收录”；物化回执与条目 head 在 SQLite 同事务提交。新版本或撤销保留历史审计，不能抹去模型已经读过的信息。Agent 仅可提议本会话当前范围的候选，不能自行审批或扩大权限。
 
 新工具为 memory_read、memory_propose、material_search。检索覆盖获权消息、已发送文本附件、已发布受管产物、已收录记忆和平台回复；不读取原生 transcript、原始冻结输入审计或任意机器目录。semantic/hybrid 暂未接入，显式返回降级状态。当前 HTTP 服务仍是本机单用户；成员视角是用户审查功能，Agent 身份由准确执行绑定，不由请求里的 memberId 声明授予。
 
+## 统一工作台入口
+
+聊天顶部只保留“工作台”工具入口。当前修订按正式指导第 17 节实现：概览呈现当前会话的具体待处理项、任务、执行及产物，七项工具和最近访问收进“＋”；已打开工作以独立标签承接。产物绑定固定版本，支持临时预览、固定、编辑后保留、准确返回来源、最近关闭及按会话恢复布局。草稿保留在本页生命周期，不保存到浏览器持久存储。修订的实际验收与发布状态以实施进度为准。
+
+入口与状态投影见 [WorkspacePanel.tsx](web/WorkspacePanel.tsx)，独立的前端工作集规则见 [workspace-state.ts](web/workspace-state.ts)，浏览器验收见 [verify-workspace-ui.mjs](scripts/verify-workspace-ui.mjs)。布局只持久化可校验的对象引用，不持久化密钥、正文或执行输入；恢复时读取当前业务事实，后台结果不自动切换当前视图。页面复用既有业务命令，不改变审批、权限、调度和执行规则；未选会话时先从消息创建会话。材料正文检索在会话资料内进行，跨会话记忆库和成员账户管理仍为独立入口。
+
 ## N7 的日常工作台与配置
 
-会话标题下的“会话与项目”提供改名、置顶、归档恢复以及项目只读授权。授权先预览规范路径，再显式应用；有未释放执行或待投递来源时不能切换目录。执行和文件读取都会核对目录身份。附件通过输入栏上传，当前支持每个 32 KiB、单条合计 48 KiB 的 UTF-8 文本；纯附件可发送，正文进入实际输入快照，历史追问仍可引用。图片/PDF 暂不支持。引用回复绑定稳定消息 ID，引用和附件内的 @ 不改变本条消息路由。
+左侧会话行的「⋯」可重命名、置顶或归档；进入归档列表可原位恢复。工作台「项目与成员」中点「选择文件夹…」打开服务所在桌面的系统选择器（macOS，或安装 Zenity 的 Linux 桌面）。选好后核对文件夹及完整路径，点「确认只读授权」后才切换；取消保留原工作区。有未释放执行或待投递来源时不能切换目录。执行和文件读取都会核对目录身份。附件通过输入栏上传，当前支持每个 32 KiB、单条合计 48 KiB 的 UTF-8 文本；纯附件可发送，正文进入实际输入快照，历史追问仍可引用。图片/PDF 暂不支持。引用回复绑定稳定消息 ID，引用和附件内的 @ 不改变本条消息路由。
 
 成员可以设置稳定别名，账户和模型分别选择跟随运行时默认或保留成员例外。默认设置先展示影响范围，再按版本应用；在途执行保留冻结配置。删除成员保留历史身份，仍被有效配置引用的账户不能删除。新模型和推理强度需从所选账户实际目录选择，目录未返回的能力不虚构支持。
 
@@ -109,7 +135,7 @@ SQLite 短事务保证命令幂等、来源领取、回复关联和合格失败�
 
 输入栏仍可直接发送。单目标 Codex 正在运行时，后续消息绑定原 invocation / response，取得准确 turn/steer 回执后才消费该投递；userMessage.clientId 匹配另记读取证据。不支持的承载保留下一轮。源码与协议支持不等于所有供应商均已实测。
 
-“协作动态 → 协作调度”可查看来源排序、优先级、撤回、停止当前全部执行、逐条输入归并及追加核查。“多人征询”是可选操作，也可由 Agent 使用 multi_mention 发起；与普通多人 @ 分开，只有全目标返回才发布汇总，成功不自动唤回发起者。初次 prompt 或工具完整读取可承接多条来源；普通任务仍锚定 primarySource，不因此转交负责人。
+“协作动态 → 协作调度”可查看来源排序、优先级、撤回、停止当前全部执行、逐条输入归并及追加核查。多方意见需求通过主输入框表达，成员可使用 multi_mention 发起征询；侧栏只展示已有征询的收集进度、等待成员、原始结果和取消操作，不提供第二套创建表单。普通多人 @ 仍分别投递，不自动建立征询组。征询收齐后只按成员汇集结果，成功不自动唤回发起者，也不代表已由模型综合结论。初次 prompt 或工具完整读取可承接多条来源；普通任务仍锚定 primarySource，不因此转交负责人。
 
 ## 产物如何交付与评审
 

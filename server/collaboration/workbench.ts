@@ -50,7 +50,7 @@ export class WorkbenchService {
       if (input.action === 'archive') c.archivedAt = now();
       if (input.action === 'restore') delete c.archivedAt;
       c.revision = (c.revision ?? 1) + 1; c.updatedAt = now(); this.put('cc_conversations', c);
-      this.port.event(cid, 'conversation.organized', { action: input.action, revision: c.revision }); return c;
+      this.store.cross.sweep(); this.port.event(cid, 'conversation.organized', { action: input.action, revision: c.revision }); return c;
     }));
   }
   attachments(cid: string): ConversationAttachment[] { return this.data.rows('cc_attachments', cid); }
@@ -109,6 +109,12 @@ export class WorkbenchService {
     if (actual === sep || actual === homedir() || actual.split(sep).some(p => p.startsWith('.')) || privateRoots.some(p => overlap(p, actual) || (overlap(actual, p) && !relative(actual, p).split(sep).some(x => x.startsWith('.'))))) throw new AppError(403, '此目录覆盖私有数据，不能作为授权工作区。');
     const s = statSync(actual); return { path: actual, device: s.dev, inode: s.ino, authorizedAt: now(), revision, mode: 'read-only' };
   }
+  checkFolderSelection(cid: string, expectedRevision: number) {
+    const c = this.conversation(cid);
+    if (c.archivedAt || c.deletedAt) conflict('请先恢复此会话，再选择项目文件夹。');
+    if ((c.revision ?? 1) !== expectedRevision) conflict('会话已变化，请重新选择项目文件夹。');
+    this.idle(cid);
+  }
   previewWorkspace(cid: string, input: Record<string, unknown>) {
     return this.port.tx(() => {
       const c = this.conversation(cid); this.idle(cid);
@@ -148,7 +154,7 @@ export class WorkbenchService {
         const c = this.conversation(cid!); this.idle(c.id); if ((c.revision ?? 1) !== p.conversationRevision) conflict('会话已变化，请重新预览授权。');
         const grant = p.value as WorkspaceGrant; verifyWorkspace(grant); this.workspace(grant.path, grant.revision);
         c.workspaceGrant = { ...grant, authorizedAt: now() }; c.revision = (c.revision ?? 1) + 1; c.updatedAt = now(); this.put('cc_conversations', c);
-        this.port.event(c.id, 'workspace.authorized', { grant: c.workspaceGrant, source: 'user_authorization' });
+        this.store.cross.sweep(); this.port.event(c.id, 'workspace.authorized', { grant: c.workspaceGrant, source: 'user_authorization' });
       } else {
         const value = p.value as RuntimeDefault; this.account(value.accountId); this.catalog(value.accountId, value.model, value.effort);
         this.store.db.prepare('INSERT INTO cc_runtime_defaults VALUES(?,?) ON CONFLICT(carrier) DO UPDATE SET value=excluded.value').run(value.carrier, JSON.stringify(value));
@@ -181,7 +187,7 @@ export class WorkbenchService {
       if ((value.revision ?? 1) !== input.expectedRevision || value.deletedAt) conflict('配置已变化，请刷新。');
       if (kind === 'accounts' && (this.store.members().some(m => !m.deletedAt && (m.accountBinding !== 'follow' && m.accountId === id || this.defaults().some(d => d.accountId === id && d.carrier === m.carrier && m.accountBinding === 'follow'))) || this.defaults().some(d => d.accountId === id))) conflict('账户仍被成员或运行时默认配置引用，请先调整绑定。');
       value.deletedAt = now(); value.revision = (value.revision ?? 1) + 1; if ('enabled' in value) value.enabled = false;
-      this.put(table, value); this.configChanged(); this.emitConfig('configuration.deleted', { kind, id, revision: value.revision }); return value;
+      this.put(table, value); this.configChanged(); this.store.cross.sweep(); this.emitConfig('configuration.deleted', { kind, id, revision: value.revision }); return value;
     }));
   }
   beginProbe(accountId: string) { const account = this.account(accountId), ticket = randomUUID(); this.probes.set(accountId, ticket); return { account, ticket }; }

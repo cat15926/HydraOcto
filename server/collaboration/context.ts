@@ -16,7 +16,7 @@ export interface ContextItem extends InputManifestItem {
   complete: boolean;
 }
 export interface ContextInput {
-  memorySnapshot?: MemorySnapshot[]; visibility?: MessageVisibility;
+  crossPolicy?: boolean; memorySnapshot?: MemorySnapshot[]; visibility?: MessageVisibility;
   invocation: CollaborationInvocation;
   source: SourceWork;
   batch: DispatchBatch & { historyCutoff: number };
@@ -67,7 +67,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   const roster = input.roster.filter(member => !seenMembers.has(member.id) && !!seenMembers.add(member.id)).map(member => {
     const instructions = member.instructions.slice(0, 400);
     items.push({ kind: 'roster', reference: `member:${member.id}`, representation: instructions.length === member.instructions.length ? 'full' : 'partial', ...(instructions.length < member.instructions.length ? { reason: 'directory_description_limit' } : {}), characters: instructions.length, complete: instructions.length === member.instructions.length });
-    return { id: member.id, name: member.name, responsibilities: instructions, enabled: member.enabled, authorizedTools: [...AUTHORIZED_COLLABORATION_TOOLS, ...(input.taskPolicy ? ['task_list', 'task_create', 'task_update', 'task_handoff'] : []), ...(input.artifactPolicy ? ['artifact_list', 'artifact_read', 'artifact_propose', 'review_request', 'review_submit', 'user_question'] : []), ...(input.cooperationPolicy ? ['conversation_pending', 'conversation_read', 'multi_mention'] : []), ...(input.memorySnapshot ? ['memory_read', 'memory_propose', 'material_search'] : [])].filter(tool => !restricted || ['workspace_list', 'workspace_read', 'user_question', 'conversation_pending', 'conversation_read', 'memory_read', 'memory_propose', 'material_search'].includes(tool)) };
+    return { id: member.id, name: member.name, responsibilities: instructions, enabled: member.enabled, authorizedTools: [...AUTHORIZED_COLLABORATION_TOOLS, ...(input.taskPolicy ? ['task_list', 'task_create', 'task_update', 'task_handoff'] : []), ...(input.artifactPolicy ? ['artifact_list', 'artifact_read', 'artifact_propose', 'review_request', 'review_submit', 'user_question'] : []), ...(input.cooperationPolicy ? ['conversation_pending', 'conversation_read', 'multi_mention'] : []), ...(input.crossPolicy ? ['cross_routes','cross_send','action_list','action_create','action_candidate','action_return','action_wait'] : []), ...(input.memorySnapshot ? ['memory_read', 'memory_propose', 'material_search'] : [])].filter(tool => !restricted || ['workspace_list', 'workspace_read', 'user_question', 'conversation_pending', 'conversation_read', 'memory_read', 'memory_propose', 'material_search'].includes(tool)) };
   });
   if (caller) items.push({ kind: 'caller', reference: `invocation:${caller.invocationId}`, representation: 'full', characters: 0, complete: true });
   const brief = {
@@ -75,7 +75,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     runtime: { carrier: invocation.member.carrier, model: invocation.member.model, accountRef: invocation.member.accountId },
     source: { id: source.id, kind: source.kind, revision: source.revision, ...(caller ? { callerMemberId: caller.memberId, callerInvocationId: caller.invocationId } : {}) },
     batch: { id: batch.id, mode: batch.mode, historyCutoff: batch.historyCutoff },
-    ...(input.artifactPolicy ? { reviewSnapshot: input.reviewSnapshot ?? null } : {}), taskRef: input.taskSnapshot ?? null, completionPolicy: input.taskSnapshot ? 'explicit_task_update_done' : 'ordinary_response', successReturnPolicy: 'no_automatic_wake', continuity: input.taskPolicy ? 'native_evidence_separate' : 'fresh',
+    ...(input.artifactPolicy ? { reviewSnapshot: input.reviewSnapshot ?? null } : {}), taskRef: input.taskSnapshot ?? null, ...(input.crossPolicy ? { actionRef: source.actionRef ?? null, crossTransfer: source.crossRef ?? null, crossRules: 'Use cross_routes for exact authorized endpoints. Private execution cannot cross scopes. Action candidate is not completion; action_wait/return requires ending this run before any successor.' } : {}), completionPolicy: input.taskSnapshot ? 'explicit_task_update_done' : 'ordinary_response', successReturnPolicy: 'no_automatic_wake', continuity: input.taskPolicy ? 'native_evidence_separate' : 'fresh',
     allowedCollaborationTargets: restricted ? [] : roster.filter(member => member.enabled && member.id !== invocation.memberId).map(member => member.id),
   };
   if (input.taskSnapshot) items.push({ kind: 'task', reference: `task:${input.taskSnapshot.id}@${input.taskSnapshot.revision}`, representation: 'full', characters: JSON.stringify(input.taskSnapshot).length, complete: true });

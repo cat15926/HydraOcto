@@ -38,9 +38,7 @@
 .cc-artifact-dialog input:not([type=checkbox]), .cc-artifact-dialog textarea, .cc-artifact-dialog select { display: block; width: 100%; margin-top: 6px; }
 .cc-artifact-preview { max-height: 45vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f5f1; padding: 14px; border-radius: 6px; }
 
-.cc-cooperation-panel>details{margin:12px 0}.cc-cooperation-panel summary{cursor:pointer;font-size:11px;line-height:1.7}.cc-cooperation-card{padding:10px;margin:8px 0;border:1px solid #e0e7d5;border-radius:6px;overflow-wrap:anywhere}.cc-cooperation-card p{font-size:11px;white-space:pre-wrap;line-height:1.6;max-height:180px;overflow:auto}.cc-cooperation-card small,.cc-cooperation-card code{display:block;font-size:10px;margin:5px 0}.cc-cooperation-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.cc-cooperation-panel button{font-size:10px}.cc-group-form{display:grid;gap:10px;padding:10px 0;font-size:11px}.cc-group-form label{display:grid;gap:5px}.cc-group-form textarea{min-height:60px;resize:vertical;width:100%}.cc-group-form fieldset label{display:flex;align-items:center;gap:6px;margin:7px 0}.cc-group-form input[type=checkbox]{width:auto}
-
-.cc-group-form textarea,.cc-group-form input[type=number]{border:1px solid #dfe7d8;border-radius:6px;background:#fff;color:#496043;font:inherit;line-height:1.7;padding:8px}.cc-group-form fieldset{border:1px solid #dfe7d8;border-radius:6px;padding:8px}.cc-group-form legend{color:#687e59}.cc-group-form label{color:#526846}
+.cc-cooperation-panel>details{margin:12px 0}.cc-cooperation-panel summary{cursor:pointer;font-size:11px;line-height:1.7}.cc-cooperation-card{padding:10px;margin:8px 0;border:1px solid #e0e7d5;border-radius:6px;overflow-wrap:anywhere}.cc-cooperation-card p{font-size:11px;white-space:pre-wrap;line-height:1.6;max-height:180px;overflow:auto}.cc-cooperation-card small,.cc-cooperation-card code{display:block;font-size:10px;margin:5px 0}.cc-cooperation-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.cc-cooperation-panel button{font-size:10px}
 
 /* N7 workbench: optional project controls leave the conversation composer direct. */
 .cc-workbench { border-bottom: 1px solid #e5e5e3; background: #fafaf8; font-size: 12px; flex-shrink: 0; max-height: 45vh; overflow: auto; }
@@ -71,24 +69,23 @@
 @media (max-width: 600px) { .cc-workbench summary { padding: 8px 14px; } .cc-workbench-body { padding: 0 14px 12px; } .cc-workbench form { flex-wrap: wrap; } .cc-workbench summary span { display: block; margin: 4px 0 0; } .cc-composer-hint { display: none; } }
 
 /* N8: optional privacy and durable knowledge management stay outside ordinary typing. */
-.cc-knowledge { max-height: 48vh; overflow: auto; }
 .cc-knowledge-form { display: flex !important; flex-direction: column; align-items: stretch !important; gap: 10px; padding: 12px 0; }
-.cc-knowledge-form label, .cc-knowledge section > label { display: flex; flex-direction: column; gap: 5px; }
-.cc-knowledge textarea, .cc-message-actions textarea { min-height: 95px; width: 100%; resize: vertical; padding: 10px; border: 1px solid var(--cc-border, #ddd); border-radius: 8px; font: inherit; }
+.cc-knowledge-form label { display: flex; flex-direction: column; gap: 5px; }
+.cc-message-actions textarea { min-height: 95px; width: 100%; resize: vertical; padding: 10px; border: 1px solid var(--cc-border, #ddd); border-radius: 8px; font: inherit; }
 .cc-knowledge-choices { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 5px 0; }
-.cc-knowledge-choices label { display: flex; gap: 5px; align-items: center; font-size: 12px; }
+.cc-knowledge-choices label { display: flex; flex-direction: row; gap: 5px; align-items: center; font-size: 12px; }
 .cc-knowledge-choices input[type=checkbox] { width: auto; }
-.cc-knowledge article, .cc-memory-entry { border-top: 1px solid #e4e2da; padding: 12px 0; overflow-wrap: anywhere; }
-.cc-memory-entry h4 { margin: 0 0 10px; }.cc-memory-entry small { font-weight: 400; color: #777; }
-.cc-memory-entry p, .cc-view-message p { white-space: pre-wrap; margin: 7px 0; }
 .cc-private-composer { padding: 4px 8px; font-size: 12px; }.cc-private-composer button { background: transparent; border: 0; color: #60557d; padding: 6px; cursor: pointer; }
 .cc-private-badge { display: inline-block; font-size: 11px; color: #6e558d; background: #f1eaf7; padding: 3px 7px; border-radius: 6px; }
 .cc-message-actions { margin-top: 5px; font-size: 12px; }.cc-message-actions summary { color: #7c7973; cursor: pointer; display: inline-block; padding: 4px 0; }.cc-message-actions button, .cc-knowledge button { cursor: pointer; }
 .cc-message-actions blockquote { max-height: 180px; overflow: auto; white-space: pre-wrap; border-left: 3px solid #c8becf; padding: 8px 12px; margin: 0; }
-.cc-message-actions input { min-width: 0; padding: 7px; }.cc-knowledge .cc-tabs { flex-wrap: wrap; }
-@media(max-width:700px) { .cc-knowledge { max-height: 42vh; }.cc-knowledge .cc-workbench-actions { flex-wrap: wrap; }.cc-knowledge .cc-tabs button { padding: 7px; }.cc-private-composer { padding-left: 0; } }
-.cc-memory-create { border: 1px solid #e0e7d5; border-radius: 7px; padding: 10px; margin: 12px 0; }
-.cc-memory-create > summary { cursor: pointer; font-size: 12px; }
-.cc-knowledge select { width: 100%; padding: 8px; border: 1px solid #dfe7d8; border-radius: 6px; background: #fff; color: inherit; }
-.cc-knowledge .cc-tabs { gap: 10px; }.cc-knowledge .cc-tabs button[aria-selected=true] { background: #eaf0e3; border-color: #b5c7a2; }
-.cc-memory-entry { background: #f9fbf5; padding: 12px; border-radius: 7px; margin: 10px 0; }.cc-memory-entry p { font-size: 12px; }
+.cc-message-actions input { min-width: 0; padding: 7px; }
+
+.cc-action-card, .cc-cross-transfer, .cc-cross-grants { margin: 12px 0; border: 1px solid var(--line, #dce5d7); padding: 12px; border-radius: 10px; overflow-wrap: anywhere; }
+.cc-action-card summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; cursor: pointer; }
+.cc-action-panel dl { display: grid; grid-template-columns: 75px minmax(0, 1fr); gap: 6px; font-size: 12px; }
+.cc-action-panel dd { margin: 0; overflow-wrap: anywhere; }
+.cc-action-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cc-action-panel .cc-settings-form { padding: 12px 0; }
+.cc-action-panel select, .cc-action-panel input, .cc-action-panel textarea { max-width: 100%; min-width: 0; }
+.cc-action-panel article + article { border-top: 1px solid #dce5d7; margin-top: 10px; }

@@ -1,0 +1,197 @@
+/** Unified workspace acceptance: isolated HTTP/SQLite, synthetic runtime, no model credentials. */
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createApplication } from '../dist/server/index.js';
+import { openWorkspaceTool, closeWorkspace } from './ui-workspace.mjs';
+const output = resolve(process.env.VALIDATION_OUTPUT_DIR || '.local-data/validation/workspace-ui/' + new Date().toISOString().replace(/[:.]/g, '-'));
+const temp = await mkdtemp(join(tmpdir(), 'workspace-ui-')), workspace = join(temp, 'project');
+const { default: puppeteer } = await import(pathToFileURL(process.env.PUPPETEER_PATH || '/Users/ruhonglin/lhz/clowder-ai-latest/packages/api/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js').href);
+const checks = [], errors = [], calls = [], rid = () => crypto.randomUUID();
+const check = (name, value) => { assert.ok(value, name); checks.push(name); };
+let app, browser, page;
+try {
+  await mkdir(output, { recursive: true }); await mkdir(workspace);
+  app = await createApplication({ port: 0, dataDir: join(temp, 'private'), workspace, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || 'dist/web'), collaborationRuntime: {
+    probe: async () => [], invoke: async r => { calls.push(r); r.onEvent({ kind: 'accepted', detail: { source: 'workspace-ui-fixture' } }); r.onEvent({ kind: 'process_exit', detail: { confirmed: true } }); return { text: '工作台合成执行结果', continuity: 'fresh' }; },
+  } });
+  const s = app.collaborationStore;
+  const other = s.create({ requestId: rid(), title: '空白会话', memberIds: ['codex', 'claude'], defaultMemberId: 'codex' }).conversation;
+  const c = s.create({ requestId: rid(), title: '工作台验收', memberIds: ['codex', 'claude'], defaultMemberId: 'codex' }).conversation;
+  const task = s.tasks.create(c.id, { requestId: rid(), title: '同名任务', description: '准确任务一' }).task;
+  const task2 = s.tasks.create(c.id, { requestId: rid(), title: '同名任务', description: '准确任务二' }).task;
+  const first = s.memory.propose(c.id, { requestId: rid(), key: '会话共识', content: '候选一' }).result;
+  s.memory.propose(c.id, { requestId: rid(), entryId: first.entry.id, expectedRevision: first.entry.revision, key: '会话共识', content: '候选二' });
+  s.memory.propose(c.id, { requestId: rid(), key: '跨会话记忆候选', content: '不计入当前会话', scope: 'library' });
+  s.memory.propose(other.id, { requestId: rid(), key: '其他会话共识', content: '不计入当前会话' });
+  const a = s.artifacts.propose(c.id, { requestId: rid(), name: 'workspace.md', content: '版本一正文', taskId: task.id });
+  const b = s.artifacts.propose(c.id, { requestId: rid(), name: 'second.md', content: '第二个产物正文' });
+  const { url } = await app.start();
+  browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
+  page = await browser.newPage(); page.on('pageerror', e => errors.push(e.stack || e.message));
+  const mutations = [], reads = [];
+  page.on('request', r => { if (r.method() === 'POST') mutations.push(r.url()); if (r.url().includes('/managed-artifacts/versions/')) reads.push(r.url()); });
+  await page.setViewport({ width: 1512, height: 982 }); await page.goto(url, { waitUntil: 'networkidle2' });
+  const active = '#cc-workspace [data-workspace-page]';
+  const click = async (label, scope = '#cc-workspace') => {
+    await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.getClientRects().length && b.textContent.trim() === label && !b.disabled), {}, label, scope);
+    await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.getClientRects().length && b.textContent.trim() === label && !b.disabled).click(), label, scope);
+  };
+  const home = () => page.click('#cc-workspace .cc-workspace-home-tab');
+  const object = async id => { await page.evaluate(id => [...document.querySelectorAll('#cc-workspace .cc-workspace-row')].find(b => b.dataset.workspaceObject.includes(id)).click(), id); await page.waitForFunction(id => document.querySelector('#cc-workspace [data-workspace-page]')?.dataset.workspaceView.includes(id), {}, id); };
+  const key = () => page.$eval(active, e => e.dataset.workspaceView);
+  const tab = async id => { await page.evaluate(id => [...document.querySelectorAll('#cc-workspace [data-view-tab]')].find(b => b.dataset.viewTab.includes(id)).click(), id); await page.waitForFunction(id => document.querySelector('#cc-workspace [data-workspace-page]')?.dataset.workspaceView.includes(id), {}, id); };
+  const closeTab = async id => { await page.evaluate(id => [...document.querySelectorAll('#cc-workspace [data-view-tab]')].find(b => b.dataset.viewTab.includes(id)).parentElement.querySelector('.cc-workspace-tab-close').click(), id); await page.waitForFunction(id => ![...document.querySelectorAll('#cc-workspace [data-view-tab]')].some(e => e.dataset.viewTab.includes(id)), {}, id); };
+  const back = () => page.click(active + ' .cc-workspace-back');
+  const storageKey = 'multi-agent:workspace:v1:' + c.id;
+  await page.waitForSelector('.cc-workspace-toggle');
+  check('single header workspace entry', await page.$$eval('.cc-topbar-actions button', es => es.length === 1));
+  await page.type('#cc-message-input', '@codex 开始工作台验收'); await page.click('.cc-send-button'); await page.waitForSelector('.cc-message-member .cc-status-succeeded');
+  await page.type('#cc-message-input', '聊天草稿'); await page.click('.cc-workspace-toggle');
+  check('object home instead of seven tool cards', await page.$eval('.cc-workspace-home', e => e.textContent.includes('继续手头的工作')) && await page.$eval('.cc-workspace-catalogue', e => e.hidden));
+  check('attention deduplicates versions and excludes library and foreign conversation', await page.$eval('.cc-workspace-attention h3', e => e.textContent.includes('3 项')));
+  await page.screenshot({ path: join(output, 'workspace-home.png') });
+  await object(task.id); const taskKey = await key();
+  check('same title opens exact task one', await page.$eval(active + ' .cc-task-card', e => e.dataset.taskId) === task.id);
+  await page.type(active + ' [aria-label="跟进备注草稿"]', 'TASK_DRAFT_PRIVATE');
+  await click('workspace.md · v1', active + ' .cc-workspace-related'); await page.waitForSelector(active + ' .cc-workspace-document pre');
+  check('related artifact uses explicit task relation', (await key()).includes(a.version.id));
+  check('exact version content loaded', await page.$eval(active + ' .cc-workspace-document pre', e => e.textContent) === '版本一正文');
+  await back(); await page.waitForFunction(k => document.querySelector('#cc-workspace [data-workspace-page]')?.dataset.workspaceView === k, {}, taskKey);
+  check('return restores task draft', await key() === taskKey && await page.$eval(active + ' textarea', e => e.value) === 'TASK_DRAFT_PRIVATE');
+  await home(); await object(task2.id); check('same title task two does not alias task one', (await key()).includes(task2.id) && await page.$$eval('#cc-workspace [data-view-tab]', es => es.filter(b => b.textContent === '同名任务').length) === 2);
+  await home(); await object(a.version.id); await home(); await object(b.version.id);
+  check('only temporary artifact preview is replaced', await page.$$eval('#cc-workspace [data-view-tab]', (es, id) => !es.some(e => e.dataset.viewTab.includes(id)), a.version.id));
+  await page.type(active + ' [aria-label="评审备注草稿"]', 'REVIEW_DRAFT_PRIVATE');
+  check('editing promotes preview', await page.$$eval('#cc-workspace .cc-workspace-tab.preview', es => es.length === 0));
+  await home(); await object(a.version.id); await click('固定视图', active); await home(); await object(b.version.id);
+  check('pinned and edited artifacts both retained', await page.$$eval('#cc-workspace [data-view-tab]', (es, ids) => ids.every(id => es.some(e => e.dataset.viewTab.includes(id))), [a.version.id, b.version.id]));
+  const beforeCommands = mutations.length;
+  await closeTab(b.version.id); await click('最近关闭 1'); await click('second.md · v1', '.cc-workspace-closed');
+  check('closed view restore keeps draft and identity', (await key()).includes(b.version.id) && await page.$eval(active + ' textarea', e => e.value) === 'REVIEW_DRAFT_PRIVATE');
+  await closeWorkspace(page); await page.click('.cc-workspace-toggle');
+  check('fold preserves active object and draft', (await key()).includes(b.version.id) && await page.$eval(active + ' textarea', e => e.value) === 'REVIEW_DRAFT_PRIVATE');
+  check('layout operations issue no business commands', mutations.length === beforeCommands);
+  await tab(a.version.id); await click('批准此版本写入', active);
+  await page.waitForFunction(() => document.querySelector('#cc-workspace [data-workspace-page] .cc-artifact-version')?.textContent.includes('已发布'));
+  check('inline decision publishes exact artifact version', s.artifacts.content(a.version.id).version.state === 'published');
+  await page.focus(active + ' textarea');
+  const aHead = s.artifacts.detail(c.id).artifacts.find(x => x.id === a.artifact.id);
+  const v2 = s.artifacts.propose(c.id, { requestId: rid(), artifactId: aHead.id, expectedRevision: aHead.revision, baseVersionId: aHead.headVersionId, name: aHead.name, content: '版本二正文', taskId: task.id });
+  s.artifacts.decide(v2.approval.id, { requestId: rid(), expectedRevision: v2.approval.revision, operationDigest: v2.approval.operationDigest, decision: 'approve' });
+  await page.waitForFunction(() => document.querySelector('.cc-workspace-updates')?.textContent.includes('v2'));
+  check('background head update keeps v1 and input focus', (await key()).includes(a.version.id) && await page.$eval(active + ' textarea', e => document.activeElement === e) && await page.$eval(active + ' .cc-workspace-document pre', e => e.textContent) === '版本一正文');
+  await click('查看', '.cc-workspace-updates'); await page.waitForFunction(() => document.querySelector('#cc-workspace [data-workspace-page] .cc-workspace-document pre')?.textContent === '版本二正文');
+  check('v1 and v2 are distinct tabs', await page.$$eval('#cc-workspace [data-view-tab]', (es, ids) => ids.every(id => es.some(e => e.dataset.viewTab.includes(id))), [a.version.id, v2.version.id]));
+  await openWorkspaceTool(page, 'knowledge');
+  await page.type('#cc-workspace .cc-material-search input[type=search]', '版本'); await click('查找', '#cc-workspace .cc-knowledge');
+  await page.waitForSelector('#cc-workspace .cc-material-result');
+  await click('打开产物版本 ↗', '#cc-workspace .cc-material-result'); await back();
+  check('search origin restores query and results', await page.$eval('#cc-workspace .cc-material-search input[type=search]', e => e.value) === '版本' && !!await page.$('#cc-workspace .cc-material-result'));
+  for (const tool of ['project','tasks','artifacts','cooperation','actions','activity']) { await openWorkspaceTool(page, tool); check('tool reachable: '+tool, await page.$$eval('[data-workspace-page]', es => es.length === 1)); }
+  await tab(b.version.id);
+  await page.click('.cc-library-nav'); await page.waitForSelector('.cc-memory-library'); check('library hides retained workspace', !await page.$('#cc-workspace'));
+  await click('返回会话', '.cc-memory-library');
+  check('library return preserves object draft and chat draft', (await key()).includes(b.version.id) && await page.$eval(active + ' textarea', e => e.value) === 'REVIEW_DRAFT_PRIVATE' && await page.$eval('#cc-message-input', e => e.value) === '聊天草稿');
+  await closeWorkspace(page); await page.evaluate(() => [...document.querySelectorAll('.cc-conversation-list button')].find(b => b.textContent.includes('空白会话')).click());
+  await page.waitForFunction(() => document.querySelector('h1').textContent === '空白会话'); await page.click('.cc-workspace-toggle');
+  check('new conversation has independent working set and facts', await page.$$eval('#cc-workspace [data-view-tab]', es => es.length === 0) && await page.$eval('#cc-workspace .cc-workspace-attention', e => e.textContent.includes('其他会话共识') && !e.textContent.includes('workspace.md')));
+  await closeWorkspace(page); await page.evaluate(() => [...document.querySelectorAll('.cc-conversation-list button')].find(b => b.textContent.includes('工作台验收')).click());
+  await page.waitForFunction(() => document.querySelector('h1').textContent === '工作台验收'); await page.click('.cc-workspace-toggle');
+  check('conversation return keeps in-page draft', await page.$eval(active + ' textarea', e => e.value) === 'REVIEW_DRAFT_PRIVATE');
+  await closeWorkspace(page); const msg = await page.$eval('.cc-message-member', e => e.id); await click('打开执行记录', '#' + msg); await page.waitForFunction(() => document.querySelector('#cc-workspace [data-workspace-page] .cc-execution')?.open);
+  check('chat opens exact invocation record', await page.$eval(active + ' .cc-execution', e => e.open) && (await key()).includes(s.detail(c.id).invocations[0].id));
+  await back(); await page.waitForSelector('#cc-workspace', { hidden: true });
+  await page.waitForFunction(id => document.activeElement?.id === id, {}, msg); check('source return focuses exact chat message', await page.$eval('#' + msg, e => document.activeElement === e));
+  await page.click('.cc-workspace-toggle'); await openWorkspaceTool(page, 'knowledge');
+  const widthBefore = await page.$eval('#cc-workspace', e => e.style.getPropertyValue('--workspace-width'));
+  await page.focus('#cc-workspace .cc-workspace-resize'); await page.keyboard.press('ArrowLeft');
+  check('keyboard resizes work area', await page.$eval('#cc-workspace', e => e.style.getPropertyValue('--workspace-width')) !== widthBefore);
+  await page.click('#cc-workspace [aria-label="展开工作台"]'); check('expand applies workspace state', await page.$eval('#cc-workspace', e => e.dataset.expanded === 'true')); await page.click('#cc-workspace [aria-label="还原工作台宽度"]');
+  await page.click('#cc-workspace .cc-workspace-add'); await page.type('#cc-workspace [type=search]', 'NO_MATCH'); check('catalogue no-match feedback', await page.$eval('#cc-workspace .cc-workspace-catalogue', e => e.textContent.includes('没有匹配')));
+  await page.keyboard.press('Escape'); check('first Escape closes menu only', !!await page.$('#cc-workspace') && await page.$eval('#cc-workspace .cc-workspace-add', e => e.getAttribute('aria-expanded') === 'false'));
+  await page.keyboard.press('Escape'); await page.waitForSelector('#cc-workspace', { hidden: true }); await page.waitForFunction(() => document.activeElement === document.querySelector('.cc-workspace-toggle')); check('second Escape folds and restores opener focus', await page.$eval('.cc-workspace-toggle', e => document.activeElement === e));
+  await openWorkspaceTool(page, 'knowledge');
+  for (const width of [390, 320]) {
+    await page.setViewport({ width, height: 844 });
+    await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0);
+    check('mobile workspace fits ' + width, await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('#cc-workspace .cc-workspace-close, #cc-workspace [role=tab]')].filter(e => e.getClientRects().length).every(e => { const r=e.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })));
+    await page.screenshot({ path: join(output, 'workspace-mobile-' + width + '.png') });
+    await closeWorkspace(page); check('mobile composer usable ' + width, await page.$eval('.cc-send-button', e => { const r=e.getBoundingClientRect(); return document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest('.cc-send-button') === e; })); await openWorkspaceTool(page, 'knowledge');
+  }
+  await page.setViewport({ width: 1512, height: 982 }); await tab(b.version.id);
+  const saved = await page.evaluate(k => localStorage.getItem(k), storageKey);
+  check('persistence stores references without drafts or content', !/PRIVATE|版本一正文|版本二正文|候选二/.test(saved) && JSON.parse(saved).views.length > 0);
+  await page.reload({ waitUntil: 'networkidle2' }); await page.click('.cc-workspace-toggle'); await page.waitForSelector(active + ' textarea');
+  check('reload restores object but not in-page-only draft', (await key()).includes(b.version.id) && await page.$eval(active + ' textarea', e => e.value) === '');
+  const readsBefore = reads.length; await closeWorkspace(page); s.memory.propose(c.id, { requestId: rid(), key: '后台候选', content: '触发快照更新' });
+  await page.waitForFunction(() => document.querySelector('.cc-workspace-toggle b')?.textContent === '3');
+  check('hidden views do not fetch artifact content on updates', reads.length === readsBefore);
+  await page.evaluate(k => { const x=JSON.parse(localStorage.getItem(k)); x.views[0].target={kind:'artifact',conversationId:x.conversationId,artifactId:'missing',versionId:'missing'}; x.views[0].key=JSON.stringify([x.conversationId,'artifact',['missing','missing']]); x.active=x.views[0].key; localStorage.setItem(k,JSON.stringify(x)); }, storageKey);
+  await page.reload({ waitUntil: 'networkidle2' }); await page.click('.cc-workspace-toggle');
+  check('missing restored object shows unavailable', await page.$eval(active, e => e.textContent.includes('不可用') || e.textContent.includes('不存在')));
+  await page.evaluate(k => localStorage.setItem(k, JSON.stringify({schema:99})), storageKey); await page.reload({ waitUntil: 'networkidle2' }); await page.click('.cc-workspace-toggle');
+  check('unknown schema resets safely', await page.$$eval('#cc-workspace [data-view-tab]', es => es.length === 0));
+  await page.evaluate(() => { Storage.prototype.setItem = function(){ throw new Error('quota'); }; }); await object(task.id);
+  await page.waitForSelector('.cc-workspace-notice'); check('storage failure is nonfatal and explained', await page.$eval('.cc-workspace-notice', e => e.textContent.includes('无法保存')) && (await key()).includes(task.id));
+  // A parent navigation can hide a native modal while an operation form is still being edited.
+  await click('更新状态', active); await page.waitForSelector(active + ' dialog[open]');
+  await page.type(active + ' dialog textarea', 'MODAL_DRAFT_PRIVATE');
+  await page.evaluate(() => document.querySelector('.cc-workspace-toggle').click());
+  await page.waitForFunction(() => !document.querySelector('dialog[open]') && !document.querySelector('#cc-workspace'));
+  check('hidden host releases native modal', true);
+  await page.click('.cc-workspace-toggle'); await page.waitForSelector(active + ' dialog[open]');
+  check('modal draft survives host suspension', await page.$eval(active + ' dialog textarea', e => e.value) === 'MODAL_DRAFT_PRIVATE');
+  await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('dialog[open]'));
+  check('nested modal Escape does not fold workspace', !!await page.$('#cc-workspace'));
+
+  // Hold only one test-version read; the deferred transport deliberately completes even after abort.
+  await page.evaluate(versionId => { const fetchNow = window.fetch.bind(window); window.fetch = (input, init) => {
+    if (String(input).endsWith('/managed-artifacts/versions/' + versionId)) {
+      window.fetch = fetchNow; return new Promise(resolve => { window.heldRead = { signal: init.signal, deliver: resolve }; });
+    } return fetchNow(input, init);
+  }; }, b.version.id);
+  await home(); await object(b.version.id); await page.waitForFunction(() => !!window.heldRead);
+  await home(); await object(task.id);
+  check('switching objects aborts the previous read', await page.evaluate(() => window.heldRead.signal.aborted));
+  await page.evaluate(version => window.heldRead.deliver(new Response(JSON.stringify({version,content:'LATE_PRIVATE_TEST_RESPONSE'}))), b.version);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  check('late completion cannot replace active or hidden content', (await key()).includes(task.id) && !await page.$eval('#cc-workspace', e => e.textContent.includes('LATE_PRIVATE_TEST_RESPONSE')));
+  await home(); await object(b.version.id); await page.waitForFunction(() => document.querySelector('#cc-workspace [data-workspace-page] .cc-workspace-document pre')?.textContent === '第二个产物正文');
+  check('explicit reopen fetches the authoritative version again', true);
+
+  await openWorkspaceTool(page, 'knowledge'); await page.type(active + ' input[aria-label="搜索材料"]', '开始工作台验收'); await click('查找', active);
+  await page.waitForSelector(active + ' .cc-material-result'); const original = s.detail(c.id).messages.find(m => m.author === 'user' && m.content.includes('开始工作台验收'));
+  const retainedResult = await page.$(active + ' .cc-material-result'); await page.focus(active + ' input[aria-label="搜索材料"]');
+  s.send(c.id, {requestId:rid(),content:'@codex 一条无关的后台新消息'});
+  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
+  check('normal background append keeps search result DOM and focus', await retainedResult.evaluate(e => e.isConnected && e.getClientRects().length > 0) && await page.$eval(active + ' input[aria-label="搜索材料"]', e => e === document.activeElement));
+  await retainedResult.dispose(); s.visibility.messageCommand(c.id, original.id, {action:'delete',requestId:rid(),expectedRevision:original.revision ?? 1});
+  await page.waitForFunction(() => !document.querySelector('#cc-workspace [data-workspace-page] [aria-label="检索结果"]'));
+  check('removed source invalidates old results without erasing query', await page.$eval(active + ' input[aria-label="搜索材料"]', e => e.value === '开始工作台验收'));
+
+  const many = Array.from({length:41}, (_,n) => s.tasks.create(c.id, {requestId:rid(),title:'上限验证 '+n,description:''}).task.id);
+  await page.reload({waitUntil:'networkidle2'}); await page.waitForSelector('.cc-workspace-toggle');
+  await page.evaluate((cid,ids,k) => {
+    const target = taskId => ({kind:'task',conversationId:cid,taskId}), view = id => ({key:JSON.stringify([cid,'task',id]), target:target(id), pinned:false, origin:{kind:'home'}});
+    const views=ids.slice(0,40).map(view); views[39].origin={kind:'view',target:target(ids[40])};
+    localStorage.setItem(k, JSON.stringify({schema:1,conversationId:cid,views,active:views[39].key,preview:null,closed:[view(ids[40])],recent:[],width:48,expanded:false}));
+  }, c.id, many, storageKey);
+  await page.reload({waitUntil:'networkidle2'}); await page.click('.cc-workspace-toggle'); await click('最近关闭 1'); await click('上限验证 40','.cc-workspace-closed');
+  const waitLimit = () => page.waitForFunction(() => document.querySelector('#cc-workspace .cc-workspace-notice')?.textContent.includes('40 个视图'));
+  await waitLimit(); check('full workspace reports refused restore without eviction', (await key()).includes(many[39]) && await page.$$eval('#cc-workspace [data-view-tab]', es => es.length === 40));
+  await tab(many[39]); await page.waitForSelector('#cc-workspace .cc-workspace-notice',{hidden:true}); await back(); await waitLimit();
+  check('full workspace explains blocked return to source', (await key()).includes(many[39]));
+  await closeTab(many[0]); await click('最近关闭 2'); await click('上限验证 40','.cc-workspace-closed');
+  await page.waitForFunction(id => document.querySelector('#cc-workspace [data-workspace-page]')?.dataset.workspaceView.includes(id), {}, many[40]);
+  check('freeing one slot allows exact restore', await page.$$eval('#cc-workspace [data-view-tab]', es => es.length === 40));
+  check('no unexpected runtime calls', calls.length === 2); check('no browser exceptions', errors.length === 0);
+  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks, syntheticCalls: calls.length, realModelCalls: 0, errors }, null, 2));
+  console.log(JSON.stringify({ passed: true, checks: checks.length, syntheticCalls: calls.length, output }));
+} catch (e) {
+  await page?.screenshot({ path: join(output, 'failure.png') }).catch(() => {});
+  await writeFile(join(output, 'failure.json'), JSON.stringify({ error: e.stack, checks, errors, syntheticCalls: calls.length }, null, 2));
+  console.error(e); process.exitCode = 1;
+} finally { await browser?.close(); await app?.close(); await rm(temp, { recursive: true, force: true }); }

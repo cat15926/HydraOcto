@@ -1,21 +1,67 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Carrier, CollaborationBootstrap, ConfigurationPreview, ConversationDetail } from '../shared/collaboration';
-export type WorkbenchCommand = <T>(path: string, body: unknown) => Promise<T>;
+import { WorkspaceIcon } from './WorkspaceIcon';
+export type WorkbenchCommand = <T>(path: string, body: unknown, signal?: AbortSignal) => Promise<T>;
 const rid = () => crypto.randomUUID();
-export function WorkbenchPanel({ detail, workspace, command, refresh }: { detail: ConversationDetail; workspace: string; command: WorkbenchCommand; refresh: () => Promise<void> }) {
-  const c = detail.conversation;
-  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [preview, setPreview] = useState<ConfigurationPreview>();
-  async function run(work: () => Promise<unknown>) { setBusy(true); setError(''); try { await work(); await refresh(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  const organize = (action: string, title?: string) => run(() => command(`/api/conversations/${c.id}/organize`, { requestId: rid(), expectedRevision: c.revision ?? 1, action, title }));
-  return <details className="cc-workbench"><summary>会话与项目 <span>{c.archivedAt ? '已归档' : c.pinned ? '已置顶' : ''} · {c.workspaceGrant ? '项目已授权' : '使用服务默认工作区'}</span></summary><div className="cc-workbench-body">
-    <form onSubmit={(e: FormEvent<HTMLFormElement>) => { e.preventDefault(); void organize('rename', String(new FormData(e.currentTarget).get('title'))); }}><label>会话名称<input name="title" key={c.title} defaultValue={c.title} maxLength={200} required /></label><button disabled={busy}>保存名称</button></form>
-    <div className="cc-workbench-actions"><button disabled={busy} onClick={() => void organize(c.pinned ? 'unpin' : 'pin')}>{c.pinned ? '取消置顶' : '置顶会话'}</button><button disabled={busy} onClick={() => void organize(c.archivedAt ? 'restore' : 'archive')}>{c.archivedAt ? '恢复会话' : '归档会话'}</button></div>
-    <p className="cc-note">当前只读工作区：<code>{c.workspaceGrant?.path ?? workspace}</code>。归档保留历史及原执行；恢复后可继续发送。</p>
-    <form onSubmit={e => { e.preventDefault(); const path = String(new FormData(e.currentTarget).get('path')); void run(async () => setPreview(await command(`/api/conversations/${c.id}/workspace-preview`, { path }))); }}><label>项目目录<input name="path" required placeholder="本机项目绝对路径" maxLength={2000} onChange={() => setPreview(undefined)} /></label><button disabled={busy}>预览工作区授权</button></form>
-    {preview && <div className="cc-workbench-preview"><strong>授权预览 · 只读</strong><code>{'path' in preview.value ? preview.value.path : ''}</code><p>仅授权此会话读取该项目。切换前会检查目录身份与未完成工作，旧会话链不会移作新项目使用。</p><button disabled={busy} onClick={() => void run(async () => { await command(`/api/conversations/${c.id}/workspace-apply`, { previewId: preview.id, requestId: rid() }); setPreview(undefined); })}>授权此项目</button></div>}
-    {detail.events.filter(e => ['attachment.uploaded', 'workspace.authorized', 'artifact.published', 'job.succeeded'].includes(e.type)).slice(-4).map(e => <p className="cc-note" key={e.id}>来源事件 #{e.id} · {e.type} · {String(e.data.name ?? e.data.source ?? e.data.versionId ?? '')}</p>)}
-    {error && <p className="cc-form-error" role="alert">{error}</p>}
-  </div></details>;
+export function WorkbenchPanel({ detail, workspace, command, refresh, visible }: {
+  detail: ConversationDetail; workspace: string; command: WorkbenchCommand; refresh: () => Promise<void>; visible: boolean;
+}) {
+  const c = detail.conversation, grant = c.workspaceGrant;
+  const [preview, setPreview] = useState<ConfigurationPreview>(), [picking, setPicking] = useState(false), [applying, setApplying] = useState(false);
+  const [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const pending = useRef<AbortController | undefined>(undefined), chooseButton = useRef<HTMLButtonElement>(null), confirmButton = useRef<HTMLButtonElement>(null);
+  const nextFocus = useRef<'choose' | 'confirm' | null>(null);
+  useLayoutEffect(() => { if (!visible) setPicking(false); return () => { pending.current?.abort(); pending.current = undefined; nextFocus.current = null; }; }, [visible, c.id]);
+  // Wait for React to re-enable the control before handing the keyboard back to it.
+  useLayoutEffect(() => {
+    if (!visible || applying || picking || !nextFocus.current) return;
+    const target = nextFocus.current === 'confirm' ? confirmButton.current ?? chooseButton.current : chooseButton.current;
+    nextFocus.current = null;
+    if (target?.getClientRects().length && !target.disabled) target.focus({ preventScroll: true });
+  }, [visible, applying, picking, preview, notice, error]);
+  useEffect(() => {
+    if (!preview) return;
+    const expire = () => { setPreview(undefined); setNotice('授权预览已失效，请重新选择文件夹。'); };
+    if (preview.conversationRevision !== (c.revision ?? 1)) { expire(); return; }
+    const timer = setTimeout(expire, Math.max(0, Date.parse(preview.expiresAt) - Date.now()));
+    return () => clearTimeout(timer);
+  }, [preview, c.revision]);
+  async function pick() {
+    if (pending.current || applying) return;
+    const controller = new AbortController(); pending.current = controller;
+    setPicking(true); setError(''); setNotice('');
+    try {
+      const result = await command<{ preview: ConfigurationPreview | null }>('/api/conversations/' + c.id + '/workspace-pick', {expectedRevision: c.revision ?? 1}, controller.signal);
+      if (!controller.signal.aborted) {
+        nextFocus.current = result.preview ? 'confirm' : 'choose';
+        if (result.preview) setPreview(result.preview);
+        else setNotice('已取消选择，工作区未变更。');
+      }
+    } catch (e) { if (!controller.signal.aborted) { nextFocus.current = 'choose'; setError((e as Error).message); } }
+    finally { if (pending.current === controller) { pending.current = undefined; setPicking(false); } }
+  }
+  function cancelPick() {
+    pending.current?.abort(); pending.current = undefined; nextFocus.current = 'choose'; setPicking(false); setNotice('已取消选择，工作区未变更。');
+  }
+  async function apply() {
+    if (!preview || applying || picking) return;
+    setApplying(true); setError(''); setNotice('');
+    try {
+      await command('/api/conversations/' + c.id + '/workspace-apply', { previewId: preview.id, requestId: rid() });
+      nextFocus.current = 'choose'; setPreview(undefined); await refresh(); setNotice('项目文件夹已切换，只读授权已生效。');
+    } catch (e) { setError((e as Error).message); const stale = (e as {status?: number}).status === 409; nextFocus.current = stale ? 'choose' : 'confirm'; if (stale) setPreview(undefined); }
+    finally { setApplying(false); }
+  }
+  const selected = preview && 'path' in preview.value ? preview.value.path : undefined;
+  const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+  return <section className="cc-workbench cc-project-picker" aria-label="项目文件夹">
+    <h3>项目文件夹</h3><div className="cc-project-current"><span className="cc-project-symbol"><WorkspaceIcon name="folder" /></span><div><small>当前工作区</small><strong>{grant ? basename(grant.path) : '默认工作区'}</strong></div><small>只读</small></div>
+    {grant ? <code className="cc-project-path">{grant.path}</code> : <details className="cc-project-location"><summary>查看默认目录</summary><code>{workspace}</code></details>}
+    <p className="cc-note">{c.archivedAt || c.deletedAt ? '恢复会话后可更换项目文件夹。' : picking ? '请在系统窗口中选择项目文件夹。' : '为这次会话选择一个本地项目。'}</p>
+    <div className="cc-project-actions"><button ref={chooseButton} className={selected ? '' : 'cc-project-primary'} disabled={picking || applying || !!c.archivedAt || !!c.deletedAt} onClick={() => void pick()}><WorkspaceIcon name="folder" />{picking ? '正在选择…' : selected ? '重新选择…' : grant ? '更换文件夹…' : '选择文件夹…'}</button>{picking && <button onClick={cancelPick}>取消选择</button>}</div>
+    {selected && <section className="cc-workbench-preview cc-project-preview"><small>● 等待确认</small><strong>{basename(selected)}</strong><code>{selected}</code><p>仅此会话可读取该目录。确认前仍使用当前工作区。</p><div className="cc-project-actions"><button ref={confirmButton} className="cc-project-primary" disabled={applying || picking || preview?.conversationRevision !== (c.revision ?? 1)} onClick={() => void apply()}>{applying ? '正在授权…' : '确认只读授权'}</button><button disabled={applying || picking} onClick={() => { setPreview(undefined); setError(''); chooseButton.current?.focus(); }}>取消</button></div></section>}
+    {notice && <p role="status" className="cc-note">{notice}</p>}{error && <p className="cc-form-error" role="alert">{error}</p>}
+  </section>;
 }
 export function DefaultConfiguration({ data, command, refresh }: { data: CollaborationBootstrap; command: WorkbenchCommand; refresh: () => Promise<void> }) {
   const [carrier, setCarrier] = useState<Carrier>('codex-app-server'), [account, setAccount] = useState(''), [model, setModel] = useState(''), [effort, setEffort] = useState('');

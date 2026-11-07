@@ -30,9 +30,28 @@ async function setup() {
   return { app, url, boot, api, calls, probes, c, path, wait, close: async () => { await app.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
+test('memory library: owner administration is independent of selected conversation, excludes session entries and trashed origins', async () => {
+  const h = await setup(); try {
+    const library = (await h.api(h.path + '/memory-candidates', { requestId: rid(), key: 'Library private', content: 'LIBRARY_PRIVATE', scope: 'library', privateTo: ['codex'] })).data.result;
+    await h.api(h.path + '/memory-candidates', { requestId: rid(), key: 'Session only', content: 'SESSION_ONLY' });
+    const other = (await h.api('/api/conversations', { requestId: rid(), title: 'Other origin', memberIds: ['claude'], defaultMemberId: 'claude' })).data.conversation;
+    const second = (await h.api(`/api/conversations/${other.id}/memory-candidates`, { requestId: rid(), key: 'Other library', content: 'OTHER_LIBRARY', scope: 'library' })).data.result;
+    const read = await h.api('/api/collaboration/memory-library'); assert.equal(read.status, 200);
+    assert.deepEqual(new Set(read.data.memories.map((e: any) => e.id)), new Set([library.entry.id, second.entry.id]));
+    assert.deepEqual(read.data.memories.find((e: any) => e.id === library.entry.id).visibility.memberIds, ['codex']);
+    assert.equal(read.data.memoryVersions.length, 2); assert.equal(read.data.conversations.length, 2);
+    assert.equal((await h.api('/api/collaboration/memory-library?viewer=claude')).status, 400);
+    assert.equal(h.app.collaborationStore.memory.current(other.id, 'claude').length, 0, 'owner administration never grants recall');
+    await h.api(h.path + '/visibility-organize', { requestId: rid(), action: 'delete', expectedRevision: h.app.collaborationStore.visibility.conversation(h.c.id).revision });
+    const after = (await h.api('/api/collaboration/memory-library')).data;
+    assert.deepEqual(after.memories.map((e: any) => e.id), [second.entry.id]); assert.deepEqual(after.memoryVersions.map((v: any) => v.id), [second.version.id]);
+    assert.ok(after.conversations.every((c: any) => c.id !== h.c.id)); assert.equal(h.calls.length, 0);
+  } finally { await h.close(); }
+});
+
 test('N8 HTTP: private -> exact tool boundaries -> refs-only selected share -> isolated public prompt with CSRF and metadata projection', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.9.0-n8');
+    assert.equal(h.boot.version, '0.10.0-n9');
     assert.equal((await h.api(h.path + '/messages', { requestId: rid(), content: '', excerptTargets: ['codex'], excerptRefs: [null] })).status, 400);
     assert.equal((await h.api(h.path + '/visibility-organize', { requestId: rid(), expectedRevision: 1, action: 'groups', groups: [null] })).status, 400);
     const input = { requestId: rid(), content: 'TEST_TOOL_BOUNDARY PRIVATE_UNSELECTED TOKEN_TO_SHARE', privateTo: ['codex'] };

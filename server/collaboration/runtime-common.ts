@@ -1,5 +1,6 @@
 import { verifyWorkspace } from './workbench.js';
 import { ARTIFACT_TOOL_SPECS } from './artifact-tools.js';
+import { ACTION_TOOL_SPECS } from './action-tools.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -39,8 +40,8 @@ export const MEMORY_TOOL_SPECS = [
   { name: 'material_search', description: 'Lexical search in authorized current-conversation messages, sent text attachments, published artifacts, materialized memories, and platform response history. No native private transcript access. semantic/hybrid is unavailable.', inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, kinds: { type: 'array', items: { type: 'string', enum: ['threads', 'docs', 'memory', 'sessions'] } }, mode: { type: 'string', enum: ['lexical'] } }, required: ['query'], additionalProperties: false } },
 ];
 export function runtimeTools(request: Pick<RuntimeRequest, 'toolPolicyVersion' | 'visibility'>) {
-  if (request.toolPolicyVersion === 'visibility-memory-v1') {
-    const tools = [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS, ...MEMORY_TOOL_SPECS];
+  if (['visibility-memory-v1','cross-action-v1'].includes(request.toolPolicyVersion ?? '')) {
+    const tools = [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS, ...MEMORY_TOOL_SPECS, ...(request.toolPolicyVersion === 'cross-action-v1' ? ACTION_TOOL_SPECS : [])];
     return request.visibility?.kind === 'private' && !request.visibility.revealedAt ? tools.filter(t => ['workspace_list', 'workspace_read', 'user_question', 'conversation_pending', 'conversation_read', 'memory_read', 'memory_propose', 'material_search'].includes(t.name)) : tools;
   }
   return request.toolPolicyVersion === 'cooperation-v2' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS] : request.toolPolicyVersion === 'managed-artifacts-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS] : request.toolPolicyVersion === 'readonly-tasks-v1' ? [...TOOL_SPECS, ...TASK_TOOL_SPECS] : TOOL_SPECS;
@@ -70,7 +71,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
+  if (name.startsWith('cross_') || name.startsWith('action_') || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);

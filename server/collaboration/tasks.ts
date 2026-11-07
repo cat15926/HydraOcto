@@ -58,7 +58,7 @@ export class OrdinaryTaskService {
     if (!invocationId) return { kind: 'user' };
     const i = this.port.invocation(invocationId);
     if (!allowPrivate && this.port.contract(i.id).visibility?.kind === 'private' && !this.port.contract(i.id).visibility?.revealedAt) fail('私聊执行不能写入公开任务。');
-    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
+    if (i.status !== 'running' || (i.cancelRevision ?? 0) !== 0 || !['readonly-tasks-v1', 'managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(this.port.contract(i.id).toolPolicyVersion)) fail('此执行不具备任务操作权限。', 'stale_task_callback');
     this.target(i.conversationId, i.memberId);
     const s = this.sourceFor(i);
     return { kind: 'agent', invocationId, memberId: i.memberId, sourceId: s.id, sourceRevision: s.revision, cancelRevision: i.cancelRevision ?? 0 };
@@ -110,6 +110,7 @@ export class OrdinaryTaskService {
     if (!source.taskRef) return;
     const t = this.getTask(source.taskRef.taskId);
     try { if (t.ownerMemberId) this.target(t.conversationId, t.ownerMemberId); } catch { return '任务负责人已禁用或离开会话。'; }
+    if (t.delegationId) return '任务已绑定专用委托，不在主会话重复派发。';
     if (t.pendingHandoffId) return '正式交接仍在等待旧执行释放。';
     if (t.status === 'done' || t.disposition || t.status === 'blocked' || t.ownerRevision !== source.taskRef.ownerRevision || t.currentSourceId !== source.id || source.requestedTargets.length !== 1 || source.requestedTargets[0] !== t.ownerMemberId || t.executionRef) return '任务状态、负责人版本或执行绑定不允许此投递。';
     if (source.taskRef.handoffId && this.get<TaskHandoff>('cc_task_handoffs', source.taskRef.handoffId).state !== 'applied') return '正式交接尚未应用。';
@@ -136,7 +137,7 @@ export class OrdinaryTaskService {
     return this.port.tx(() => {
       const actor = this.actor(invocationId);
       const result = this.port.command(`task-update:${taskId}:${input.requestId}`, { ...input, actor }, () => {
-        const t = this.getTask(taskId); this.version(t, input);
+        const t = this.getTask(taskId); this.version(t, input); if (t.delegationId) fail('任务正在委托，请通过专用责任验收或先取消委托。');
         if ((!input.status && !input.disposition) || (input.status && !taskStates.includes(input.status)) || (input.disposition && !dispositions.includes(input.disposition)) || (input.status && input.disposition)) throw new AppError(400, '选择有效的任务状态或单独终结原因。');
         const reason = text(input.reason ?? '', '原因', 2000, input.status !== 'blocked' && !input.disposition);
         if (actor.kind === 'agent' && (t.disposition || t.status === 'done' || t.pendingHandoffId)) fail('任务已结束或正在交接，此旧执行不能改写。', 'stale_task_callback');
@@ -161,7 +162,7 @@ export class OrdinaryTaskService {
     return this.port.tx(() => {
       const actor = this.actor(invocationId);
       const result = this.port.command(`task-handoff:${taskId}:${input.requestId}`, { ...input, actor }, () => {
-        const t = this.getTask(taskId); this.version(t, input); this.authorize(t, actor); this.target(t.conversationId, input.targetMemberId);
+        const t = this.getTask(taskId); this.version(t, input); if (t.delegationId) fail('任务正在委托，请通过专用责任验收或先取消委托。'); this.authorize(t, actor); this.target(t.conversationId, input.targetMemberId);
         if (t.status === 'done' || t.disposition || t.pendingHandoffId || t.ownerMemberId === input.targetMemberId) fail('任务已结束、正在交接或目标仍是原负责人。');
         const h: TaskHandoff = { id: randomUUID(), taskId, conversationId: t.conversationId, expectedOwnerRevision: t.ownerRevision, fromMemberId: t.ownerMemberId, toMemberId: input.targetMemberId, actor,
           executionRef: structuredClone(t.executionRef), sourceId: '', sourceRevision: 1, sourceDigest: '', state: 'waiting', reason: text(input.reason, '交接说明', 2000), revision: 1, stopRequested: actor.kind === 'user' && input.stopCurrent === true, createdAt: now(), updatedAt: now() };
@@ -181,7 +182,7 @@ export class OrdinaryTaskService {
   cancelHandoff(taskId: string, input: TaskCommandVersion) {
     return this.port.tx(() => {
       const result = this.port.command(`task-handoff-cancel:${taskId}:${input.requestId}`, input, () => {
-        const t = this.getTask(taskId); this.version(t, input); if (!t.pendingHandoffId) fail('没有等待中的交接。');
+        const t = this.getTask(taskId); this.version(t, input); if (t.delegationId) fail('任务正在委托，请通过专用责任验收或先取消委托。'); if (!t.pendingHandoffId) fail('没有等待中的交接。');
         this.cancelPending(t, '用户撤销本次交接；停止意图和已有执行事实不撤销。'); this.save(t, 'task.handoff_cancelled'); return { task: t };
       }); return { ...result.result, replayed: result.replayed };
     });
@@ -252,6 +253,7 @@ export class OrdinaryTaskService {
       const i = invocations.find(i => i.id === t.executionRef?.invocationId), last = invocations.find(i => i.id === t.lastExecutionRef?.invocationId);
       const base = { key: `task:${t.id}`, kind: 'task' as const, taskId: t.id, ownerMemberId: t.ownerMemberId, memberId: i?.memberId ?? t.ownerMemberId ?? undefined, invocationId: i?.id };
       if (t.disposition || t.status === 'done') return { ...base, state: 'resolved', reason: `${t.disposition?.reason || '普通任务已明确完成。'}${i ? ' 原执行尚未释放，责任终结不替代退出证据。' : ''}`, disposition: t.disposition?.kind };
+      if (t.delegationId) return { ...base, state: 'waiting', reason: '主负责人保留；准确执行位置见专用责任 ' + t.delegationId };
       if (t.pendingHandoffId) return { ...base, state: 'waiting', reason: '等待原任务执行的准确终态和退出证据，负责人尚未改变。' };
       if (i) {
         const latest = evidence.filter(e => e.invocationId === i.id).at(-1)?.createdAt ?? i.startedAt ?? i.createdAt;

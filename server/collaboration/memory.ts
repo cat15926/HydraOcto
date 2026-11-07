@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
-import type { MemoryEntry, MemoryVersion, MemorySnapshot, MessageExcerpt, MessageVisibility, SearchHit, SearchResult } from '../../shared/collaboration.js';
+import type { MemoryEntry, MemoryVersion, MemoryLibraryDetail, MemorySnapshot, MessageExcerpt, MessageVisibility, SearchHit, SearchResult } from '../../shared/collaboration.js';
 import { AppError, now } from '../store.js';
 import type { CollaborationStore } from './store.js';
 import { privateScope, scopeAllows, scopeKey, textDigest } from './visibility.js';
@@ -17,7 +17,7 @@ export class MemoryService {
   versions(): MemoryVersion[] { return this.data.rows('cc_memory_versions'); }
   private actor(invocationId: string) {
     this.store.visibility.assertTool(invocationId, 'memory_propose'); this.store.tasks.actor(invocationId, true);
-    if (this.store.contract(invocationId).toolPolicyVersion !== 'visibility-memory-v1') throw new AppError(403, '此冻结契约没有记忆权限。');
+    if (!['visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(invocationId).toolPolicyVersion)) throw new AppError(403, '此冻结契约没有记忆权限。');
     const i = this.store.invocation(invocationId);
     if (i.status !== 'running' || i.acceptance !== 'accepted' || (i.cancelRevision ?? 0) !== 0) conflict();
     return i;
@@ -109,6 +109,14 @@ export class MemoryService {
     for (const m of c.memorySnapshot ?? []) if (!actual.some(a => a.versionId === m.versionId && a.revision === m.revision && a.digest === m.digest)) conflict();
   }
   detail(cid: string) { const memories = this.entries().filter(e => e.conversationId === cid || e.scope === 'library' && !this.store.visibility.conversation(e.conversationId).deletedAt); return { memories, memoryVersions: this.versions().filter(v => memories.some(e => e.id === v.entryId)) }; }
+  /** Local owner's library administration; not an Agent read or a new recall permission. */
+  library(): MemoryLibraryDetail {
+    const conversations = this.store.list().filter(c => !c.deletedAt);
+    const sources = new Set(conversations.map(c => c.id));
+    const memories = this.entries().filter(e => e.scope === 'library' && sources.has(e.conversationId));
+    const ids = new Set(memories.map(e => e.id));
+    return { memories, memoryVersions: this.versions().filter(v => ids.has(v.entryId)), conversations };
+  }
   tool(id: string, name: string, input: Record<string, unknown>, callId: string) {
     const i = this.actor(id); if (name === 'memory_propose') return this.propose(i.conversationId, { ...input, requestId: `${id}:${callId}` }, id);
     if (name === 'memory_read') {

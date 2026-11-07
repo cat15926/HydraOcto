@@ -43,6 +43,7 @@ export class VisibilityService {
   }
   visible(m: ConversationMessage, memberId?: string, executionScope?: string): boolean {
     if (m.deletedAt || !scopeAllows(this.messageScope(m), memberId)) return false;
+    try { const s = m.sourceId ? this.data.get<SourceWork>('cc_sources',m.sourceId) : m.responseId ? this.primary(this.store.response(m.responseId).invocationId) : undefined; if(s?.crossRef) this.store.cross.material(s); if(s?.actionRef) this.store.actions.material(s); } catch { return false; }
     return executionScope === undefined || !privateScope(this.messageScope(m)) || scopeKey(this.messageScope(m)) === executionScope;
   }
   readable(cid: string, memberId?: string, executionScope?: string) {
@@ -53,12 +54,13 @@ export class VisibilityService {
     const c = this.store.contract(invocationId), i = this.store.invocation(invocationId);
     return this.data.get<SourceWork>('cc_sources', c.primarySourceId ?? this.store.response(i.responseId).inputSourceIds[0]!);
   }
-  sameScope(invocationId: string, s: SourceWork) { return scopeKey(this.store.contract(invocationId).visibility) === scopeKey(s.visibility) && !s.excerptRefs?.length; }
+  sameScope(invocationId: string, s: SourceWork) { return !s.crossRef && !s.actionRef && !this.primary(invocationId).actionRef && scopeKey(this.store.contract(invocationId).visibility) === scopeKey(s.visibility) && !s.excerptRefs?.length; }
   assertTool(invocationId: string, name: string) {
     const i = this.store.invocation(invocationId), c = this.store.contract(invocationId);
     this.assertConversation(i.conversationId, i.memberId);
+    const source = this.primary(invocationId); if(source.crossRef)this.store.cross.material(source); this.store.actions.validateInvocation(invocationId,true);
     if (c.visibilityEpoch !== undefined && c.visibilityEpoch !== this.epoch()) conflict('材料权限已变化，本轮不能继续读取或转发。');
-    if (privateScope(c.visibility) && (name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'multi_mention' || name === 'collaboration_request')) throw new AppError(403, '私聊执行不能写入公开任务、产物或向其他范围协作；请由用户选择片段分享。');
+    if (privateScope(c.visibility) && (name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'multi_mention' || name === 'collaboration_request')) throw new AppError(403, '私聊执行不能写入公开任务、产物或向其他范围协作；请由用户选择片段分享。');
   }
   validateSend(cid: string, input: SendMessage) {
     this.assertConversation(cid);
@@ -90,7 +92,7 @@ export class VisibilityService {
     return refs.map(ref => {
       if (!ref || typeof ref !== 'object' || Array.isArray(ref) || typeof ref.messageId !== 'string') throw new AppError(400, '选段引用结构无效。');
       const m = this.messages(cid).find(m => m.id === ref.messageId);
-      if (!m || m.deletedAt || (m.revision ?? 1) !== ref.revision || textDigest(m.content) !== ref.digest || m.excerptRefs?.length) conflict();
+      if (!m || !this.visible(m) || (m.revision ?? 1) !== ref.revision || textDigest(m.content) !== ref.digest || m.excerptRefs?.length) conflict();
       if (m!.responseId && !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(this.store.response(m!.responseId).status)) conflict();
       if (m!.sourceId && this.data.get<SourceWork>('cc_sources', m!.sourceId).withdrawnAt) conflict();
       if (!Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < 0 || ref.end <= ref.start || ref.end > m!.content.length) throw new AppError(400, '选段范围无效。');
@@ -107,7 +109,7 @@ export class VisibilityService {
     return undefined;
   }
   private replyContent(cid: string, mid: string, visibility?: MessageVisibility) {
-    const m = this.messages(cid).find(m => m.id === mid && !m.deletedAt);
+    const m = this.messages(cid).find(m => m.id === mid && this.visible(m));
     if (!m) conflict('引用来源已删除或不可访问，请重新发送。');
     const origin = this.messageScope(m!);
     if (privateScope(origin) && (!privateScope(visibility) || visibility!.memberIds.some(id => !origin!.memberIds.includes(id)))) conflict('被引用消息仍是私聊，请先公开原消息或只分享选定正文。');
@@ -115,6 +117,8 @@ export class VisibilityService {
   }
   sourceContent(s: SourceWork, visibility = s.visibility): string {
     if (s.replyTo) this.replyContent(s.conversationId, s.replyTo, visibility);
+    if (s.crossRef) return this.store.cross.material(s);
+    if (s.actionRef) return this.store.actions.material(s);
     return s.excerptRefs?.length ? `${s.content}\n用户明确分享的准确选段（仅这些片段获授权）：\n${this.resolveRefs(s.conversationId, s.excerptRefs)}` : s.content;
   }
   projectedMessage(m: ConversationMessage): ConversationMessage {
@@ -129,7 +133,7 @@ export class VisibilityService {
   history(cid: string, memberId: string, scope: string) {
     return this.readable(cid, memberId, scope).map(m => {
       const s = m.sourceId && this.data.get<SourceWork>('cc_sources', m.sourceId);
-      if (s && (m.attachmentIds?.length || m.replyTo || m.excerptRefs?.length)) {
+      if (s && (s.crossRef || s.actionRef || m.attachmentIds?.length || m.replyTo || m.excerptRefs?.length)) {
         try { return { ...m, visibility: this.messageScope(m), content: this.sourceContent(s, this.messageScope(m)) }; }
         catch { return undefined; }
       }
@@ -201,7 +205,7 @@ export class VisibilityService {
         });
         this.store.db.prepare("UPDATE cc_meta SET value=value+1 WHERE key='configuration_revision'").run();
       } else throw new AppError(400, '会话操作无效。');
-      c.revision = (c.revision ?? 1) + 1; c.updatedAt = now(); this.put('cc_conversations', c); this.port.event(cid, 'conversation.organized', { action: input.action }); return c;
+      c.revision = (c.revision ?? 1) + 1; c.updatedAt = now(); this.put('cc_conversations', c); this.store.cross.sweep(); this.port.event(cid, 'conversation.organized', { action: input.action }); return c;
     }));
   }
   export(cid: string, memberId?: string, messageIds?: string[]) {

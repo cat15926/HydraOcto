@@ -1,20 +1,22 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import type { OpenWorkspaceTarget } from './WorkspacePanel';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ConversationDetail, Member, OrdinaryTask } from '../shared/collaboration';
 
 const states = { todo: '待办', doing: '进行中', blocked: '等待条件', done: '已完成' };
 const endings = { frozen: '冻结本次跟踪', degraded: '降级结束跟踪', abandoned: '放弃本次任务' };
 const handoffStates = { waiting: '等待旧执行释放', applied: '已变更负责人', cancelled: '已撤销', refused: '未应用' };
 type Choice = { kind: 'create' | 'update' | 'handoff' | 'cancel-handoff'; task?: OrdinaryTask };
-type Props = { detail: ConversationDetail; members: Member[]; command: (path: string, body: unknown) => Promise<unknown>; refresh: () => Promise<void> };
+type Props = { targetId?: string; visible?: boolean; onOpenTarget?: OpenWorkspaceTarget; detail: ConversationDetail; members: Member[]; command: (path: string, body: unknown) => Promise<unknown>; refresh: () => Promise<void> };
 
 /** Task controls are optional and live outside the natural message composer. */
-export function TaskPanel({ detail, members, command, refresh }: Props) {
+export function TaskPanel({ detail, members, command, refresh, targetId, visible = true, onOpenTarget }: Props) {
   const [choice, setChoice] = useState<Choice>();
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [conflict, setConflict] = useState(false);
   const [status, setStatus] = useState('doing');
+  const dialogId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const pending = useRef<{ signature: string; body: Record<string, unknown> } | undefined>(undefined);
-  useEffect(() => { if (choice) dialog.current?.showModal(); return () => dialog.current?.close(); }, [!!choice]);
+  useEffect(() => { if (choice && visible) dialog.current?.showModal(); return () => dialog.current?.close(); }, [!!choice, visible]);
   const name = (id?: string | null) => id ? members.find(m => m.id === id)?.name ?? id : '未分配';
   function open(next: Choice) { pending.current = undefined; setChoice(next); setStatus(next.task?.status ?? 'doing'); setError(''); setConflict(false); }
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -39,31 +41,33 @@ export function TaskPanel({ detail, members, command, refresh }: Props) {
       if (failure.status === 409) { setConflict(true); await refresh().catch(() => undefined); }
     } finally { setBusy(false); }
   }
-  const tasks = detail.tasks ?? [];
+  const tasks = (detail.tasks ?? []).filter(t => !targetId || t.id === targetId);
   const messageItems = detail.responsibility?.filter(r => r.kind === 'message') ?? [];
   return <section className="cc-monitor-section cc-task-panel" aria-label="普通任务">
-    <div className="cc-section-title"><h3>普通任务 · {tasks.length}</h3><button onClick={() => open({ kind: 'create' })}>新建任务</button></div>
+    <div className="cc-section-title"><h3>普通任务 · {tasks.length}</h3>{!targetId && <button onClick={() => open({ kind: 'create' })}>新建任务</button>}</div>
     <p className="cc-note">需要明确责任时再建任务，聊天可直接继续。完成回复不会自动完成任务。</p>
     {notice && <p className="cc-task-notice" role="status">{notice}</p>}
     {!tasks.length && <p className="cc-panel-empty">本会话尚无普通任务。</p>}
     {tasks.map(t => {
       const projection = detail.responsibility?.find(r => r.taskId === t.id), handoffs = detail.taskHandoffs?.filter(h => h.taskId === t.id) ?? [];
       const waiting = handoffs.find(h => h.id === t.pendingHandoffId);
-      return <details className="cc-task-card" key={t.id} data-task-id={t.id}>
+      return <details className="cc-task-card" key={t.id} data-task-id={t.id} open={targetId ? true : undefined}>
         <summary><strong>{t.title}</strong><span className={`cc-task-state cc-task-${t.status}`}>{t.disposition ? endings[t.disposition.kind] : states[t.status]}</span></summary>
-        <div className="cc-task-body"><p>{t.description || '无补充描述'}</p><dl><dt>负责人</dt><dd>{name(t.ownerMemberId)} · 第 {t.ownerRevision} 版</dd><dt>当前执行者</dt><dd>{t.executionRef ? `${name(t.executionRef.memberId)} · ${t.executionRef.invocationId.slice(0, 8)}` : '当前无执行绑定'}</dd>
+        <div className="cc-task-body"><p>{t.description || '无补充描述'}</p><dl><dt>负责人</dt><dd>{name(t.ownerMemberId)} · 第 {t.ownerRevision} 版</dd><dt>当前执行者</dt><dd>{t.executionRef ? `${name(t.executionRef.memberId)} · ${t.executionRef.invocationId.slice(0, 8)}` : t.delegationId ? '委托执行，见专用责任面板' : '当前无执行绑定'}</dd>
           {waiting && <><dt>拟接任成员</dt><dd>{name(waiting.toMemberId)} · 等待旧执行释放</dd></>}
           <dt>责任状态</dt><dd>{projection?.reason ?? '等待读取状态'}{projection?.diagnostic && <strong className="cc-task-diagnostic">{projection.diagnostic}</strong>}</dd>
           {t.statusReason && <><dt>状态说明</dt><dd>{t.statusReason}</dd></>}
         </dl><div className="cc-task-actions"><button onClick={() => open({ kind: 'update', task: t })}>更新状态</button>{t.pendingHandoffId ? <button onClick={() => open({ kind: 'cancel-handoff', task: t })}>撤销交接</button> : t.status !== 'done' && !t.disposition && <button onClick={() => open({ kind: 'handoff', task: t })}>{t.ownerMemberId ? '正式转交' : '指派成员'}</button>}</div>
           {handoffs.length > 0 && <details className="cc-task-history"><summary>交接记录 · {handoffs.length}</summary>{handoffs.map(h => <p key={h.id}>{name(h.fromMemberId)} → {name(h.toMemberId)}<br /><strong>{handoffStates[h.state]}</strong> · {h.reason}<br /><small>来源 {h.sourceId.slice(0, 8)} · {h.stopRequested ? '已请求停止旧执行' : '等待自然结束'}</small></p>)}</details>}
+          {!targetId && onOpenTarget && <button onClick={() => onOpenTarget({ kind: 'task', conversationId: detail.conversation.id, taskId: t.id })}>在工作台打开任务</button>}
+          {targetId && onOpenTarget && <section className="cc-workspace-related"><h3>相关产物</h3>{(detail.artifactVersions ?? []).filter(v => v.origin.task?.id === t.id).map(v => <button key={v.id} onClick={() => onOpenTarget({ kind: 'artifact', conversationId: detail.conversation.id, artifactId: v.artifactId, versionId: v.id })}>{detail.artifacts?.find(a => a.id === v.artifactId)?.name ?? '产物'} · v{v.number}</button>)}{!detail.artifactVersions?.some(v => v.origin.task?.id === t.id) && <p className="cc-note">此任务尚无明确关联的产物。</p>}{t.executionRef && <button onClick={() => onOpenTarget({ kind: 'invocation', conversationId: detail.conversation.id, invocationId: t.executionRef!.invocationId })}>查看准确执行</button>}</section>}
           <small className="cc-task-id">任务 {t.id} · 修订 {t.revision}</small>
         </div>
       </details>;
     })}
     {messageItems.length > 0 && <p className="cc-note cc-message-responsibility">消息责任：{messageItems.filter(r => r.state === 'active').length} 项执行中，{messageItems.filter(r => ['pending', 'waiting'].includes(r.state)).length} 项待投递。按各目标分别记录，不决定任务负责人。</p>}
-    {choice && <dialog ref={dialog} className="cc-dialog cc-task-dialog" onCancel={e => { e.preventDefault(); if (!busy) setChoice(undefined); }} aria-labelledby="cc-task-dialog-title">
-      <header><h2 id="cc-task-dialog-title">{({ create: '新建普通任务', update: '更新任务状态', handoff: choice.task?.ownerMemberId ? '正式转交任务' : '指派任务成员', 'cancel-handoff': '撤销等待中的交接' })[choice.kind]}</h2><button disabled={busy} onClick={() => setChoice(undefined)} aria-label="关闭任务操作">×</button></header>
+    {choice && <dialog ref={dialog} className="cc-dialog cc-task-dialog" onCancel={e => { e.preventDefault(); if (!busy) setChoice(undefined); }} aria-labelledby={dialogId}>
+      <header><h2 id={dialogId}>{({ create: '新建普通任务', update: '更新任务状态', handoff: choice.task?.ownerMemberId ? '正式转交任务' : '指派任务成员', 'cancel-handoff': '撤销等待中的交接' })[choice.kind]}</h2><button disabled={busy} onClick={() => setChoice(undefined)} aria-label="关闭任务操作">×</button></header>
       <form className="cc-settings-form" onSubmit={event => void submit(event)}>
         {choice.task && <p className="cc-note">{choice.task.title} · 基于修订 {choice.task.revision} / 负责人 {choice.task.ownerRevision}</p>}
         {choice.kind === 'create' && <><label>任务标题<input name="title" required maxLength={200} autoFocus /></label><label>任务说明<textarea name="description" rows={4} maxLength={20000} /></label><label>负责人<select name="ownerMemberId" defaultValue=""><option value="">暂不分配</option>{members.filter(m => m.enabled && detail.conversation.memberIds.includes(m.id)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label><p className="cc-note">指定成员后会排队执行；未分配任务等待后续领取或指派。</p></>}

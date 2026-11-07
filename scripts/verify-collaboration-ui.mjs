@@ -1,3 +1,4 @@
+import { openWorkspaceTool, closeWorkspace } from './ui-workspace.mjs';
 /** UI + real HTTP/SQLite integration, with an explicitly injected runtime fixture.
  * No real model is invoked. Run after npm run build with Node 24.
  */
@@ -41,7 +42,7 @@ const check = (label, condition) => { assert.ok(condition, label); checks.push(l
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   await mkdir(output, { recursive: true });
-  app = await createApplication({ dataDir, port: 0, staticDir: join(root, 'dist/web'), collaborationRuntime: runtime });
+  app = await createApplication({ dataDir, port: 0, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || join(root, 'dist/web')), collaborationRuntime: runtime });
   const { url } = await app.start();
   browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ['--no-first-run', '--disable-background-networking'] });
   const page = await browser.newPage();
@@ -63,8 +64,8 @@ try {
   const conversationId = bootstrap.conversations[0].id;
   const detail = await (await fetch(url + '/api/conversations/' + conversationId)).json();
   check('source/consumption identity persisted in SQLite', detail.sources.some(s => s.kind === 'a2a') && detail.consumptions.length === 2);
-  await page.click('.cc-monitor-button');
-  await page.waitForSelector('.cc-monitor.cc-open');
+  await openWorkspaceTool(page, 'activity');
+  await page.waitForSelector('[data-workspace-page="activity"]');
   await page.click('.cc-execution summary');
   check('native acceptance and teardown evidence visible', (await page.$$('.cc-evidence')).length >= 3);
   await page.screenshot({ path: join(output, 'round1-ui-desktop.png') });
@@ -73,6 +74,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 3);
   check('follow-up uses the same persistent conversation', (await (await fetch(url + '/api/collaboration/bootstrap')).json()).conversations.length === 1);
   check('follow-up includes earlier member output', calls[2].prompt.includes('复核完成'));
+  await openWorkspaceTool(page, 'project');
   await page.click('[aria-label="设置会话成员与默认成员"]');
   await page.waitForSelector('.cc-conversation-settings');
   await page.select('.cc-conversation-settings select', 'claude');
@@ -98,11 +100,12 @@ try {
   holdNext = true;
   await page.type('#cc-message-input', '验证停止当前执行。');
   await page.click('.cc-send-button');
+  await openWorkspaceTool(page, 'activity');
   await page.waitForSelector('.cc-run-card');
   await page.click('.cc-run-card .cc-text-button');
   await page.waitForFunction(() => document.querySelector('.cc-message-member .cc-status-cancelled'));
   check('stop action waits for confirmed fixture exit', (await (await fetch(url + '/api/conversations/' + conversationId)).json()).invocations.at(-1).teardown === 'confirmed');
-  await page.click('[aria-label="收起协作动态"]');
+  await page.click('[aria-label="关闭工作台"]');
   await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
   await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0);
   await wait(100);

@@ -1,14 +1,13 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useRef, useState } from 'react';
 import type { ConversationDetail, Member } from '../shared/collaboration';
 
-const groupNames = { collecting: '等待结果', done: '已汇总', timeout: '已超时', cancelled: '已取消', lost: '重启后停止收集' };
+const groupNames = { collecting: '等待结果', done: '已收齐', timeout: '已超时', cancelled: '已取消', lost: '重启后停止收集' };
 const appendNames = { sent: '等待追加回执', accepted: '承载已接受', read: '已取得原生读取证据', unknown: '结果未知，保留原绑定', not_accepted: '未接受，保留下一轮' };
 type Props = { detail: ConversationDetail; members: Member[]; command: (path: string, body: unknown) => Promise<unknown>; refresh: () => Promise<void> };
 
-/** Advanced cooperation actions remain optional, outside the natural message composer. */
+/** Scheduling controls and consultation progress; requests originate in the conversation. */
 export function CooperationPanel({ detail, members, command, refresh }: Props) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
-  const [creating, setCreating] = useState(false);
   const pending = useRef<{ signature: string; body: Record<string, unknown> } | undefined>(undefined);
   const name = (id: string) => members.find(m => m.id === id)?.name ?? id;
   const queue = detail.queue;
@@ -30,10 +29,6 @@ export function CooperationPanel({ detail, members, command, refresh }: Props) {
     const sourceIds = queue.sources.map(s => s.id), next = index + offset;
     [sourceIds[index], sourceIds[next]] = [sourceIds[next]!, sourceIds[index]!];
     void act('/api/conversations/' + detail.conversation.id + '/queue-order', { expectedRevision: queue.revision, sourceIds }, '来源顺序已更新。');
-  }
-  async function create(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const form = new FormData(event.currentTarget);
-    if (await act('/api/conversations/' + detail.conversation.id + '/mention-groups', { targets: form.getAll('targets'), question: form.get('question'), context: form.get('context'), timeoutMs: Number(form.get('timeout')) * 1000 }, '征询已创建；仅收齐后发布汇总，不自动唤回发起者。')) setCreating(false);
   }
   return <section className="cc-monitor-section cc-cooperation-panel" aria-label="协作调度">
     <div className="cc-section-title"><h3>协作调度</h3><button disabled={busy || !detail.invocations.some(i => ['prepared', 'running', 'cancel_requested'].includes(i.status))} onClick={() => void act('/api/conversations/' + detail.conversation.id + '/cancel-all', {}, '已请求停止当前执行。成员暂缓 60 秒，新输入可解除对应目标的暂缓。')}>停止当前全部</button></div>
@@ -63,20 +58,17 @@ export function CooperationPanel({ detail, members, command, refresh }: Props) {
       </div>)}
       {detail.inputExposures?.filter(e => e.kind !== 'append').map(e => <details className="cc-cooperation-card" key={e.id} data-input-exposure={e.id}><summary>{e.kind === 'prompt' ? '首次输入全文归并' : '工具完整读取'} · 输入第 {e.inputRevision} 版</summary><code>来源 {e.sourceId} · 回复 {e.responseId}</code><p>{e.content}</p></details>)}
     </details>
-    <div className="cc-section-title"><h3>多人征询 · {detail.groups?.length ?? 0}</h3><button disabled={busy} onClick={() => setCreating(!creating)}>{creating ? '收起' : '新建征询'}</button></div>
-    {creating && <form onSubmit={event => void create(event)} className="cc-group-form">
-      <label>共同问题<textarea name="question" required maxLength={10000} /></label>
-      <label>补充上下文<textarea name="context" maxLength={10000} /></label>
-      <fieldset><legend>选择 2–8 名成员</legend>{members.filter(m => m.enabled && detail.conversation.memberIds.includes(m.id)).map(m => <label key={m.id}><input type="checkbox" name="targets" value={m.id} />{m.name}</label>)}</fieldset>
-      <label>等待时限（秒）<input type="number" name="timeout" min={1} max={600} defaultValue={120} required /></label>
-      <button disabled={busy} type="submit">发起征询</button>
-    </form>}
-    {detail.groups?.map(g => <details className="cc-cooperation-card" key={g.id} data-mention-group={g.id}><summary>{g.question} · {groupNames[g.state]}</summary>
-      <p>{g.context}</p><small>目标：{g.targets.map(name).join('、')} · 截止 {new Date(g.deadline).toLocaleTimeString()}</small>
-      {g.missing?.length ? <p>未返回：{g.missing.map(name).join('、')}</p> : null}
-      {g.state !== 'done' && <p className="cc-note">此处为收集状态；未发布部分汇总，不自动唤回发起者。</p>}
-      {g.state === 'done' && g.results?.map(r => <p key={r.memberId}><strong>{name(r.memberId)} · {r.status === 'failed' ? '失败' : '返回'}</strong><br />{r.content}</p>)}
-      {g.state === 'collecting' && <button disabled={busy} onClick={() => void act('/api/mention-groups/' + g.id + '/cancel', { expectedRevision: g.revision }, '征询已取消；已请求停止此组准确执行。')}>取消此征询</button>}
-    </details>)}
+    {!!detail.groups?.length && <section aria-label="多人征询进度">
+      <div className="cc-section-title"><h3>多人征询 · {detail.groups.length}</h3></div>
+      {detail.groups.map(g => <details className="cc-cooperation-card" key={g.id} data-mention-group={g.id}><summary>{g.question} · {groupNames[g.state]}{g.results && ` · 已收集 ${g.results.length}/${g.targets.length}`}</summary>
+        {g.context && <p>{g.context}</p>}<small>参与成员：{g.targets.map(name).join('、')} · 截止 {new Date(g.deadline).toLocaleTimeString()}</small>
+        {g.missing?.length ? <p>{g.state === 'collecting' ? '等待' : '未收集'}：{g.missing.map(name).join('、')}</p> : null}
+        {g.state === 'collecting' && <p className="cc-note">收齐后将在对话中汇集各成员的结果。</p>}
+        {g.state === 'timeout' && <p className="cc-note">已到等待时限，未生成完整结果汇集。</p>}
+        {g.state === 'done' && <p className="cc-note">以下为各成员的原始结果。</p>}
+        {g.results?.map(r => <p key={r.memberId}><strong>{name(r.memberId)} · {r.status === 'failed' ? '失败' : '已返回'}</strong><br />{r.content}</p>)}
+        {g.state === 'collecting' && <button disabled={busy} onClick={() => void act('/api/mention-groups/' + g.id + '/cancel', { expectedRevision: g.revision }, '征询已取消；已请求停止此组准确执行。')}>取消此征询</button>}
+      </details>)}
+    </section>}
   </section>;
 }

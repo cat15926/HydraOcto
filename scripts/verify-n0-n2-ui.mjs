@@ -1,3 +1,4 @@
+import { openWorkspaceTool, closeWorkspace } from './ui-workspace.mjs';
 /** N0–N2 UI integration against temporary SQLite and an injected runtime; no real models or credentials. */
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -58,7 +59,7 @@ try {
   await page.click('.cc-send-button');
   await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
   check('natural follow-up stays with Claude despite default Codex', calls.length === 2 && calls[1].member.id === 'claude');
-  await page.click('.cc-monitor-button'); await page.waitForSelector('.cc-monitor.cc-open');
+  await openWorkspaceTool(page, 'activity'); await page.waitForSelector('[data-workspace-page="activity"]');
   await page.click('.cc-execution > summary'); await page.waitForSelector('.cc-contract-audit');
   check('execution contract and manifest are displayed', await page.$('.cc-input-audit[data-manifest-id]'));
   check('manifest alone is not labelled provider acceptance', (await page.$eval('.cc-input-audit', el => el.textContent)).includes('不代表承载已经接受'));
@@ -114,7 +115,7 @@ try {
   nextBehavior = 'held';
   await post('/api/conversations/' + created.conversation.id + '/messages', { content: '创建一个需要重验的协作投递。', requestId: crypto.randomUUID() });
   await page.reload({ waitUntil: 'networkidle2' });
-  await page.waitForSelector('.cc-monitor-button'); await page.click('.cc-monitor-button');
+  await page.waitForSelector('.cc-workspace-toggle'); await openWorkspaceTool(page, 'activity');
   await page.waitForSelector('.cc-recheck-button'); await page.click('.cc-recheck-button');
   await page.waitForFunction(() => document.querySelector('.cc-result-banner')?.textContent.includes('仍暂缓投递'));
   check('disabled target remains held after explicit recheck', await page.$('.cc-recheck-button'));
@@ -125,7 +126,7 @@ try {
   check('recheck returns original delivery to scheduling, with no duplicate invocation', calls.length === 6 && calls.at(-1).member.id === 'claude');
   const heldDetail = await read('/api/conversations/' + created.conversation.id);
   check('recheck decision and exact caller persist and show in execution detail', heldDetail.holdRechecks.length === 2 && heldDetail.inputManifests.some(m => m.caller?.memberId === 'codex'));
-  await page.click('[aria-label="收起协作动态"]'); await page.setViewport({ width: 390, height: 844 });
+  await page.click('[aria-label="关闭工作台"]'); await page.setViewport({ width: 390, height: 844 });
   await page.type('#cc-message-input', '继续讨论。');
   await page.waitForFunction(() => document.querySelector('.cc-route-preview')?.textContent.includes('预计交给'));
   check('mobile has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));

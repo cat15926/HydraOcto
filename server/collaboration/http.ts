@@ -1,3 +1,5 @@
+import type { FolderPicker } from './folder-picker.js';
+import { sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Carrier, CollaborationAccount, CollaborationBootstrap, CollaborationRuntime, Member, OrdinaryTaskStatus, UpdateOrdinaryTask } from '../../shared/collaboration.js';
 import { AppError } from '../store.js';
@@ -57,13 +59,14 @@ function memberInput(body: unknown): Member {
 }
 interface HttpDependencies {
   store: CollaborationStore; engine: CollaborationEngine; runtime: CollaborationRuntime;
-  workspace: string; csrfToken: string;
+  folderPicker: FolderPicker; workspace: string; csrfToken: string;
   verifyCsrf(request: IncomingMessage): void;
   readJson(request: IncomingMessage): Promise<unknown>;
   json(response: ServerResponse, status: number, body: unknown): void;
 }
 
 export function collaborationHttp(deps: HttpDependencies) {
+  let picker: AbortController | undefined;
   const streams = new Map<ServerResponse, ReturnType<typeof setInterval>>();
   let probeCache: { at: number; promise: ReturnType<CollaborationRuntime['probe']> } | undefined;
   const probe = () => {
@@ -74,18 +77,22 @@ export function collaborationHttp(deps: HttpDependencies) {
     configured: account.auth === 'api' ? Boolean(account.apiKeyEnv && process.env[account.apiKeyEnv]?.trim()) : true,
   });
   return {
-    close() { for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
+    close() { picker?.abort(); for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
     async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
       const path = decodeURIComponent(url.pathname);
-      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$)|sources(?:\/|$)|mention-groups(?:\/|$)|input-handoffs(?:\/|$))/.test(path)) return false;
+      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$)|sources(?:\/|$)|mention-groups(?:\/|$)|input-handoffs(?:\/|$)|cross-grants(?:\/|$)|actions(?:\/|$)|conditions(?:\/|$))/.test(path)) return false;
       const { store, engine, json } = deps;
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.9.0-n8', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.10.0-n9', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
       if (request.method === 'GET' && path === '/api/conversations') { json(response, 200, { conversations: store.list() }); return true; }
+      if (request.method === 'GET' && path === '/api/collaboration/memory-library') {
+        if ([...url.searchParams.keys()].length) throw new AppError(400, '记忆库管理仅供本地用户使用，不接受成员视角参数。');
+        json(response, 200, store.memory.library()); return true;
+      }
       const conversation = /^\/api\/conversations\/([^/]+)$/.exec(path);
       if (request.method === 'GET' && conversation) {
         const cid = conversation[1]!, viewer = url.searchParams.get('viewer');
@@ -134,11 +141,40 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'GET' && path === '/api/collaboration/event-page') { const after = Number(url.searchParams.get('after') ?? '0'); if (!Number.isSafeInteger(after) || after < 0) throw new AppError(400, '事件游标无效。'); const events = store.events(after, undefined, 1000); json(response, 200, { events, nextCursor: events.at(-1)?.id ?? after, hasMore: !!events.length && events.at(-1)!.id < store.cursor() }); return true; }
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const body = object(await deps.readJson(request));
+        const crossCommand = /^\/api\/conversations\/([^/]+)\/(cross-grants|cross-send|actions)$/.exec(path);
+        if (crossCommand) { const cid=crossCommand[1]!,op=crossCommand[2];const result=op==='cross-grants'?store.cross.createGrant(cid,body):op==='cross-send'?store.cross.send(cid,body):store.actions.create(cid,body);engine.kick();json(response,200,result);return true; }
+        const grantRevoke = /^\/api\/cross-grants\/([^/]+)\/revoke$/.exec(path);
+        if(grantRevoke){const result=store.cross.revoke(grantRevoke[1]!,body);engine.kick();json(response,200,result);return true;}
+        const actionCommand = /^\/api\/actions\/([^/]+)\/(command|wait)$/.exec(path);
+        if(actionCommand){const result=actionCommand[2]==='wait'?store.actions.wait(actionCommand[1]!,body):store.actions.command(actionCommand[1]!,body);engine.kick();json(response,200,result);return true;}
+        const conditionCommand = /^\/api\/conditions\/([^/]+)\/command$/.exec(path);
+        if(conditionCommand){const result=store.actions.conditionCommand(conditionCommand[1]!,body);engine.kick();json(response,200,result);return true;}
         const visibilityCommand = /^\/api\/conversations\/([^/]+)\/(branch|read-cursor|visibility-organize|memory-candidates)$/.exec(path);
         if (visibilityCommand) { const cid = visibilityCommand[1]!, action = visibilityCommand[2]; const result = action === 'branch' ? store.visibility.branch(cid, body) : action === 'read-cursor' ? store.visibility.markRead(cid, body.sequence) : action === 'memory-candidates' ? store.memory.propose(cid, body) : store.visibility.organize(cid, body); json(response, 200, result); return true; }
         const messagePolicy = /^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/visibility$/.exec(path);
         if (messagePolicy) { json(response, 200, store.visibility.messageCommand(messagePolicy[1]!, messagePolicy[2]!, body)); return true; }
         if (path === '/api/collaboration/memory-transition') { json(response, 200, store.memory.transition(field(body.versionId, '记忆版本'), body)); return true; }
+        const pickFolder = /^\/api\/conversations\/([^/]+)\/workspace-pick$/.exec(path);
+        if (pickFolder) {
+          if (Object.keys(body).some(k => k !== 'expectedRevision')) throw new AppError(400, '选择器只接受当前会话版本。');
+          const cid = pickFolder[1]!, expected = revision(body.expectedRevision, '会话版本', 1);
+          store.workbench.checkFolderSelection(cid, expected);
+          if (picker) throw new AppError(409, '已有文件夹选择器打开，请先完成或取消选择。');
+          const controller = new AbortController(), cancel = () => controller.abort();
+          picker = controller; response.once('close', cancel);
+          try {
+            const selected = await deps.folderPicker(controller.signal);
+            if (controller.signal.aborted || response.destroyed) return true;
+            if (!selected) { json(response, 200, { preview: null }); return true; }
+            store.workbench.checkFolderSelection(cid, expected);
+            // Terminal separator preserves a directory name ending in whitespace through path validation.
+            const preview = store.workbench.previewWorkspace(cid, { path: selected + sep });
+            json(response, 200, { preview });
+          } finally {
+            response.off('close', cancel); if (picker === controller) picker = undefined;
+          }
+          return true;
+        }
         const workbenchCommand = /^\/api\/conversations\/([^/]+)\/(organize|attachments|workspace-preview|workspace-apply)$/.exec(path);
         if (workbenchCommand) {
           const cid = workbenchCommand[1]!, action = workbenchCommand[2];

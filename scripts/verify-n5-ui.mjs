@@ -1,3 +1,4 @@
+import { openWorkspaceTool, closeWorkspace } from './ui-workspace.mjs';
 /** Isolated synthetic runtime. No production database, credentials or model calls. */
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -31,7 +32,7 @@ try {
   const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label).click(), label, scope); };
   await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
   check('natural composer remains free of routing choices', !(await page.$('.cc-composer select')));
-  await page.type('#cc-message-input', '@codex 提出一个产物'); await page.click('.cc-send-button'); await page.click('.cc-monitor-button');
+  await page.type('#cc-message-input', '@codex 提出一个产物'); await page.click('.cc-send-button'); await openWorkspaceTool(page, 'artifacts');
   await click('回答问题'); await page.type('[name=answer-format]', 'Markdown'); await click('提交答案', '.cc-artifact-dialog');
   await page.waitForSelector('[data-artifact-id]'); await page.click('[data-artifact-id] > summary');
   await click('审查并决定'); await page.waitForFunction(() => document.querySelector('.cc-artifact-preview')?.textContent.includes('Exact version'));
@@ -49,7 +50,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.cc-artifact-version').length === 2); await click('审查并决定'); await click('批准此版本写入');
   await page.waitForFunction(() => document.querySelector('.cc-artifact-panel')?.textContent.includes('历史结论，当前无效'));
   check('old verdict visibly invalidated by replacement version', app.collaborationStore.artifacts.detail(cid).reviews[0].current === false);
-  await page.reload({ waitUntil: 'networkidle2' }); await page.click('.cc-monitor-button'); await page.waitForSelector('[data-artifact-id]'); await page.click('[data-artifact-id] > summary');
+  await page.reload({ waitUntil: 'networkidle2' }); await openWorkspaceTool(page, 'artifacts'); await page.waitForSelector('[data-artifact-id]'); await page.click('[data-artifact-id] > summary');
   check('versions and review history survive reload', (await page.$eval('.cc-artifact-panel', e => e.textContent)).includes('历史结论，当前无效'));
   check('ordinary task completion remains separate', app.collaborationStore.tasks.list(cid).length === 0);
   await page.setViewport({ width: 390, height: 844 }); await click('提出产物');

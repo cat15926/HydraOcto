@@ -29,7 +29,7 @@ export class ArtifactService {
     if (actor.kind === 'agent') {
       const i = this.port.invocation(actor.invocationId), contract = this.port.contract(i.id);
       if (!allowPrivate && contract.visibility?.kind === 'private' && !contract.visibility.revealedAt) fail('私聊执行不能写入公开产物。');
-      if (i.conversationId !== conversationId || !['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1'].includes(contract.toolPolicyVersion) || i.acceptance !== 'accepted') fail('此准确执行没有产物权限或接受证据。');
+      if (i.conversationId !== conversationId || !['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion) || i.acceptance !== 'accepted') fail('此准确执行没有产物权限或接受证据。');
       const r = this.get<CollaborationResponse>('cc_responses', i.responseId);
       origin.responseId = r.id; origin.inputRevision = r.inputRevision; origin.sourceDigest = contract.sourceDigest;
     }

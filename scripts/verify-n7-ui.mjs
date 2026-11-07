@@ -1,26 +1,28 @@
+import { openWorkspaceTool, closeWorkspace } from './ui-workspace.mjs';
 /** N7 browser acceptance: isolated data and synthetic runtime, no real model calls. */
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { AppError } from '../dist/server/store.js';
 import { createApplication } from '../dist/server/index.js';
 const output = resolve(process.env.VALIDATION_OUTPUT_DIR || '.local-data/validation/n7-ui/' + new Date().toISOString().replace(/[:.]/g, '-'));
 const temp = await mkdtemp(join(tmpdir(), 'n7-ui-')), project = join(temp, 'project'), second = join(temp, 'second');
 const { default: puppeteer } = await import(pathToFileURL(process.env.PUPPETEER_PATH || '/Users/ruhonglin/lhz/clowder-ai-latest/packages/api/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js').href);
-const calls = [], checks = [], errors = [];
+const calls = [], checks = [], errors = []; let pickerCalls = 0;
 const check = (label, ok) => { assert.ok(ok, label); checks.push(label); };
 let app, browser;
 try {
   await mkdir(output, { recursive: true }); await mkdir(project); await mkdir(second);
   const file = join(temp, 'real-context.txt'); await writeFile(file, 'N7_BROWSER_ATTACHMENT_VALUE\n@claude this text does not route');
-  app = await createApplication({ port: 0, dataDir: join(temp, 'private'), workspace: project, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || 'dist/web'), collaborationRuntime: {
+  app = await createApplication({ port: 0, folderPicker: async () => { if (++pickerCalls === 1) throw new AppError(503,'系统窗口暂不可用，请重试。'); return pickerCalls === 2 ? null : second; }, dataDir: join(temp, 'private'), workspace: project, staticDir: resolve(process.env.VALIDATION_STATIC_DIR || 'dist/web'), collaborationRuntime: {
     probe: async () => [], discoverAccount: async a => ({ accountId: a.id, accountRevision: a.revision ?? 1, checkedAt: new Date().toISOString(), installed: true, configured: true, connection: 'reachable', identity: { state: 'unknown' }, models: [{ id: 'fixture-model', name: 'N7 Synthetic model', efforts: ['low', 'high'] }], catalogSource: 'synthetic-browser-only', quota: { state: 'unknown' } }),
     invoke: async r => { calls.push(r); r.onEvent({ kind: 'accepted', detail: { source: 'synthetic-browser' } }); r.onEvent({ kind: 'process_exit', detail: { confirmed: true } }); return { text: `N7 合成结果 ${calls.length}`, continuity: 'fresh' }; },
   } }); const { url } = await app.start();
   browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true, args: ['--no-first-run', '--disable-background-networking'] });
   const page = await browser.newPage(); page.on('pageerror', e => errors.push(e.stack || e.message)); await page.setViewport({ width: 1512, height: 982 });
-  const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label && !b.disabled).click(), label, scope); };
+  const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled && b.getClientRects().length), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label && !b.disabled && b.getClientRects().length).click(), label, scope); };
   const fill = async (selector, text) => { await page.click(selector); await page.$eval(selector, el => el.select()); await page.keyboard.press('Backspace'); await page.type(selector, text); };
   const until = async fn => { const end = Date.now() + 10000; while (!fn()) { if (Date.now() > end) throw new Error('UI fixture timed out'); await new Promise(r => setTimeout(r, 20)); } };
   const selectLabel = async (label, value) => { const h = await page.evaluateHandle(label => [...document.querySelectorAll('dialog label')].find(l => l.firstChild?.textContent.trim() === label)?.querySelector('select'), label); await h.asElement().select(value); await h.dispose(); };
@@ -32,17 +34,33 @@ try {
   check('pure attachment is present in real invocation input and cannot route embedded mention', calls[0].prompt.includes('N7_BROWSER_ATTACHMENT_VALUE') && calls[0].member.id === 'codex');
   await page.click('.cc-message-user .cc-reply-button'); await page.type('#cc-message-input', '继续说明附件'); await page.click('.cc-send-button'); await until(() => calls.length === 2); await page.waitForSelector('.cc-reply-reference');
   check('reply target and attachment history persist to the next actual input', calls[1].prompt.includes('N7_BROWSER_ATTACHMENT_VALUE') && app.collaborationStore.detail(calls[0].conversationId).messages.some(m => m.replyTo));
-  await page.click('.cc-workbench summary'); await fill('.cc-workbench input[name="title"]', 'N7 日常项目'); await click('保存名称'); await page.waitForFunction(() => document.querySelector('h1').textContent === 'N7 日常项目');
-  await click('置顶会话'); await page.waitForFunction(() => document.querySelector('.cc-conversation-list').textContent.includes('↑ N7'));
+  const row = '.cc-thread-row[data-thread-id="' + calls[0].conversationId + '"]', more = row + ' .cc-thread-more';
+  await page.click(more); await page.keyboard.press('Escape');
+  await page.waitForFunction(sel => document.activeElement.matches(sel), {}, more);
+  await page.click(more); await click('重命名', row); await fill(row + ' input','不保存'); await page.keyboard.press('Escape');
+  await page.waitForSelector(more); check('Escape dismisses menu or inline rename without changing title', app.collaborationStore.list()[0].title !== '不保存');
+  await page.click(more); await click('重命名',row); await fill(row + ' input', 'N7 日常项目'); await page.keyboard.press('Enter'); await page.waitForFunction(() => document.querySelector('h1').textContent === 'N7 日常项目');
+  await page.click(more); await click('置顶会话', row); await page.waitForFunction(() => document.querySelector('.cc-conversation-list').textContent.includes('已置顶'));
   check('rename and pin persist server-side', app.collaborationStore.list()[0].pinned && app.collaborationStore.list()[0].title === 'N7 日常项目');
-  await click('归档会话'); await page.waitForFunction(() => document.querySelector('#cc-message-input').disabled);
+  await page.click(more); await page.screenshot({ path: join(output, 'conversation-menu.png') }); await click('归档会话',row); await page.waitForFunction(() => document.querySelector('#cc-message-input').disabled);
   check('archiving preserves history and disables new input', app.collaborationStore.list()[0].archivedAt && app.collaborationStore.detail(calls[0].conversationId).messages.length === 4);
-  await click('查看归档会话'); await page.waitForFunction(() => document.querySelector('.cc-conversation-list').textContent.includes('N7 日常项目'));
-  await click('恢复会话'); await page.waitForFunction(() => !document.querySelector('#cc-message-input').disabled); await click('返回进行中的会话');
+  await click('查看归档会话'); await page.waitForSelector(more); await page.click(more); await click('恢复会话', row);
+  await page.waitForFunction(() => !document.querySelector('#cc-message-input').disabled); await click('返回进行中的会话');
   check('archived conversations remain discoverable and can be restored', !app.collaborationStore.list()[0].archivedAt);
-  await fill('.cc-workbench input[name="path"]', second); await click('预览工作区授权'); await page.waitForSelector('.cc-workbench-preview');
-  check('preview alone grants no new directory', !app.collaborationStore.list()[0].workspaceGrant);
-  await click('授权此项目'); await until(() => !!app.collaborationStore.list()[0].workspaceGrant);
+  await openWorkspaceTool(page, 'project');
+  check('project tool offers folder choice and member controls without unrelated forms', !(await page.$('.cc-project-picker input')) && !!(await page.$('.cc-workspace-members')));
+  const chooser='.cc-project-picker .cc-project-actions button';
+  await page.focus(chooser); await page.keyboard.press('Enter'); await page.waitForSelector('.cc-project-picker [role=alert]');
+  await page.waitForFunction(sel=>document.activeElement===document.querySelector(sel) && !document.activeElement.disabled,{},chooser);
+  await page.keyboard.press('Enter'); await page.waitForFunction(()=>document.querySelector('.cc-project-picker [role=status]')?.textContent.includes('已取消选择'));
+  check('failure returns keyboard focus to retry and native cancel preserves it',pickerCalls===2 && await page.$eval(chooser,e=>document.activeElement===e));
+  await page.keyboard.press('Enter'); await page.waitForSelector('.cc-project-preview');
+  check('selected folder leads keyboard focus to explicit confirmation',await page.$eval('.cc-project-preview button',el=>document.activeElement===el));
+  check('preview shows chosen folder; native cancel and preview do not grant', pickerCalls === 3 && !app.collaborationStore.list()[0].workspaceGrant && (await page.$eval('.cc-project-preview code',e=>e.textContent)).endsWith('/second'));
+  await page.screenshot({path:join(output,'folder-preview.png')});
+  await click('取消','.cc-project-preview'); await page.waitForSelector('.cc-project-preview',{hidden:true});
+  check('dismissing preview leaves current workspace unchanged',!app.collaborationStore.list()[0].workspaceGrant);
+  await click('选择文件夹…'); await page.waitForSelector('.cc-project-preview'); await click('确认只读授权','.cc-project-preview'); await until(() => !!app.collaborationStore.list()[0].workspaceGrant);
   await page.type('#cc-message-input', '检查新项目'); await page.click('.cc-send-button'); await until(() => calls.length === 3);
   check('authorized project is frozen into next invocation', calls[2].cwd.endsWith('/second') && calls[2].workspaceGrant.path === calls[2].cwd);
   await page.screenshot({ path: join(output, 'workbench-desktop.png') });
@@ -68,8 +86,17 @@ try {
   check('alias routes naturally using effective default model and effort', calls[3].member.id === 'codex' && calls[3].member.model === 'fixture-model' && calls[3].member.effort === 'high');
   await page.reload({ waitUntil: 'networkidle2' }); await page.waitForSelector('.cc-message-list');
   check('reload preserves title, attachments and reference links', await page.$eval('h1', e => e.textContent === 'N7 日常项目') && (await page.$$('.cc-attachment')).length === 1 && (await page.$$('.cc-reply-reference')).length === 1);
-  await page.setViewport({ width: 390, height: 844 }); await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0); await page.screenshot({ path: join(output, 'mobile.png') });
+  await closeWorkspace(page);
+  const boot = await (await fetch(url + '/api/collaboration/bootstrap')).json();
+  const other = (await (await fetch(url + '/api/conversations',{method:'POST',headers:{'content-type':'application/json','x-csrf-token':boot.csrfToken},body:JSON.stringify({title:'另一条会话',memberIds:['codex'],defaultMemberId:'codex',requestId:crypto.randomUUID()})})).json()).conversation;
+  const otherRow = '.cc-thread-row[data-thread-id="' + other.id + '"]'; await page.waitForSelector(otherRow); await page.type('#cc-message-input','保留这条草稿');
+  await page.click(otherRow+' .cc-thread-more'); await click('置顶会话',otherRow); await until(()=>app.collaborationStore.detail(other.id).conversation.pinned);
+  check('organizing another row retains active chat and draft', await page.$eval('h1',e=>e.textContent==='N7 日常项目') && await page.$eval('#cc-message-input',e=>e.value==='保留这条草稿'));
+  await page.setViewport({ width: 390, height: 844, hasTouch:true }); await page.waitForFunction(() => document.querySelector('.cc-sidebar').getBoundingClientRect().right <= 0); await page.screenshot({ path: join(output, 'mobile.png') });
   check('mobile composer remains on-screen with optional project controls closed', await page.$eval('.cc-send-button', e => { const r = e.getBoundingClientRect(); return r.right <= innerWidth && r.bottom <= innerHeight && r.top >= 0; }));
+  await page.click('button[aria-label="打开会话列表"]'); await page.waitForFunction(() => Math.abs(document.querySelector('.cc-sidebar.cc-open')?.getBoundingClientRect().left ?? -999) <= 1); await page.tap(otherRow+' .cc-thread-more'); await page.waitForSelector(otherRow + ' [role=menu]',{visible:true});
+  check('touch menu has 44px targets',await page.$eval(otherRow+' .cc-thread-more',el=>{const r=el.getBoundingClientRect();return r.width>=44 && r.height>=44;}));
+  await page.screenshot({path:join(output,'mobile-row-menu.png')}); await page.keyboard.press('Escape');
   check('no horizontal overflow or browser exceptions', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth) && errors.length === 0);
   await writeFile(join(output, 'result.json'), JSON.stringify({ ok: true, checks, syntheticCalls: calls.length, errors }, null, 2)); console.log(JSON.stringify({ ok: true, checks: checks.length, syntheticCalls: calls.length, output }));
 } catch (e) { await writeFile(join(output, 'failure.json'), JSON.stringify({ error: e.stack, checks, errors }, null, 2)); console.error(e); process.exitCode = 1; }

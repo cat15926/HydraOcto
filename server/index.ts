@@ -14,6 +14,7 @@ import { CollaborationStore } from './collaboration/store.js';
 import { ArtifactFiles } from './collaboration/artifact-files.js';
 import { CollaborationEngine } from './collaboration/engine.js';
 import { createCollaborationRuntime } from './collaboration/runtime.js';
+import { chooseProjectFolder, type FolderPicker } from './collaboration/folder-picker.js';
 import { collaborationHttp } from './collaboration/http.js';
 
 export interface ApplicationOptions {
@@ -21,6 +22,7 @@ export interface ApplicationOptions {
   provider?: Provider; modelBaseUrl?: string; modelName?: string; modelApiKey?: string;
   approvalTtlMs?: number; providerTimeoutMs?: number; leaseMs?: number; startWorker?: boolean;
   collaborationRuntime?: CollaborationRuntime;
+  folderPicker?: FolderPicker;
 }
 const TEXT_LIMIT = 20_000;
 function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError(400, 'Expected a JSON object.'); return value as Record<string, unknown>; }
@@ -74,7 +76,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
   const collaborationStore = new CollaborationStore(store, { workspace, artifactDir: resolve(dataDir, 'collaboration-artifacts') });
   const collaborationRuntime = options.collaborationRuntime ?? createCollaborationRuntime();
   const collaborationEngine = new CollaborationEngine(collaborationStore, collaborationRuntime, { workspace });
-  const collaborationRoutes = collaborationHttp({ store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, workspace, csrfToken, verifyCsrf, readJson, json });
+  const collaborationRoutes = collaborationHttp({ store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, folderPicker: options.folderPicker ?? chooseProjectFolder, workspace, csrfToken, verifyCsrf, readJson, json });
   const streams = new Set<ServerResponse>();
   let closed = false; let listeningPort = port; let started = false; let leaseLost = false;
   function stopForLeaseLoss(): void {

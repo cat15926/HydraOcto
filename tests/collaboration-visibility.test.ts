@@ -274,7 +274,7 @@ test('N8: schema 7 migration preserves every existing JSON row and durable memor
     h.owner.db.exec('UPDATE cc_schema SET version=7'); h.owner.close();
     const owner = new Store(h.db); try { const s = new CollaborationStore(owner, { workspace: h.workspace, artifactDir: join(h.root, 'private', 'artifacts') });
       for (let n = 0; n < tables.length; n++) assert.deepEqual(owner.db.prepare(`SELECT value FROM ${tables[n]} ORDER BY rowid`).all(), before[n]);
-      assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 8); assert.equal(s.visibility.readCursor(h.c.id).sequence, m.sequence); assert.equal(s.memory.versions().length, 1);
+      assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 9); assert.equal(s.visibility.readCursor(h.c.id).sequence, m.sequence); assert.equal(s.memory.versions().length, 1);
     } finally { owner.close(); }
   } finally { rmSync(h.root, { recursive: true, force: true }); }
 });
