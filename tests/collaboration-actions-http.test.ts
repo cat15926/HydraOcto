@@ -23,7 +23,7 @@ async function setup(){const root=await mkdtemp(join(tmpdir(),'n9-http-')),works
  return {app,api,boot,home,target,grant,calls,until,close:async()=>{await app.close();await rm(root,{recursive:true,force:true});}};
 }
 test('N9 HTTP: explicit grant, CSRF, cross-source delivery and revoke with no automatic success return',async()=>{const h=await setup();try{
- assert.equal(h.boot.version,'0.10.0-n9');const path=`/api/conversations/${h.home.id}`;
+ assert.equal(h.boot.version,'0.25.0-p8-pr-ci');const path=`/api/conversations/${h.home.id}`;
  assert.equal((await h.api(path+'/cross-grants',h.grant,'')).status,403);assert.equal(h.app.collaborationStore.cross.grants().length,0);
  const g=(await h.api(path+'/cross-grants',h.grant)).data.result;
  assert.equal((await h.api(path+'/cross-send',{requestId:rid(),grantId:g.id,content:'HTTP_CROSS_MARKER',memberId:'claude'})).status,400);

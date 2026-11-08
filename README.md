@@ -2,9 +2,41 @@
 
 本地多 Agent 持续协作平台。用户在同一会话中直接提问、追问或 @成员，成员结合自己的职责，通过持久投递和工具调用请求其他成员协助。平台保存来源、执行、输入与结果之间的关系，让协作过程可以追踪和核查。
 
-当前产品为 **0.10.0，已交付 N0–N9 的当前范围**：持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户、私聊与历史分支、记忆治理及词法检索，以及跨会话授权、专用责任和条件等待。N9 已通过 GPT-6.1 Terra 独立复验并升级本地服务。正式规则见[实施指导](docs/implementation-guide.md)，验证范围与后续进度见[实施进度](docs/implementation-progress.md)。
+当前产品为 **0.25.0**，本地服务版本为 `0.25.0-p8-pr-ci`，数据库 schema 为 13。已交付 N0–N9 的协作能力、N10-A 本机 CLI 会话导入和 N10-B Hermes 成员接入，涵盖持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户、私聊与历史分支、记忆治理及词法检索，以及跨会话授权、专用责任和条件等待。[正式规则](docs/implementation-guide.md) · [实施进度](docs/implementation-progress.md)
 
-N9 修订版通过 269 项自动化和 57 项 N9/N8/N7 浏览器复验；首轮开发与独立各通过 137 项浏览器断言及 4 次真实 CLI / 13 项断言，两个协作方向均覆盖。首轮发现的目录身份和原生上下文两项权限缺陷已修复并独立复验关闭。真实模型证据对应首轮冻结版；修复后的权限边界通过确定性输入与独立对抗检查，未新增模型调用。官方订阅推理仍未验证。
+**在聊天里确认成员的操作。** 在已授权项目会话中打开「工作台 → 项目与成员 → 项目权限」，勾选「在聊天里确认文件和命令」，点击「确认项目工作授权」。从下一次公开项目委托起，可在成员消息旁核对单个文件的完整写入内容或补丁，或查看命令和工作目录。选择「允许一次」「拒绝」或「取消并停止本轮」后，可在原消息中查看执行结果。Claude Code 可申请运行受支持的原生 Bash 命令。Codex 的环境查询由平台在项目副本中执行，卡片会标明执行位置和实际退出码。[验收与上线记录](docs/implementation-progress.md#native-project-progress)
+
+**让成员看截图。** 在会话输入框粘贴截图，或点「＋ 附件」选择 PNG、JPEG、WebP。发送前可点击缩略图放大或移除；发送时写清希望成员根据图片完成什么。每张图片最多 5 MiB，每条消息最多四个附件。使用 API 账户的项目执行目前每轮图片合计最多 1.5 MiB。
+
+**查看项目实际页面。** 在已授权项目的会话打开「工作台 → 项目预览」，点击「启动预览」。可操作页面、查看请求日志，完成后点「停止预览」。支持静态网页和已有构建产物。已上线本机。[实施与验收记录](docs/implementation-progress.md#native-project-progress)。
+
+**在对话中查公开网页。** 在已授权项目的公开会话里向 Codex 或 Claude Code 提问，例如「查一下 Node.js 官方文档怎样说明跨平台支持，给我出处」。也可以直接发网页链接。回复里的出处可以点开，展开「网页查证记录」可核对检索词、原文和读取时间。[实施进度](docs/implementation-progress.md#native-project-progress)
+
+**从聊天推送项目改动。** 在委托中写「完成后提交并推送本次修改」。收到确认卡后核对目标仓库、分支和完整差异，点击「确认推送」或「拒绝」。首批支持 GitHub 已有分支，卡片只收集能归因到成员的普通文本文件；远端读回的提交号可用于核验。[交付范围](docs/implementation-guide.md#native-project-p8)
+
+**从项目会话查资料（P8 只读 MCP）**。管理员通过 `COLLAB_MCP_READERS` 登记服务和搜索工具后，在「工作台 → 项目与成员 → 项目权限」选择资料源并确认。之后直接请项目作者查询，例如「按团队手册核对这个项目的发布编号」。断开资料源后仍可继续项目工作。验收使用单独启动的本机只读服务，不需要用户准备账户或密钥。[配置示例](.env.example) · [验收范围](docs/implementation-guide.md#native-project-p8)
+
+**项目测试、退修与复验（P7）**支持在独立项目副本按 npm 锁文件准备依赖，缺包时在聊天里确认一次下载。要让原作者接收评审意见，可以在第一条委托中写「修好后请 Claude 评审，有问题就继续改」。评审者以真实测试发现问题后，平台将失败命令交给原作者修订，作者自测通过后由同一评审者复验一次。当前本机发布状态见[实施进度](docs/implementation-progress.md#native-project-progress)。
+
+**会话内提 PR 与跟踪 CI（0.25.0）。** 在已授权的项目会话发送「把改动提 PR 到 main，CI 失败就继续修」，核对工作分支、目标分支和差异后点击「确认创建 PR」。卡片会显示 GitHub 链接和当前提交的检查结果；原作者修复后，可在同一会话确认更新该 PR。本机 GitHub CLI 需要已登录且可创建该仓库的 PR、读取检查。[上线进度](docs/implementation-progress.md#native-project-progress)
+
+**单包 npm 项目检查（P8-A）** 已上线本机。在已授权项目的会话中发送「@Codex 修复这个问题，跑测试、类型检查和构建后请 Claude Code 评审，有问题就继续改」。在回复下方可逐项对照初评与复验的命令、退出码及项目快照，即使只有类型检查失败，也能追踪原作者的修订和同一评审者的复验。项目须在根目录提供受支持的 npm 锁文件。缺少检查脚本时，会话显示跳过原因。[八项能力的交付条件](docs/implementation-guide.md#native-project-p8) · [验收与上线记录](docs/implementation-progress.md#native-project-progress)
+
+**项目内持续协作（P0–P2）。** 在公开聊天里发「@Codex 修复这个项目的月报测试，完成后请 Claude Code 评审改动的文件」。首次发送时选择项目文件夹并确认授权，Codex 或 Claude Code 的原生 CLI 即可在本机 Linux 虚拟机中修改 Mac 上的项目。使用已验证的 CLI + API 账户时，对刚完成的同一成员项目委托说「继续」，平台会核对原生历史并续接。受邀评审的成员会独立读取指定文件；展开回复下方的「评审依据」，可以核对哪些文件已读、读取后是否变化，并请求重读。聊天中可停止执行，工作台可收回授权。[正式实施指导第 21 节](docs/implementation-guide.md#native-project) · [项目协作实施与验收进度](docs/implementation-progress.md#native-project-progress)
+
+**官方登录的项目工作（P4，已上线本机）。** 在「成员与运行时」中选用绑定 Codex 官方登录的成员，即可从聊天委托它修改所选 Mac 项目的原文件、运行项目测试。登录和推理使用本机 ChatGPT 账户，项目命令在 Linux 虚拟机中执行。用同一会话追问时，普通 Codex 官方登录使用平台保存的上下文。Claude Code 可用智谱 API 在项目中工作；Claude 官方订阅尚未验证，本机未启用。升级保留已有成员的账户选择。
+
+**双成员项目接力（P5，已上线本机）。** 首次使用时，在「成员与运行时」确认 Codex 成员选用了「Codex 官方 CLI 登录」和对应模型，Claude Code 成员选用了智谱 API。随后在两位成员所在的公开会话中发送「@Codex 修复月报漏掉零金额的问题，跑通原测试后请 Claude Code 评审改动」。Codex 使用官方登录处理修改，再把文件清单交给使用智谱 API 的 Claude Code。展开 Claude 回复下方的「评审依据」，可以查看它实际读取的文件、核对文件是否又有改动，并回到 Codex 发出的评审请求。[P5 实施范围](docs/implementation-guide.md#p5-relay)
+
+**独立项目评审（P6，已上线本机）。** 需要评审者自己找相关代码并复跑测试时，在项目文件夹的授权预览中勾选「允许评审成员查阅项目并运行测试」。已有会话从工作台「项目与成员」进入「评审权限」。确认后照常发送「修复后请 Claude Code 独立评审并跑原测试」。回复下的「评审依据」列出实际读取的文件、测试命令和退出码。测试使用可见文件的独立副本，须由客体提供所需工具和依赖。[P6 规则](docs/implementation-guide.md#p6-project-review) · [实施与验收进度](docs/implementation-progress.md#native-project-progress)
+
+P6 的官方 Codex 原生续聊使用「Codex 项目专用官方登录」账户。在「成员与运行时」打开该账户，复制登录命令，在本机终端按官方流程登录，返回后检查连接，再把项目成员绑定到该账户并选定模型。它在平台专用目录保存项目历史，后续委托核对同一原生线程和上一轮结束位置。已经使用个人 CLI 登录的成员继续按原配置工作。可用范围见[当前实施进度](docs/implementation-progress.md#native-project-progress)。
+
+**项目外导出与失联核查（P3）。** 在聊天里发「把 monthly.csv 导出到桌面」。成员准备好文件后会请求你确认。聊天里选择保存位置、核对完整文件名，再点击“允许导出一次”，平台只新建该文件。执行意外中断时，可以打开“原执行现场”，查看成员已经收到的工具回执，并选择具体文件核对当前内容摘要。
+
+N10-A 新增左侧「导入本机会话」。选择来源账户、项目和消息范围，确认后，首次发送在新会话中使用选定历史。可核验来源包括 Codex 官方索引中的账户/用户归属，以及两种 CLI 在真实终端执行时生成的来源回执。普通 Claude Code JSONL 通常缺少账户归属，无法据此列入候选。空状态提供当前成员与项目的终端命令，可用它记录以后的终端讨论。导入默认仅你与所选成员可见。版本及上线情况以[实施进度](docs/implementation-progress.md)为准。
+
+N9 修订版通过 269 项自动化和 57 项 N9/N8/N7 浏览器复验；首轮开发与独立各通过 137 项浏览器断言及 4 次真实 CLI / 13 项断言，两个协作方向均覆盖。首轮发现的目录身份和原生上下文两项权限缺陷已修复并独立复验关闭。真实模型证据对应首轮冻结版；修复后的权限边界通过确定性输入与独立对抗检查，未新增模型调用。N9 当时未验证官方订阅推理；Codex 官方登录的项目委托已在 P4 验收。
 
 本项目根据独立设计实现。Clowder AI 用于研究业务行为，没有搬迁其源码、Prompt、数据库或品牌素材。
 
@@ -19,6 +51,63 @@ N9 修订版通过 269 项自动化和 57 项 N9/N8/N7 浏览器复验；首轮�
 - **成员原生会话独立延续。** 会话 × 成员保存代次和准确历史锚点；上一轮成功退出且账户、模型、职责、权限及运行身份兼容时续接，变化或历史不可用时封存重建。公共历史与成员私有原生状态分别维护。
 - **任务责任按需建立。** 普通任务保留独立负责人和准确执行绑定；普通 A2A 不改变负责人。正式转交先保存意图，等旧执行的终态和退出证据齐全后再更换负责人并投递，不增加接单步骤。完成需明确操作，不从回复结束推断。
 - **根据证据收敛状态。** 入队、输入准备、承载接受、实际退出和结果分别记录。未知结果不会自动重发；核查和取消使用版本检查，迟到成功不能覆盖用户取消。
+
+### 本机项目执行器
+
+已配置的机器上，用户直接从聊天选择项目。服务管理员首次登记一台专用的、已启动的 Lima/VZ Linux 虚拟机。只挂载一个项目为 `/mnt/project`，禁用宿主用户目录、SSH agent 和端口转发。客体需安装 bubblewrap、Python 3、libseccomp、iproute2，以及项目实际需要的命令。将仓库的 [客体执行器](scripts/runtime/project-vm-runner.py) 安装为 root 所有的 `/opt/multi-agent/project-vm-runner.py`，将验收过的 Linux 原生可执行文件安装到 `/opt/multi-agent/bin/codex` 或 `/opt/multi-agent/bin/claude`。启动时校验二进制、执行器及本次目录选择。
+
+<details>
+<summary>专用 Lima 实例配置示例（Apple Silicon）</summary>
+
+此配置用于 Lima 2.3、VZ、Debian 13 arm64 和 virtiofs。本机管理员需把镜像路径、镜像 SHA-512 和初始项目路径替换为实际值。实例使用独立的私有 `LIMA_HOME`，其中的 `_config/` 不设置额外的 `default.yaml` 或 `override.yaml`。
+
+```yaml
+minimumLimaVersion: "2.3.0"
+vmType: vz
+arch: aarch64
+cpus: 2
+memory: "2GiB"
+disk: "12GiB"
+images:
+  - location: "/absolute/path/debian-arm64.qcow2"
+    arch: aarch64
+    digest: "sha512:<镜像的完整摘要>"
+mountType: virtiofs
+mounts:
+  - location: "/absolute/path/initial-project"
+    mountPoint: /mnt/project
+    writable: true
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+  forwardX11: false
+portForwards:
+  - guestIP: "0.0.0.0"
+    guestIPMustBeZero: false
+    proto: any
+    ignore: true
+containerd:
+  system: false
+  user: false
+propagateProxyEnv: false
+```
+
+客体验收使用兼容 `--as-pid-1`、`--block-fd` 和 `--disable-userns` 的 bubblewrap 0.12.0。Linux 需支持 PID、网络、挂载与用户命名空间、seccomp、pidfd，并启用 Yama 后代追踪限制（`ptrace_scope >= 1`）。在 Debian 13 中安装 `fuse3`、`python3-pyfuse3`、`python3-trio` 和 `python3-fusepy`，供执行器核对 CLI 自身文件描述符，并隔离保存原生会话历史。Lima 管理账户须能用 `sudo -n` 启动 root 所有的执行器，项目命令由受限的普通用户运行。将 Node.js、Git 或测试套件所需的其他命令安装到客体的 `/usr/bin` 工具路径。登记前用合成项目核验所选 Linux CLI，分别保留其二进制 SHA-256 和验证结果。
+
+</details>
+
+使用 Node.js 24 运行以下命令。变量指向这台机器上的绝对路径及已实测 CLI 文件的 SHA-256。两种成员分别登记，可只登记已通过的一种。登记文件的父目录须为私有目录。专用实例开启 `--manage-mount` 后，只有实例空闲、原执行退出可核验时，服务才会切换项目挂载。
+
+```sh
+node --import tsx scripts/register-project-vm.ts \
+  --lima "$LIMA_EXECUTABLE" --lima-home "$PROJECT_LIMA_HOME" --instance "$PROJECT_VM_INSTANCE" \
+  --project "$MOUNTED_PROJECT" --carrier "codex:$CODEX_LINUX_SHA256" \
+  --carrier "claude:$CLAUDE_LINUX_SHA256" --manage-mount --history --output "$VM_REGISTRY"
+```
+
+`--history` 开启 P2 原生项目历史。仅为已实际验证历史隔离及续接的客体登记此能力。
+
+在服务的 `.env` 中将 `COLLAB_PROJECT_VM_CONFIG` 设为生成的登记文件的绝对路径。推理使用成员绑定的 API 账户。项目内的测试命令在 Linux 运行，选择文件夹不会带入 Mac 的依赖、运行环境或官方登录会话。[本机登记命令](scripts/register-project-vm.ts) · [目录切换验证](scripts/verify-project-vm-switch.ts)
 
 ## 当前架构
 
@@ -129,7 +218,7 @@ SQLite 短事务保证命令幂等、来源领取、回复关联和合格失败�
 
 成员可以设置稳定别名，账户和模型分别选择跟随运行时默认或保留成员例外。默认设置先展示影响范围，再按版本应用；在途执行保留冻结配置。删除成员保留历史身份，仍被有效配置引用的账户不能删除。新模型和推理强度需从所选账户实际目录选择，目录未返回的能力不虚构支持。
 
-“账户与登录”分别显示配置、连接、官方身份、最近调用与额度。探测不会启动模型。API 密钥沿用环境变量引用；官方登录由用户在终端执行 codex login 或 claude auth login 后刷新，平台不提取订阅 token。不同 CLI 账户名称仍共享本机单个官方身份，多托管身份隔离不属于本轮。
+“账户与登录”分别显示配置、连接、官方身份、最近调用与额度。探测不会启动模型。API 密钥沿用环境变量引用；官方登录由用户在终端执行 codex login 或 claude auth login 后刷新，平台不提取订阅 token。普通 CLI 账户名称共享各自的本机官方登录。P6 另提供一个有独立登录目录的官方 Codex 项目账户。
 
 ## N6 的连续输入与多人征询
 
@@ -176,10 +265,13 @@ sequenceDiagram
 | --- | --- | --- |
 | Codex app-server | Codex CLI 子进程与原生协议 | 官方 CLI 登录或 API 密钥 |
 | Claude Code CLI | Claude CLI 子进程与平台 MCP 工具 | 官方 CLI 登录或 API 密钥 |
+| Hermes Agent 0.18.2 | 隔离子进程调用本机 Hermes SDK，使用平台工具与会话历史 | OpenAI 兼容 API 密钥，可复用 Codex 的兼容 API 账户 |
 | OpenAI-compatible API | 直接 HTTP 调用 Chat Completions 工具协议 | API 密钥 |
 | Anthropic API | 直接 HTTP 调用 Messages 工具协议 | API 密钥 |
 
 在“成员与运行时”配置账户、承载和模型。API 账户需填写明确的服务地址、模型及密钥环境变量名，例如 `MY_MODEL_KEY`；密钥值保存在服务端环境或 `.env`，不通过页面输入。CLI 的 API 服务须兼容对应协议：Codex 使用 Responses，Claude Code 使用 Anthropic。协议兼容不代表底层模型来自协议原厂。
+
+要邀请 Hermes，打开「成员与运行时」，添加成员并选择 **Hermes Agent**。选好账户和目录中的模型后保存，在目标会话的「配置成员」中加入，再从原输入框 @ 成员名。Hermes 发来的表单可以直接在该执行的问题卡上回答。安装检测默认读取 `~/.hermes/hermes-agent/venv/bin/python`，自定义安装可用 `COLLAB_HERMES_PYTHON` 指定解释器。服务端只将所选账户的密钥交给本轮隔离进程。Hermes 暂不支持官方登录、原生续接或执行中追加。
 
 原生续接实测组合为 Codex `0.166.0-alpha.5.1` / `deepseek-flash` 与 Claude Code `2.1.220` / `glm-5.3`，使用 API 认证；官方订阅登录的续接尚未实测。工作台显示原生会话链、重建原因和承载报告用量，缺失值显示未知，报告成本不当作账单。
 

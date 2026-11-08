@@ -94,7 +94,18 @@ export class CooperationService {
       this.putSource(s); this.changed(c.id); this.newUserInput(c.id, route.targets); this.port.event(c.id, 'source.targets_resolved', { sourceId: s.id, targets: route.targets }); return true;
     } catch (e) { if (e instanceof AppError && e.code === 'no_routable_member') return false; throw e; }
   }
+  private sameProjectAccess(i: CollaborationInvocation, s: SourceWork): boolean {
+    // An image belongs only to its own turn, including while that turn is still running.
+    if (this.store.workbench.imageReferences(s.conversationId, s.attachmentIds).length) return false;
+    const primary = this.store.visibility.primary(i.id);
+    if (this.store.workbench.imageReferences(i.conversationId, primary.attachmentIds).length) return false;
+    const contract = this.store.contract(i.id);
+    if (contract.projectReview || s.projectReview || s.projectRepair || s.projectCiRepair || s.allowCiRepair || s.allowReviewRevision) return false;
+    if (contract.projectWork && (primary.projectRepair || primary.projectCiRepair || primary.allowCiRepair || primary.allowReviewRevision)) return false;
+    return contract.projectWork === s.projectWork && (!s.projectWork || contract.workspaceGrant?.revision === s.projectGrantRevision);
+  }
   canConsume(i: CollaborationInvocation, s: SourceWork): boolean {
+    if (!this.sameProjectAccess(i, s)) return false;
     if (this.store.visibility.primary(i.id).actionRef || s.actionRef || s.crossRef || !this.store.visibility.sameScope(i.id, s) || s.conversationId !== i.conversationId || s.bindingState !== 'bound' || s.withdrawnAt || s.taskRef || s.reviewRef || s.groupId || this.delayed(s.id) || this.suppressed(i.conversationId, i.memberId)) return false;
     if (['visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(i.id).toolPolicyVersion) && this.store.visibility.admissionReason(s)) return false;
     const d = this.data.rows<Delivery>('cc_deliveries').find(d => d.sourceId === s.id && d.memberId === i.memberId);
@@ -185,7 +196,7 @@ export class CooperationService {
     if (deliveryMode === 'next_turn' || s.excerptRefs?.length || s.requestedTargets.length !== 1) return;
     for (const d of this.data.rows<Delivery>('cc_deliveries').filter(d => d.sourceId === s.id)) {
       const i = this.store.invocations(s.conversationId).find(i => i.memberId === d.memberId && ['prepared', 'running'].includes(i.status));
-      if (!i || !this.store.visibility.sameScope(i.id, s) || !['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(i.id).toolPolicyVersion ?? '')) continue;
+      if (!i || !this.sameProjectAccess(i, s) || !this.store.visibility.sameScope(i.id, s) || !['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(i.id).toolPolicyVersion ?? '')) continue;
       d.continuation = { invocationId: i.id, responseId: i.responseId, cancelRevision: i.cancelRevision ?? 0, ...(i.member.carrier !== 'codex-app-server' ? { fallback: true, reason: '当前承载不支持活动追加，保留下一轮投递。' } : {}) };
       this.saveDelivery(d);
     }

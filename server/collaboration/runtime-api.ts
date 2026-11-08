@@ -1,3 +1,4 @@
+import { apiUserContent } from './runtime-images.js';
 import type { RuntimeRequest, RuntimeResult } from '../../shared/collaboration.js';
 import { executeTool, runtimeTools, type Json } from './runtime-common.js';
 
@@ -13,7 +14,7 @@ export async function invokeApi(request: RuntimeRequest): Promise<RuntimeResult>
   const base = (request.account.baseUrl ?? (anthropic ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1')).replace(/\/+$/, '');
   const url = new URL(`${base}/${anthropic ? 'messages' : 'chat/completions'}`);
   if (url.username || url.password || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)))) throw new Error('API endpoint must use HTTPS, or HTTP on localhost for testing.');
-  const messages: Json[] = [{ role: 'user', content: request.prompt }];
+  const messages: Json[] = [{ role: 'user', content: apiUserContent(request, anthropic) }];
   const tools = anthropic ? runtimeTools(request).map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })) : runtimeTools(request).map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } }));
   let awaitingProvider = false, explicitlySettled = false;
   const settle = (detail: Json) => { explicitlySettled = true; request.onEvent({ kind: 'transport_settled', detail: { scope: 'request', confirmed: true, ...detail } }); };
@@ -28,6 +29,9 @@ export async function invokeApi(request: RuntimeRequest): Promise<RuntimeResult>
       awaitingProvider = false;
       if (round === 0 && [400, 401, 403, 404, 422, 429].includes(response.status)) request.onEvent({ kind: 'not_accepted', detail: { status: response.status, round, evidence: 'explicit HTTP rejection' } });
       settle({ status: response.status });
+      if (request.images?.length && [400, 413, 415, 422].includes(response.status)) {
+        throw new Error(`模型接口拒绝了含截图的输入（HTTP ${response.status}）。请确认所选模型支持图像，或缩小截图后重新发送。`);
+      }
       throw new Error(`Model API returned HTTP ${response.status}.`);
     }
     let raw = '';

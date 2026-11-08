@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants, closeSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, fsyncSync } from 'node:fs';
 import { lstat, open, opendir, realpath, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { protectProjectLogin } from './collaboration/workbench.js';
 import type { Artifact, ToolCall } from '../shared/contracts.js';
 
 const TEXT_LIMIT = 64 * 1024;
@@ -111,6 +112,7 @@ export class ToolGateway {
 
   private async workspacePath(path: string): Promise<string> {
     this.assertRoots();
+    protectProjectLogin(this.workspace,'read-only');
     const target = resolve(this.workspace, path);
     if (!within(this.workspace, target) || within(this.artifactDir, target)) throw new Error('工作区路径越界或指向专用产物区');
     let cursor = this.workspace;
@@ -120,6 +122,7 @@ export class ToolGateway {
     }
     const actual = await realpath(target);
     if (!within(this.workspace, actual) || within(this.artifactDir, actual)) throw new Error('工作区真实路径越界');
+    protectProjectLogin(actual,'read-only');
     return actual;
   }
 

@@ -28,7 +28,7 @@ try {
   const selectLabel = async (label, value) => { const h = await page.evaluateHandle(label => [...document.querySelectorAll('dialog label')].find(l => l.firstChild?.textContent.trim() === label)?.querySelector('select'), label); await h.asElement().select(value); await h.dispose(); };
   await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
   check('composer has no recipient or message type selectors', !(await page.$('.cc-composer select')));
-  await (await page.$('input[aria-label="上传文本附件"]')).uploadFile(file); await page.waitForSelector('.cc-composer-attachment');
+  await (await page.$('input[aria-label="添加图片或文本附件"]')).uploadFile(file); await page.waitForSelector('.cc-composer-attachment');
   check('file upload stores bytes before send without requiring text', app.collaborationStore.workbench.attachments(app.collaborationStore.list()[0].id)[0].bytes > 0 && await page.$eval('#cc-message-input', e => e.value === ''));
   await page.click('.cc-send-button'); await until(() => calls.length === 1); await page.waitForSelector('.cc-message-user .cc-attachment');
   check('pure attachment is present in real invocation input and cannot route embedded mention', calls[0].prompt.includes('N7_BROWSER_ATTACHMENT_VALUE') && calls[0].member.id === 'codex');

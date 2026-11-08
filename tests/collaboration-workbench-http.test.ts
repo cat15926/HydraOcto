@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomFillSync, randomUUID } from 'node:crypto';
+import { crc32, deflateSync } from 'node:zlib';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,7 @@ async function setup(folderPicker?: FolderPicker) {
 async function until(fn: () => boolean) { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 20)); } }
 test('N7 HTTP: configure real-directory member -> explicit workspace grant -> pure attachment -> actual runtime request and reply reference', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.10.0-n9');
+    assert.equal(h.boot.version, '0.25.0-p8-pr-ci');
     assert.equal((await h.api('/api/accounts/codex-cli/probe', { identity: 'forged' })).status, 400);
     assert.equal((await h.api('/api/accounts/codex-cli/probe', {})).status, 200);
     const member = { ...h.boot.members[0], aliases: ['reviewer'], model: 'fixture-model', expectedRevision: 1, requestId: rid() };
@@ -103,4 +104,74 @@ test('desktop folder selection checks the target twice and cannot grant on open,
     assert.equal((await h.api(base + '/workspace-apply', {previewId:preview.id,requestId:rid()})).status,200);
     assert.equal((await h.api(base)).data.conversation.workspaceGrant.path,preview.value.path); assert.equal(h.calls.length,0);
   } finally { resolvePicker?.(null); await h.close(); }
+});
+
+test('P0 HTTP: pending project work survives the picker, unavailable confirmation and retry; private and forged requests never carry project authority', async () => {
+  let chosen: string | null = null;
+  const h = await setup(async () => chosen);
+  try {
+    const c = (await h.api('/api/conversations', { title: '项目委托', memberIds: ['codex'], defaultMemberId: 'codex', requestId: rid() })).data.conversation;
+    const path = '/api/conversations/' + c.id;
+    const message = { content: '请修复月报文件并运行测试', requestId: rid() };
+    const waiting = await h.api(path + '/messages', message);
+    assert.equal(waiting.status, 202); const intent = waiting.data.intent;
+    const pick = { expectedRevision: 1, mode: 'project-work', intentId: intent.id };
+    assert.equal((await h.api(path + '/workspace-pick', pick)).data.preview, null);
+    assert.equal((await h.api(path)).data.projectIntents[0].id, intent.id);
+    chosen = h.workspace;
+    const selected = (await h.api(path + '/workspace-pick', pick)).data.preview;
+    assert.deepEqual(selected.affectedMemberIds, ['codex']); assert.equal(selected.projectCapabilities[0].available, false);
+    assert.equal((await h.api(path + '/workspace-apply', { previewId: selected.id, requestId: rid() })).status, 409);
+    let detail = (await h.api(path)).data;
+    assert.equal(detail.sources.length, 0); assert.equal(detail.conversation.workspaceGrant, undefined);
+    const cmd = { expectedRevision: 1, requestId: rid() };
+    assert.equal((await h.api(path + '/project-intents/' + intent.id + '/cancel', cmd)).status, 200);
+    assert.equal((await h.api(path + '/messages', message)).data.intent.state, 'cancelled');
+    assert.equal(h.calls.length, 0);
+    const privateReply = await h.api(path + '/messages', { ...message, requestId: rid(), privateTo: ['codex'], projectWork: true });
+    assert.equal(privateReply.status, 201); assert.equal(privateReply.data.source.projectWork, undefined);
+    await until(() => h.app.collaborationStore.invocations().some(i => i.status === 'succeeded'));
+    detail = (await h.api(path)).data;
+    assert.equal(detail.sources.length, 1); assert.equal(detail.projectIntents.length, 0);
+  } finally { await h.close(); }
+});
+
+test('screenshot upload uses a bounded larger HTTP body and serves only sent, visible images', async () => {
+  const h = await setup();
+  try {
+    const c = (await h.api('/api/conversations', { title:'截图', memberIds:['codex','claude'], defaultMemberId:'codex', requestId:rid() })).data.conversation;
+    const path = '/api/conversations/'+c.id;
+    const width = 420, height = 360;
+    const rows = Buffer.alloc(height * (1 + width * 3));
+    for (let y = 0; y < height; y++) randomFillSync(rows, y * (1 + width * 3) + 1, width * 3);
+    const chunk = (name:string, body:Buffer) => {
+      const bytes = Buffer.alloc(12 + body.length);
+      bytes.writeUInt32BE(body.length,0); bytes.write(name,4); body.copy(bytes,8);
+      bytes.writeUInt32BE(crc32(bytes.subarray(4,-4)),bytes.length-4);
+      return bytes;
+    };
+    const header = Buffer.from('00000000000000000802000000','hex');
+    header.writeUInt32BE(width); header.writeUInt32BE(height,4);
+    const file = Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',header),chunk('IDAT',deflateSync(rows)),chunk('IEND',Buffer.alloc(0))]);
+    assert.ok(file.length > 400_000);
+    const upload = {requestId:rid(),name:'手机.png',mediaType:'image/png',base64:file.toString('base64')};
+    const response = await h.api(path+'/attachments',upload);
+    assert.equal(response.status,201);
+    const a = response.data.result;
+    const imageUrl = h.url + path + '/attachments/' + a.id + '/image';
+    assert.equal((await fetch(imageUrl)).status,404);
+    const sent = await h.api(path+'/messages',{requestId:rid(),privateTo:['codex'],content:'请看截图',attachmentIds:[a.id]});
+    assert.equal(sent.status,201);
+    await until(()=>h.calls.length===1);
+    assert.equal(h.calls[0]?.images?.[0]?.base64,upload.base64);
+    assert.ok(!h.calls[0]?.prompt.includes(upload.base64));
+    assert.equal((await fetch(imageUrl+'?viewer=claude')).status,404);
+    const imageResponse = await fetch(imageUrl+'?viewer=codex');
+    assert.equal(imageResponse.status,200); assert.equal(imageResponse.headers.get('content-type'),'image/png');
+    assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()),file);
+    assert.equal((await h.api(path+'/attachments/'+a.id)).status,415);
+    assert.equal((await h.api(path+'/attachments',{...upload,requestId:rid(),mediaType:'image/jpeg'})).status,415);
+    assert.equal((await h.api(path+'/messages',{requestId:rid(),content:upload.base64})).status,413);
+    assert.ok(!JSON.stringify((await h.api(path)).data).includes(upload.base64));
+  } finally { await h.close(); }
 });

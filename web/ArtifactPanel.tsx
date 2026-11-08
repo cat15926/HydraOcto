@@ -1,8 +1,11 @@
+import { NativeFilePermission } from './NativeFilePermission';
+import { isNpmDownload, ProjectNpmDownload } from './ProjectNpmActivity';
+import type { WorkbenchCommand } from './WorkbenchPanel';
 import type { OpenWorkspaceTarget } from './WorkspacePanel';
 import type { WorkspaceTarget } from './workspace-state';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ArtifactApproval, ArtifactVersion, ConversationDetail, ManagedArtifact, Member, RuntimeInteraction } from '../shared/collaboration';
-type Props = { visible?: boolean; target?: Extract<WorkspaceTarget, { kind: 'artifact' }>; interactionId?: string; onOpenTarget?: OpenWorkspaceTarget; detail: ConversationDetail; members: Member[]; command: (path: string, body: unknown) => Promise<unknown>; refresh: () => Promise<void> };
+type Props = { visible?: boolean; target?: Extract<WorkspaceTarget, { kind: 'artifact' }>; interactionId?: string; onOpenTarget?: OpenWorkspaceTarget; detail: ConversationDetail; members: Member[]; command: WorkbenchCommand; refresh: () => Promise<void> };
 type Choice = { kind: 'propose'; artifact?: ManagedArtifact } | { kind: 'inspect'; version: ArtifactVersion; approval?: ArtifactApproval } | { kind: 'review'; version: ArtifactVersion } | { kind: 'answer'; interaction: RuntimeInteraction };
 const stateNames: Record<string, string> = { proposed: '待审批', published: '已发布', rejected: '已拒绝', expired: '已过期', stale: '已失效', cancelled: '已取消', unknown: '结果未知', pending: '等待处理', approved: '已批准', running: '执行中', succeeded: '已完成', submitted: '已提交', answered: '已回答', declined: '已跳过', unsupported: '当前不支持' };
 
@@ -41,10 +44,10 @@ export function ArtifactPanel({ detail, members, command, refresh, visible = tru
   const approvals = detail.artifactApprovals ?? [], versions = (detail.artifactVersions ?? []).filter(v => !target || v.id === target.versionId && v.artifactId === target.artifactId);
   useEffect(() => { if (!visible) { contentAbort.current?.abort(); loadSequence.current++; setLoaded(false); setContent(''); } else if (choice?.kind === 'inspect') { void open(choice); } }, [visible]);
   return <section className={`cc-monitor-section cc-artifact-panel ${target ? 'cc-workspace-inline-preview' : ''}`} aria-label="产物与评审">
-    <div className="cc-section-title"><h3>产物与评审 · {detail.artifacts?.length ?? 0}</h3>{!target && !interactionId && <button onClick={() => { void open({ kind: 'propose' }); }}>提出产物</button>}</div>
-    <p className="cc-note">审查准确版本后批准写入平台产物目录。评审结论不自动完成任务。</p>
+    {!interactionId && <div className="cc-section-title"><h3>产物与评审 · {detail.artifacts?.length ?? 0}</h3>{!target && !interactionId && <button onClick={() => { void open({ kind: 'propose' }); }}>提出产物</button>}</div>}
+    {!interactionId && <p className="cc-note">审查准确版本后批准写入平台产物目录。评审结论不自动完成任务。</p>}
     {notice && <p role="status">{notice}</p>}{!choice && error && <p role="alert">{error}</p>}
-    {(detail.interactions ?? []).filter(i => !target && (interactionId ? i.id === interactionId : i.state === 'pending')).map(i => <div className="cc-interaction" key={i.id}><strong>{name(i.memberId)} 等待你的回答</strong><p>{i.questions?.map(q => q.question).join('；')}</p>{i.state === 'pending' ? <button onClick={() => { void open({ kind: 'answer', interaction: i }); }}>回答问题</button> : <p>{stateNames[i.state] ?? i.state} · {i.reason}</p>}<small>到期 {new Date(i.expiresAt).toLocaleTimeString()}</small></div>)}
+    {(detail.interactions ?? []).filter(i => !target && (interactionId ? i.id === interactionId : i.state === 'pending')).map(i => i.kind === 'approval' ? <NativeFilePermission key={i.id} item={i} stopped={!detail.invocations.some(run => run.id === i.invocationId && ['prepared','running'].includes(run.status))} evidence={detail.evidence} member={name(i.memberId)} command={command} refresh={refresh}/> : isNpmDownload(i) ? <ProjectNpmDownload key={i.id} item={i} memberName={name(i.memberId)} stopped={!detail.invocations.some(run => run.id === i.invocationId && ['prepared','running'].includes(run.status))} command={command} refresh={refresh}/> : <div className="cc-interaction"  key={i.id}><strong>{name(i.memberId)} 等待你的回答</strong><p>{i.questions?.map(q => q.question).join('；')}</p>{i.state === 'pending' ? <button onClick={() => { void open({ kind: 'answer', interaction: i }); }}>回答问题</button> : <p>{stateNames[i.state] ?? i.state} · {i.reason}</p>}<small>到期 {new Date(i.expiresAt).toLocaleTimeString()}</small></div>)}
     {(detail.artifacts ?? []).filter(a => !interactionId && (!target || a.id === target.artifactId)).map(a => <details key={a.id} className="cc-task-card" data-artifact-id={a.id} open={target ? true : undefined}><summary><strong>{a.name}</strong><span>{a.headVersionId ? '有已发布版本' : '尚未发布'}</span></summary><div className="cc-task-body">
       <button onClick={() => { void open({ kind: 'propose', artifact: a }); }}>提出新版本</button>
       {versions.filter(v => v.artifactId === a.id).reverse().map(v => {

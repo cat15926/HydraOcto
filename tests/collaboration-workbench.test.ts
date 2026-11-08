@@ -159,7 +159,7 @@ test('N7: schema 6 upgrade keeps existing business JSON byte-for-byte and restor
     h.owner.db.exec('UPDATE cc_schema SET version=6'); h.owner.close();
     const owner = new Store(h.db); try { const store = new CollaborationStore(owner, { workspace: h.workspace, artifactDir: join(h.root, 'private', 'artifacts') });
       assert.deepEqual(owner.db.prepare('SELECT value FROM cc_conversations').all(), before);
-      assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 9);
+      assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 13);
       assert.equal(store.workbench.attachmentContent(store.workbench.attachments(h.c.id)[0]!.id).content, 'persistent');
     } finally { owner.close(); }
   } finally { rmSync(h.root, { recursive: true, force: true }); }
@@ -176,5 +176,35 @@ test('N7: follow binding releases the obsolete account reference; default refere
     assert.equal(h.w.resolveMember(h.store.members()[0]!).accountId, second.id);
     h.w.remove('members', m.id, { requestId: rid(), expectedRevision: h.store.members()[0]!.revision });
     assert.throws(() => h.store.saveAccount({ ...second, provider: 'claude' }), /Referenced account/);
+  } finally { h.close(); }
+});
+
+test('image bytes belong only to the visible primary turn; stale content fails before dispatch', () => {
+  const h = setup();
+  try {
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
+    const input = {requestId: rid(), name:'proof.png', mediaType:'image/png', base64: png};
+    const image = h.w.upload(h.c.id, input).result;
+    assert.deepEqual(h.w.upload(h.c.id, input).result, image);
+    assert.throws(() => h.w.sentImage(h.c.id, image.id));
+    const s = h.store.send(h.c.id, { content: '请读图', privateTo:['codex'], requestId: rid(), attachmentIds:[image.id] }).source;
+    const i = h.store.admitNext()!.invocations[0]!;
+    const { manifest, prompt } = h.store.prepareInput(i.id);
+    assert.equal(s.requestedTargets[0], 'codex');
+    assert.ok(!prompt.includes(png));
+    assert.deepEqual(manifest.images, [{attachmentId:image.id,mediaType:'image/png',digest:image.digest}]);
+    assert.deepEqual(h.store.runtimeImages(i.id,manifest), [{...manifest.images![0],base64:png}]);
+    assert.equal(h.w.sentImage(h.c.id, image.id,'codex').bytes.toString('base64'),png);
+    assert.throws(() => h.w.sentImage(h.c.id,image.id,'claude'));
+    assert.throws(() => h.w.attachmentContent(image.id));
+    assert.throws(() => h.store.send(h.c.id, { content:'public', requestId:rid(), attachmentIds:[image.id] }),/私密附件/);
+
+    h.store.startInvocation(i.id);
+    const follow = h.store.send(h.c.id, { content:'再看看', privateTo:['codex'], requestId:rid(), attachmentIds:[image.id] }).source;
+    assert.ok(!h.store.detail(h.c.id).deliveries.find(d=>d.sourceId===follow.id)!.continuation);
+    assert.equal(h.store.cooperation.canConsume(i,follow),false);
+    h.owner.db.prepare('UPDATE cc_attachment_contents SET content=? WHERE attachment_id=?').run('AAAA',image.id);
+    assert.throws(() => h.store.runtimeImages(i.id,manifest),/摘要/);
+    assert.throws(() => h.w.sentImage(h.c.id,image.id),/摘要/);
   } finally { h.close(); }
 });

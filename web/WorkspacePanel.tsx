@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import type { Conversation, ConversationDetail, Member } from '../shared/collaboration';
 import { pendingMemories } from './MemoryPanel';
+import { isNpmDownload } from './ProjectNpmActivity';
 import { WorkspaceIcon } from './WorkspaceIcon';
 import { describeTarget, emptyWorkspace, restoreWorkspace, targetKey, targetPage, workspaceReducer, workspaceStorageKey, workspaceTools, type WorkspaceAction, type WorkspaceOrigin, type WorkspaceTarget, type WorkspaceView } from './workspace-state';
 import './workspace.css';
@@ -18,9 +19,14 @@ export function workspaceAttentionItems(detail: ConversationDetail): WorkItem[] 
   const conversationId = detail.conversation.id, base = { conversationId };
   const memory = pendingMemories((detail.memories ?? []).filter(e => e.scope === 'conversation' && e.conversationId === conversationId), detail.memoryVersions ?? []);
   return [
+    ...detail.invocations.flatMap(i => {
+      const pending = detail.projectExports?.find(file => file.invocationId === i.id && ['pending','ready'].includes(file.state) && Date.parse(file.expiresAt) > Date.now());
+      return pending ? [{target:{...base,kind:'invocation' as const,invocationId:i.id},title:pending.fileName,
+        description:i.member.name+' · 等待导出授权',icon:'file'}] : [];
+    }),
     ...memory.map(entry => { const version = [...(detail.memoryVersions ?? [])].reverse().find(v => v.entryId === entry.id && ['candidate', 'approved'].includes(v.state))!; return { target: { ...base, kind: 'memory' as const, entryId: entry.id, versionId: version.id }, title: entry.key, description: version.state === 'approved' ? '会话记忆 · 已批准，等待收录' : '会话记忆 · 待确认', icon: 'book' }; }),
     ...(detail.artifactApprovals ?? []).filter(a => a.state === 'pending').flatMap(a => { const version = detail.artifactVersions?.find(v => v.id === a.versionId), artifact = detail.artifacts?.find(x => x.id === version?.artifactId); return version && artifact ? [{ target: { ...base, kind: 'artifact' as const, artifactId: artifact.id, versionId: version.id }, title: `${artifact.name} · v${version.number}`, description: '等待确认此版本写入', icon: 'file' }] : []; }),
-    ...(detail.interactions ?? []).filter(i => i.state === 'pending').map(i => ({ target: { ...base, kind: 'interaction' as const, interactionId: i.id }, title: i.questions?.[0]?.question ?? '成员等待你的回答', description: '成员提问 · 等待回答', icon: 'question' })),
+    ...(detail.interactions ?? []).filter(i => i.state === 'pending').map(i => ({ target: { ...base, kind: 'interaction' as const, interactionId: i.id }, title: i.kind === 'approval' ? i.fileChange?.path ?? i.nativeCommand?.command ?? '操作确认' : isNpmDownload(i) ? '下载测试依赖' : i.questions?.[0]?.question ?? '成员等待你的回答', description: i.kind === 'approval' ? '项目操作 · 等待确认' : isNpmDownload(i) ? '项目测试 · 等待授权' : '成员提问 · 等待回答', icon: 'question' })),
     ...(detail.actions ?? []).filter(a => a.state === 'candidate').map(a => ({ target: { ...base, kind: 'action' as const, actionId: a.id }, title: a.title, description: '责任候选 · 待验收', icon: 'link' })),
     ...detail.invocations.filter(i => i.recoveryState === 'pending' || i.dispatchStarted && i.teardown === 'unknown' && !['prepared', 'running'].includes(i.status)).map(i => ({ target: { ...base, kind: 'invocation' as const, invocationId: i.id }, title: `执行 ${i.id.slice(0, 8)}`, description: '原执行证据待核查', icon: 'pulse' })),
   ];
@@ -159,6 +165,7 @@ function WorkspacePanel({ detail, members, visible, request, onClose, onMessage,
       {detail.conversation.deletedAt ? <p className="cc-workspace-empty">会话已移入回收站。<button onClick={() => openTool('knowledge')}>管理会话</button></p> : <>
         {!!attention.length && <section className="cc-workspace-section cc-workspace-attention"><h3>需要你处理 <span>{attention.length} 项</span></h3><div>{rows(attention)}</div></section>}
         {!!running.length && <section className="cc-workspace-section"><h3>正在进行 <button onClick={() => openTool('activity')}>全部记录 <WorkspaceIcon name="chevron" /></button></h3>{rows(running.slice(0, 3))}</section>}
+        {detail.conversation.workspaceGrant && !detail.conversation.archivedAt && <button className="cc-workspace-row" onClick={() => openTool('preview')}><span className="cc-workspace-glyph"><WorkspaceIcon name="grid" /></span><span><strong>项目预览</strong><small>打开项目页面，查看运行日志</small></span><WorkspaceIcon name="chevron" /></button>}
         {!!tasks.length && <section className="cc-workspace-section"><h3>跟进任务 <button onClick={() => openTool('tasks')}>全部任务 <WorkspaceIcon name="chevron" /></button></h3>{rows(tasks.slice(0, 3))}</section>}
         {!!artifacts.length && <section className="cc-workspace-section"><h3>最近产物 <button onClick={() => openTool('artifacts')}>全部产物 <WorkspaceIcon name="chevron" /></button></h3>{rows(artifacts.slice(0, 3))}</section>}
         {!attention.length && !running.length && !tasks.length && !artifacts.length && <div className="cc-workspace-empty"><WorkspaceIcon name="check" /><h3>暂时没有需要跟进的工作</h3><p>继续在聊天中协作，任务、待确认事项和产物会显示在这里。</p><button onClick={toggleMenu}>打开工具 <WorkspaceIcon name="plus" /></button></div>}

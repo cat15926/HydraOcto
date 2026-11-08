@@ -49,8 +49,13 @@ export function withRuntimeInspection(base: CollaborationRuntime, options: { max
     }
   };
   return {
+    projectLoginGuidance:base.projectLoginGuidance?.bind(base),
     probe: () => base.probe(),
+    inspectProjectDomain: base.inspectProjectDomain?.bind(base),
+    projectWorkAvailability: base.projectWorkAvailability?.bind(base),
+    runProjectReviewTest: base.runProjectReviewTest?.bind(base),
     ...(base.discoverAccount ? { discoverAccount: base.discoverAccount.bind(base) } : {}),
+    ...(base.historyIdentity ? {historyIdentity:base.historyIdentity.bind(base)} : {}),
     ...(base.sessionIdentity ? { sessionIdentity: base.sessionIdentity.bind(base) } : {}),
     async invoke(input: RuntimeRequest) {
       // In-process retries must never silently create a second provider call.

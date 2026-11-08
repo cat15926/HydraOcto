@@ -1,3 +1,4 @@
+import { projectReviewTools } from './project-review-tools.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Conversation, ConversationMessage, MessageExcerpt, MessageVisibility, ReadCursor, SendMessage, SourceWork } from '../../shared/collaboration.js';
 import { AppError, now } from '../store.js';
@@ -58,6 +59,9 @@ export class VisibilityService {
   assertTool(invocationId: string, name: string) {
     const i = this.store.invocation(invocationId), c = this.store.contract(invocationId);
     this.assertConversation(i.conversationId, i.memberId);
+    if (name === 'project_environment_check' && (i.member.carrier !== 'codex-app-server' || !this.store.checkNativeFilePermission(i.id)))
+      throw new AppError(403,'本次项目委托未授权平台环境查询。');
+    if (c.projectReview && !projectReviewTools(c.projectReview).some(tool => tool.name === name)) throw new AppError(403,'本次评审未授权此工具。');
     const source = this.primary(invocationId); if(source.crossRef)this.store.cross.material(source); this.store.actions.validateInvocation(invocationId,true);
     if (c.visibilityEpoch !== undefined && c.visibilityEpoch !== this.epoch()) conflict('材料权限已变化，本轮不能继续读取或转发。');
     if (privateScope(c.visibility) && (name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'multi_mention' || name === 'collaboration_request')) throw new AppError(403, '私聊执行不能写入公开任务、产物或向其他范围协作；请由用户选择片段分享。');
@@ -227,8 +231,14 @@ export class VisibilityService {
         let content = m.content;
         // A branched share still resolves against its original source; no cached private body.
         // Reply bodies stay separate: flattening a private quote would silently grant it on reveal.
-        for (const id of m.attachmentIds ?? []) { const { attachment: a, content: body } = this.store.workbench.attachmentContent(id); content += `\n\n<user-attachment id=${JSON.stringify(a.id)} name=${JSON.stringify(a.name)} sha256=${JSON.stringify(a.digest)}>\n${body}\n</user-attachment>`; }
-        const copy: ConversationMessage = { id: copiedIds.get(m.id)!, conversationId: c.id, author: m.author, memberId: m.memberId, content, replyTo: m.replyTo ? copiedIds.get(m.replyTo) : undefined, ...(m.excerptRefs ? { excerptRefs: m.excerptRefs, excerptConversationId: m.excerptConversationId ?? cid } : {}), createdAt: m.createdAt, revision: 1, visibility: privateScope(v) ? { kind: 'private', memberIds: v!.memberIds.filter(id => chosen.includes(id)) } : undefined, branchOrigin: { conversationId: cid, messageId: m.id } };
+        const images: string[] = [];
+        for (const id of m.attachmentIds ?? []) {
+          if (this.store.workbench.attachment(id).mediaType !== 'text/plain') {
+            images.push(this.store.workbench.copyImageToBranch(id, c.id));
+            continue;
+          }
+          const { attachment: a, content: body } = this.store.workbench.attachmentContent(id); content += `\n\n<user-attachment id=${JSON.stringify(a.id)} name=${JSON.stringify(a.name)} sha256=${JSON.stringify(a.digest)}>\n${body}\n</user-attachment>`; }
+        const copy: ConversationMessage = { id: copiedIds.get(m.id)!, conversationId: c.id, author: m.author, memberId: m.memberId, content, ...(images.length ? {attachmentIds: images} : {}), replyTo: m.replyTo ? copiedIds.get(m.replyTo) : undefined, ...(m.excerptRefs ? { excerptRefs: m.excerptRefs, excerptConversationId: m.excerptConversationId ?? cid } : {}), createdAt: m.createdAt, revision: 1, visibility: privateScope(v) ? { kind: 'private', memberIds: v!.memberIds.filter(id => chosen.includes(id)) } : undefined, branchOrigin: { conversationId: cid, messageId: m.id } };
         const row = this.store.db.prepare('INSERT INTO cc_messages VALUES(?,?,NULL,?)').run(copy.id, c.id, JSON.stringify(copy)); copy.sequence = Number(row.lastInsertRowid); this.put('cc_messages', copy);
       }
       this.port.event(c.id, 'conversation.branched', { sourceConversationId: cid, cutoff: at!.sequence }); return c;

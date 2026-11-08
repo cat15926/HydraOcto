@@ -155,7 +155,7 @@ export class MemoryService {
         for (let n = 0; n < messages.length && scanned <= 10000; n++) {
           const m = messages[n]!; if (n % 50 === 0) { await setImmediate(); input.signal?.throwIfAborted(); if (Date.now() > deadline) throw new AppError(503, '检索超时。', 'search_degraded'); }
           const projected = this.store.visibility.projectedMessage(m); add('threads', c.id, m.id, c.title, projected.content);
-          for (const a of m.attachmentIds ?? []) if (!usedAttachments.has(a)) { usedAttachments.add(a); const material = this.store.workbench.attachmentContent(a); add('docs', c.id, a, material.attachment.name, material.content); }
+          for (const a of m.attachmentIds ?? []) if (!usedAttachments.has(a)) { usedAttachments.add(a); if (this.store.workbench.attachment(a).mediaType !== 'text/plain') continue; const material = this.store.workbench.attachmentContent(a); add('docs', c.id, a, material.attachment.name, material.content); }
           // Sessions means authorized platform response material, never native transcript or frozen private audit.
           if (m.responseId) add('sessions', c.id, m.responseId, `执行回复 · ${m.memberId}`, projected.content);
         }

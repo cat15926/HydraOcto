@@ -1,4 +1,10 @@
-import type { FolderPicker } from './folder-picker.js';
+import { imageUploadJsonLimit } from './attachment-data.js';
+import { carrierNames } from '../../shared/collaboration.js';
+import { projectLoginGuidance } from './account-discovery.js';
+import { HistoryImport } from './history-import.js';
+import { ProjectPreviews } from './project-preview.js';
+import { ProjectInspection } from './project-inspection.js';
+import type { FolderPicker, ProjectFilePicker } from './folder-picker.js';
 import { sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Carrier, CollaborationAccount, CollaborationBootstrap, CollaborationRuntime, Member, OrdinaryTaskStatus, UpdateOrdinaryTask } from '../../shared/collaboration.js';
@@ -6,7 +12,7 @@ import { AppError } from '../store.js';
 import type { CollaborationStore } from './store.js';
 import type { CollaborationEngine } from './engine.js';
 
-const carriers: Carrier[] = ['codex-app-server', 'claude-cli', 'openai-api', 'anthropic-api'];
+const carriers = Object.keys(carrierNames) as Carrier[];
 const providers = ['codex', 'claude', 'openai', 'anthropic'] as const;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError(400, '需要 JSON 对象。');
@@ -59,32 +65,41 @@ function memberInput(body: unknown): Member {
 }
 interface HttpDependencies {
   store: CollaborationStore; engine: CollaborationEngine; runtime: CollaborationRuntime;
-  folderPicker: FolderPicker; workspace: string; csrfToken: string;
+  projectFilePicker: ProjectFilePicker; folderPicker: FolderPicker; dataDir:string; workspace: string; csrfToken: string;
   verifyCsrf(request: IncomingMessage): void;
-  readJson(request: IncomingMessage): Promise<unknown>;
+  readJson(request: IncomingMessage, limit?: number): Promise<unknown>;
   json(response: ServerResponse, status: number, body: unknown): void;
 }
 
 export function collaborationHttp(deps: HttpDependencies) {
+  const previews = new ProjectPreviews(cid => deps.store.workbench.conversation(cid));
+  const detachPreviews = deps.store.subscribe(events => { for (const cid of new Set(events.map(e => e.conversationId))) previews.reconcile(cid); });
+  const projectInspection = new ProjectInspection(deps.store,deps.runtime.inspectProjectDomain?.bind(deps.runtime));
+  const history = new HistoryImport(deps.store,deps.runtime,deps.dataDir);
   let picker: AbortController | undefined;
   const streams = new Map<ServerResponse, ReturnType<typeof setInterval>>();
   let probeCache: { at: number; promise: ReturnType<CollaborationRuntime['probe']> } | undefined;
   const probe = () => {
-    if (!probeCache || Date.now() - probeCache.at > 15_000) probeCache = { at: Date.now(), promise: deps.runtime.probe().catch(() => carriers.map(carrier => ({ carrier, installed: false, available: false, append: false as const, authentication: carrier.endsWith('-api') ? 'api' as const : 'cli' as const, verified: 'unverified' as const, reason: '运行时检查暂不可用；请稍后刷新。' }))) };
+    if (!probeCache || Date.now() - probeCache.at > 15_000) probeCache = { at: Date.now(), promise: deps.runtime.probe().catch(() => carriers.map(carrier => ({ carrier, installed: false, available: false, append: false as const, authentication: carrier.endsWith('-api') || carrier === 'hermes-agent' ? 'api' as const : 'cli' as const, verified: 'unverified' as const, reason: '运行时检查暂不可用；请稍后刷新。' }))) };
     return probeCache.promise;
   };
   const publicAccount = (account: CollaborationAccount, runtimes: Awaited<ReturnType<CollaborationRuntime['probe']>> = []) => ({ ...account,
+    ...(account.codexHome === 'project' ? (deps.runtime.projectLoginGuidance?.() ?? projectLoginGuidance()) : {}),
     configured: account.auth === 'api' ? Boolean(account.apiKeyEnv && process.env[account.apiKeyEnv]?.trim()) : true,
   });
   return {
-    close() { picker?.abort(); for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
+    close() { detachPreviews(); previews.close(); picker?.abort(); for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
     async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
       const path = decodeURIComponent(url.pathname);
-      if (!/^\/api\/(collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$)|sources(?:\/|$)|mention-groups(?:\/|$)|input-handoffs(?:\/|$)|cross-grants(?:\/|$)|actions(?:\/|$)|conditions(?:\/|$))/.test(path)) return false;
+      if (!/^\/api\/(native-history(?:\/|$)|collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$)|sources(?:\/|$)|mention-groups(?:\/|$)|input-handoffs(?:\/|$)|cross-grants(?:\/|$)|actions(?:\/|$)|conditions(?:\/|$))/.test(path)) return false;
       const { store, engine, json } = deps;
+      const previewRoute = /^\/api\/conversations\/([^/]+)\/project-preview(?:\/(start|stop))?$/.exec(path);
+      if (request.method==='GET' && previewRoute && !previewRoute[2]) {
+        json(response,200,previews.state(previewRoute[1]!)); return true;
+      }
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.10.0-n9', workspace: deps.workspace, csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.25.0-p8-pr-ci', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
@@ -136,11 +151,44 @@ export function collaborationHttp(deps: HttpDependencies) {
         } else json(response, 200, result);
         return true;
       }
+      const image = /^\/api\/conversations\/([^/]+)\/attachments\/([^/]+)\/image$/.exec(path);
+      if (request.method === 'GET' && image) {
+        const viewer = url.searchParams.get('viewer');
+        const { attachment, bytes } = store.workbench.sentImage(image[1]!, image[2]!, viewer === null ? undefined : id(viewer));
+        response.writeHead(200, { 'Content-Type': attachment.mediaType, 'Content-Length': bytes.length,
+          'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff' });
+        response.end(bytes); return true;
+      }
       const attachment = /^\/api\/conversations\/([^/]+)\/attachments\/([^/]+)$/.exec(path);
       if (request.method === 'GET' && attachment) { const result = store.workbench.attachmentContent(attachment[2]!); if (result.attachment.conversationId !== attachment[1]) throw new AppError(404, '附件不属于此会话。'); json(response, 200, result); return true; }
       if (request.method === 'GET' && path === '/api/collaboration/event-page') { const after = Number(url.searchParams.get('after') ?? '0'); if (!Number.isSafeInteger(after) || after < 0) throw new AppError(400, '事件游标无效。'); const events = store.events(after, undefined, 1000); json(response, 200, { events, nextCursor: events.at(-1)?.id ?? after, hasMore: !!events.length && events.at(-1)!.id < store.cursor() }); return true; }
       if (request.method === 'POST') {
-        deps.verifyCsrf(request); const body = object(await deps.readJson(request));
+        deps.verifyCsrf(request); const uploadLimit = /^\/api\/conversations\/[^/]+\/attachments$/.test(path) ? imageUploadJsonLimit : undefined;
+        const body = object(await deps.readJson(request, uploadLimit));
+        if (previewRoute?.[2]) {
+          const state = previewRoute[2]==='start'
+            ? await previews.start(previewRoute[1]!,body.previousId,body.grantRevision)
+            : previews.end(previewRoute[1]!,body.id);
+          json(response,200,state); return true;
+        }
+        if(path.startsWith('/api/native-history/')){
+          if(path==='/api/native-history/project'){
+            if(picker)throw new AppError(409,'已有文件夹选择器打开。');
+            const controller=new AbortController();picker=controller;
+            const cancel=()=>controller.abort();response.once('close',cancel);
+            try{
+              const selected=await deps.folderPicker(controller.signal);
+              if(!controller.signal.aborted)json(response,200,{project:selected?history.addProject(selected):null});
+            }finally{response.off('close',cancel);if(picker===controller)picker=undefined;}
+            return true;
+          }
+          const op=path.slice('/api/native-history/'.length);
+          const operations={options:()=>history.options(),list:()=>history.list(body),preview:()=>history.preview(body),confirm:()=>history.confirm(body)};
+          if(!Object.hasOwn(operations,op))throw new AppError(404,'未知的导入操作。');
+          json(response,200,await operations[op as keyof typeof operations]());return true;
+        }
+        const pullRefresh = /^\/api\/runtime-interactions\/([^/]+)\/refresh-pull$/.exec(path);
+        if (pullRefresh) { json(response,200,{interaction:await engine.pulls.refresh(pullRefresh[1]!)}); return true; }
         const crossCommand = /^\/api\/conversations\/([^/]+)\/(cross-grants|cross-send|actions)$/.exec(path);
         if (crossCommand) { const cid=crossCommand[1]!,op=crossCommand[2];const result=op==='cross-grants'?store.cross.createGrant(cid,body):op==='cross-send'?store.cross.send(cid,body):store.actions.create(cid,body);engine.kick();json(response,200,result);return true; }
         const grantRevoke = /^\/api\/cross-grants\/([^/]+)\/revoke$/.exec(path);
@@ -154,9 +202,32 @@ export function collaborationHttp(deps: HttpDependencies) {
         const messagePolicy = /^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/visibility$/.exec(path);
         if (messagePolicy) { json(response, 200, store.visibility.messageCommand(messagePolicy[1]!, messagePolicy[2]!, body)); return true; }
         if (path === '/api/collaboration/memory-transition') { json(response, 200, store.memory.transition(field(body.versionId, '记忆版本'), body)); return true; }
+        const projectExport = /^\/api\/conversations\/([^/]+)\/project-exports\/([^/]+)\/(pick|decide)$/.exec(path);
+        if (projectExport) {
+          const [,cid,id,action]=projectExport;
+          const expected=revision(body.expectedRevision,'导出修订',1);
+          if(action==='decide'){
+            if(Object.keys(body).some(k=>!['expectedRevision','requestId','decision','payloadDigest'].includes(k)) ||
+                !['allow','decline'].includes(String(body.decision))) throw new AppError(400,'需要本次明确的导出决定。');
+            json(response,200,store.projectExports.decide(cid!,id!,{expectedRevision:expected,requestId:field(body.requestId,'请求标识',200),
+              payloadDigest:field(body.payloadDigest,'文件确认摘要',128),decision:body.decision as 'allow'|'decline'}));
+          }else{
+            if(Object.keys(body).some(k=>k!=='expectedRevision')) throw new AppError(400,'导出位置只能由本机选择器提供。');
+            store.projectExports.checkPick(cid!,id!,expected);
+            if(picker) throw new AppError(409,'已有文件夹选择器打开，请先完成或取消选择。');
+            const controller=new AbortController(),cancel=()=>controller.abort();
+            picker=controller;response.once('close',cancel);
+            try {
+              const chosen=await deps.folderPicker(controller.signal,'export');
+              if(controller.signal.aborted || response.destroyed) return true;
+              json(response,200,chosen?{cancelled:false,export:store.projectExports.pick(cid!,id!,expected,chosen)}:{cancelled:true});
+            }finally{response.off('close',cancel);if(picker===controller)picker=undefined;}
+          }
+          return true;
+        }
         const pickFolder = /^\/api\/conversations\/([^/]+)\/workspace-pick$/.exec(path);
         if (pickFolder) {
-          if (Object.keys(body).some(k => k !== 'expectedRevision')) throw new AppError(400, '选择器只接受当前会话版本。');
+          if (Object.keys(body).some(k => !['expectedRevision', 'mode', 'intentId'].includes(k))) throw new AppError(400, '选择器包含不支持的参数。');
           const cid = pickFolder[1]!, expected = revision(body.expectedRevision, '会话版本', 1);
           store.workbench.checkFolderSelection(cid, expected);
           if (picker) throw new AppError(409, '已有文件夹选择器打开，请先完成或取消选择。');
@@ -168,17 +239,71 @@ export function collaborationHttp(deps: HttpDependencies) {
             if (!selected) { json(response, 200, { preview: null }); return true; }
             store.workbench.checkFolderSelection(cid, expected);
             // Terminal separator preserves a directory name ending in whitespace through path validation.
-            const preview = store.workbench.previewWorkspace(cid, { path: selected + sep });
+            const preview = store.workbench.previewWorkspace(cid, { ...body, path: selected + sep });
             json(response, 200, { preview });
           } finally {
             response.off('close', cancel); if (picker === controller) picker = undefined;
           }
           return true;
         }
+        const inspection = /^\/api\/conversations\/([^/]+)\/project-inspections\/([^/]+)\/(check|pick)$/.exec(path);
+        if (inspection) {
+          if (url.search || Object.keys(body).some(k=>k!=='selectedPaths')) throw new AppError(400,'请从原项目执行打开本地现场核查。');
+          const [,cid,invocationId,action] = inspection;
+          const selected = body.selectedPaths ?? [];
+          const controller = new AbortController(), cancel = () => controller.abort();
+          response.once('close',cancel);
+          try {
+            if (action === 'check') {
+              const snapshot=await projectInspection.check(cid!,invocationId!,selected,controller.signal);
+              if (!response.destroyed) json(response,200,snapshot);
+            } else {
+              const root=projectInspection.pickRoot(cid!,invocationId!);
+              if (!Array.isArray(selected) || selected.length>3) throw new AppError(400,'每次最多选择 4 个文件。');
+              if (picker) throw new AppError(409,'已有选择器打开，请先完成或取消选择。');
+              picker=controller;
+              const path=await deps.projectFilePicker(root,controller.signal);
+              if (controller.signal.aborted || response.destroyed) return true;
+              if (!path) {json(response,200,{cancelled:true}); return true;}
+              const relative=projectInspection.selectedPath(cid!,invocationId!,path);
+              const snapshot=await projectInspection.check(cid!,invocationId!,[...new Set([...selected,relative])],controller.signal);
+              if (!response.destroyed) json(response,200,snapshot);
+            }
+          } finally {
+            response.off('close',cancel);
+            if (picker===controller) picker=undefined;
+          }
+          return true;
+        }
+        const review = /^\/api\/conversations\/([^/]+)\/project-reviews\/([^/]+)\/(check|reread)$/.exec(path);
+        if (review) {
+          const [,cid,invocationId,action] = review;
+          if (Object.keys(body).some(key => action === 'check' || key !== 'requestId')) throw new AppError(400,'评审身份及文件范围由原执行确定。');
+          if (action === 'check') json(response,200,await store.projectReviews.check(cid!,invocationId!));
+          else {
+            const result = store.projectReviews.reread(cid!,invocationId!,field(body.requestId,'请求标识',200));
+            engine.kick(); json(response,200,{...result.result,replayed:result.replayed});
+          }
+          return true;
+        }
+        const projectIntent = /^\/api\/conversations\/([^/]+)\/project-intents\/([^/]+)\/(cancel|consult)$/.exec(path);
+        if (projectIntent) {
+          const result = store.projects.resolve(projectIntent[1]!, projectIntent[2]!, projectIntent[3] as 'cancel' | 'consult',
+            revision(body.expectedRevision, '委托', 1), field(body.requestId, '请求标识', 200));
+          if (projectIntent[3] === 'consult') engine.kick();
+          json(response, 200, result); return true;
+        }
+        const revokeWorkspace = /^\/api\/conversations\/([^/]+)\/workspace-revoke$/.exec(path);
+        if (revokeWorkspace) {
+          const result = store.workbench.revokeWorkspace(revokeWorkspace[1]!, revision(body.expectedRevision, '会话版本', 1), field(body.requestId, '请求标识', 200));
+          result.result.stopped.forEach(id => engine.cancel(id));
+          json(response, 200, result); return true;
+        }
         const workbenchCommand = /^\/api\/conversations\/([^/]+)\/(organize|attachments|workspace-preview|workspace-apply)$/.exec(path);
         if (workbenchCommand) {
           const cid = workbenchCommand[1]!, action = workbenchCommand[2];
           const result = action === 'organize' ? store.workbench.organize(cid, body) : action === 'attachments' ? store.workbench.upload(cid, body) : action === 'workspace-preview' ? store.workbench.previewWorkspace(cid, body) : store.workbench.applyPreview(body, cid);
+          if (action === 'workspace-apply') engine.kick();
           json(response, action === 'attachments' ? 201 : 200, result); return true;
         }
         if (path === '/api/collaboration/default-preview') { json(response, 200, store.workbench.previewDefault(body)); return true; }
@@ -253,7 +378,8 @@ export function collaborationHttp(deps: HttpDependencies) {
         if (send) {
           if (body.deliveryMode !== undefined && !['next_turn', 'continue_current'].includes(String(body.deliveryMode))) throw new AppError(400, '输入投递模式无效。');
           if (body.resolveWhenIdle !== undefined && typeof body.resolveWhenIdle !== 'boolean') throw new AppError(400, '空闲解析必须为布尔值。');
-          const result = store.send(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.privateTo !== undefined ? { privateTo: memberIds(body.privateTo) } : {}), ...(body.excerptRefs !== undefined ? { excerptRefs: body.excerptRefs as import('../../shared/collaboration.js').MessageExcerpt[] } : {}), ...(body.excerptTargets !== undefined ? { excerptTargets: memberIds(body.excerptTargets) } : {}), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
+          const result = store.projects.submit(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.privateTo !== undefined ? { privateTo: memberIds(body.privateTo) } : {}), ...(body.excerptRefs !== undefined ? { excerptRefs: body.excerptRefs as import('../../shared/collaboration.js').MessageExcerpt[] } : {}), ...(body.excerptTargets !== undefined ? { excerptTargets: memberIds(body.excerptTargets) } : {}), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
+          if ('intent' in result) { json(response, result.intent.state === 'cancelled' ? 200 : 202, result); return true; }
           engine.kick(); json(response, result.replayed ? 200 : 201, result); return true;
         }
         const preview = /^\/api\/conversations\/([^/]+)\/route-preview$/.exec(path);

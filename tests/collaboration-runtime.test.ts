@@ -6,7 +6,10 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { createCollaborationRuntime } from '../server/collaboration/runtime.js';
-import { cliEnv, executeTool } from '../server/collaboration/runtime-common.js';
+import { invokeClaude } from '../server/collaboration/runtime-claude.js';
+import { cliEnv, executeTool, runtimeTools } from '../server/collaboration/runtime-common.js';
+import { isManagedProbeArgv, managedProbeArgv } from '../server/collaboration/native-command-approval.js';
+import { anthropicContent, apiUserContent, checkImageTransport, codexInput, redactRuntimeImages } from '../server/collaboration/runtime-images.js';
 import type { Carrier, RuntimeEvent, RuntimeRequest } from '../shared/collaboration.js';
 
 function request(carrier: Carrier, cwd: string, events: RuntimeEvent[], tools: unknown[], extra: Partial<RuntimeRequest> = {}): RuntimeRequest {
@@ -18,6 +21,89 @@ async function script(dir: string, name: string, source: string) {
   const path = join(dir, name);
   await writeFile(path, `#!${process.execPath}\n${source}`); await chmod(path, 0o700); return path;
 }
+
+test('only a gated Codex project author can request the platform environment check and the guest receives fixed arguments', async () => {
+  const base = request('codex-app-server', '/mnt/project', [], [], {projectWork:true,toolPolicyVersion:'cross-action-v1',
+    workspaceGrant:{path:'/mnt/project',device:1,inode:2,revision:1,authorizedAt:new Date().toISOString(),mode:'project-work',nativeFileApprovals:true}});
+  const hasCheck = (r:RuntimeRequest) => runtimeTools(r).some(t=>t.name==='project_environment_check');
+  assert.ok(hasCheck(base));
+  assert.deepEqual(await executeTool(base,'project_environment_check',{command:'pwd'},'probe'),{sourceId:'source-a2a'});
+  for (const other of [
+    {...base,workspaceGrant:undefined}, {...base,projectWork:false}, {...base,member:{...base.member,carrier:'claude-cli' as const}},
+    {...base,visibility:{kind:'private' as const,memberIds:['codex']}},
+    {...base,workspaceGrant:{...base.workspaceGrant!,mode:'read-only' as const}},
+  ]) {
+    assert.equal(hasCheck(other),false);
+    await assert.rejects(executeTool(other,'project_environment_check',{command:'pwd'},'probe'),/outside/);
+  }
+  assert.deepEqual(managedProbeArgv('git --version'),['/usr/bin/git','--version']);
+  assert.ok(isManagedProbeArgv(managedProbeArgv('pwd')));
+  assert.throws(()=>managedProbeArgv('git status'));
+  assert.equal(isManagedProbeArgv(['/usr/bin/git','--version','--help']),false);
+});
+
+test('image inputs use native multimodal content; preflight stops unsupported transports and oversized guest API requests', async () => {
+  const images = [{attachmentId:'fixture',digest:'fixture',mediaType:'image/png' as const,base64:'cGl4ZWxz'}];
+  const input = request('codex-app-server',tmpdir(),[],[],{images});
+  const url = 'data:image/png;base64,cGl4ZWxz';
+  assert.deepEqual(codexInput(input),[{type:'text',text:'Task',text_elements:[]},{type:'image',url}]);
+  assert.deepEqual(anthropicContent(input),[{type:'image',source:{type:'base64',media_type:'image/png',data:'cGl4ZWxz'}},{type:'text',text:'Task'}]);
+  assert.deepEqual(apiUserContent(input,false),[{type:'text',text:'Task'},{type:'image_url',image_url:{url}}]);
+  assert.deepEqual(apiUserContent(input,true),anthropicContent(input));
+  assert.equal(apiUserContent({prompt:'Task'},false),'Task');
+  assert.equal(apiUserContent({prompt:'Task'},true),'Task');
+  assert.doesNotThrow(()=>checkImageTransport(input));
+  input.projectWork=true; input.account.auth='api';
+  input.images=[{...images[0]!,base64:'A'.repeat(2 * 1024 * 1024 + 4)}];
+  assert.throws(()=>checkImageTransport(input),/1.5 MiB/);
+  input.member.carrier='hermes-agent';
+  assert.throws(()=>checkImageTransport(input),/Hermes.*仅支持文本/);
+  const receipt = JSON.stringify({text:'image source: "https://glm-file.bigmodel.cn/ccproxy/file-input/fixture?Signature=synthetic" and '+url});
+  assert.deepEqual(JSON.parse(redactRuntimeImages(receipt)),{text:'image source: "[截图链接已隐藏]" and [截图数据已隐藏]'});
+});
+
+test('Claude API project reviewers must confirm the single file-reading tool before their result is accepted', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-review-tools-'));
+  const keyName = 'P5_REVIEW_TEST_KEY';
+  process.env[keyName] = 'fixture';
+  t.after(async () => { delete process.env[keyName]; await rm(dir, { recursive:true, force:true }); });
+  const readTool = 'mcp__platform__project_review_read';
+  for (const tools of [[readTool], [], [readTool, 'Bash']]) {
+    const command = await script(dir, 'review.cjs', `
+      const sid=process.argv[process.argv.indexOf('--session-id')+1];
+      const send=m=>console.log(JSON.stringify({...m,session_id:sid}));
+      process.stdin.resume(); process.stdin.on('end',()=>{
+        send({type:'system',subtype:'init',model:'glm-5.3',apiKeySource:'ANTHROPIC_AUTH_TOKEN',tools:${JSON.stringify(tools)}});
+        send({type:'result',subtype:'success',result:'review result'});
+      });`);
+    const events:RuntimeEvent[] = [];
+    const input = request('claude-cli',dir,events,[],{projectReview:{originalSourceId:'user-source',grantRevision:1,paths:['report.txt']},toolPolicyVersion:'cross-action-v1'});
+    input.account = {...input.account,auth:'api',apiKeyEnv:keyName,baseUrl:'http://127.0.0.1:1'};
+    input.member.model = 'glm-5.3';
+    const review = invokeClaude(input,command);
+    if (tools.length === 1) {
+      assert.equal((await review).text,'review result');
+      assert.ok(events.some(e => e.detail.observation === 'project_review_tools' && e.detail.nativeSessionId));
+    } else {
+      await assert.rejects(review,/指定文件读取工具/);
+      assert.ok(!events.some(e => e.kind === 'accepted' || e.detail.observation === 'native_terminal'));
+    }
+  }
+});
+
+test('Claude login prompt is offered for a signed-out account, and a failed probe cannot establish login', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'collab-login-probe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const [raw, exit, available, required] of [
+    ['{"loggedIn":false}', 1, false, true], ['{"loggedIn":true,"authMethod":"oauth"}', 1, false, false],
+    ['invalid status', 1, false, false], ['{"loggedIn":true,"authMethod":"oauth"}', 0, true, false],
+  ] as const) {
+    const claudePath = await script(dir, 'claude.cjs', `if (process.argv.includes('--version')) { console.log('fixture'); } else { console.log(${JSON.stringify(raw)}); process.exitCode=${exit}; }`);
+    const capabilities = await createCollaborationRuntime({ claudePath, codexPath: join(dir, 'absent-codex'), hermesPython: join(dir, 'absent-python') }).probe();
+    const claude = capabilities.find(row => row.carrier === 'claude-cli')!;
+    assert.equal(claude.available, available); assert.equal(!!claude.loginRequired, required);
+  }
+});
 const fakeCodex = `
 const readline = require('node:readline');
 if (process.argv.includes('--version')) { console.log('codex-test 1'); process.exit(0); }

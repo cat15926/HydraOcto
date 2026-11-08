@@ -1,3 +1,10 @@
+import type { githubApi } from './project-github.js';
+import { ProjectPullMonitor } from './project-pulls.js';
+import { researchPublicWeb } from './project-research.js';
+import { GitFileChanges, deliverGit } from './project-git.js';
+import { runEnvironmentCheck } from './project-environment-check.js';
+import { RuntimeOutcomeUnknown } from './runtime-common.js';
+import { redactRuntimeImages } from './runtime-images.js';
 import type { AppendDispatcher, AppendObservation, InputHandoff, NativeSessionIdentity, CollaborationInvocation, CollaborationRuntime, RuntimeEvent, RecoveryRequest, RuntimeInspection } from '../../shared/collaboration.js';
 import { verifyWorkspace } from './workbench.js';
 import { AppError } from '../store.js';
@@ -12,16 +19,20 @@ export class CollaborationEngine {
   private executions = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private appenders = new Map<string, AppendDispatcher>();
   private appending = new Map<string, Promise<void>>();
-  constructor(readonly store: CollaborationStore, readonly runtime: CollaborationRuntime, readonly options: { workspace: string; maxDepth?: number }) {}
+  readonly pulls:ProjectPullMonitor;
+  constructor(readonly store: CollaborationStore, readonly runtime: CollaborationRuntime, readonly options: { workspace: string; maxDepth?: number; projectGitHub?: typeof githubApi }) {
+    this.pulls=new ProjectPullMonitor(store,options.projectGitHub);
+  }
   start(): void {
     if (this.started) return;
-    this.store.recover(); this.store.artifacts.recover(); this.store.interactions.sweep(); this.store.cooperation.recover(); this.started = true; this.stopping = false;
+    this.store.recover(); this.store.projectExports.recover(); this.store.artifacts.recover(); this.store.interactions.sweep(); this.store.cooperation.recover(); this.started = true; this.stopping = false;
     this.timer = setInterval(() => this.kick(), 500); this.timer.unref(); this.kick();
   }
   kick(): void {
     if (!this.started || this.stopping || this.draining) return;
     this.draining = true;
     try {
+      this.pulls.tick();
       this.store.cross.sweep(); this.store.actions.reconcile();
       for (const item of this.store.invocations().filter(i => i.status === 'cancel_requested')) this.executions.get(item.id)?.controller.abort(new Error('Persisted cancellation'));
       this.store.artifacts.processJobs(); this.store.interactions.sweep(); this.store.cooperation.groupTick();
@@ -39,14 +50,14 @@ export class CollaborationEngine {
     finally { this.draining = false; }
   }
   private launch(invocation: CollaborationInvocation): void {
-    if (this.executions.has(invocation.id) || !this.store.cooperation.canLaunch(invocation)) return;
+    if (this.executions.has(invocation.id) || !this.store.cooperation.canLaunch(invocation) || !this.store.projectWriterReady(invocation)) return;
     const controller = new AbortController();
     // Register before running async provider/callbacks, including synchronous fake runtimes.
     const done = Promise.resolve().then(() => this.execute(invocation, controller)).finally(() => { this.appenders.delete(invocation.id); this.executions.delete(invocation.id); this.kick(); });
     this.executions.set(invocation.id, { controller, done });
   }
   private sanitize(value: string, accountId?: string): string {
-    let result = value;
+    let result = redactRuntimeImages(value);
     for (const account of this.store.accounts()) {
       if (accountId && account.id !== accountId) continue;
       const secret = account.apiKeyEnv && process.env[account.apiKeyEnv];
@@ -62,8 +73,8 @@ export class CollaborationEngine {
       const frozen = this.store.contract(invocation.id);
       if (frozen.workspaceGrant) verifyWorkspace(frozen.workspaceGrant);
       let identity: NativeSessionIdentity;
-      try { identity = frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
-        ? await this.runtime.sessionIdentity({ member: frozen.memberSnapshot, account: frozen.accountMetadataSnapshot, cwd: frozen.workspaceScope || this.options.workspace })
+      try { identity = frozen.projectReview ? {supported:false, reason:'项目评审使用一次性工作目录。'} : frozen.projectWork && !frozen.projectContinuity ? { supported:false, reason:'原执行保留一次性项目环境。' } : frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
+        ? await this.runtime.sessionIdentity({ member: frozen.memberSnapshot, account: frozen.accountMetadataSnapshot, cwd: frozen.workspaceScope || this.options.workspace, projectWork:frozen.projectWork, projectContinuity:frozen.projectContinuity, workspaceGrant:frozen.workspaceGrant })
         : { supported: false, reason: '承载未提供原生会话身份探测，保留新建行为。' }; }
       catch (error) {
         const current = this.store.invocation(invocation.id);
@@ -75,26 +86,54 @@ export class CollaborationEngine {
       this.store.cooperation.launched(i);
       const account = this.store.accountFor(i.id);
       snapshotSecret = (account.apiKeyEnv && process.env[account.apiKeyEnv]) || '';
+      const changes = await GitFileChanges.start(this.store,i.id,frozen,controller.signal);
       const onEvent = (event: RuntimeEvent) => {
         const safe = JSON.parse(redact(JSON.stringify(event))) as RuntimeEvent;
         this.store.recordEvidence(i.id, safe);
+        changes?.observe(safe);
       };
       onEvent({ kind: 'prepared', detail: { source: 'platform', responseId: i.responseId } });
       const prompt = this.store.prompt(i.id);
       const input = this.store.input(i.id)!; const contract = this.store.contract(i.id);
+      const images = this.store.runtimeImages(i.id, input.manifest);
       onEvent({ kind: 'exposed', detail: { source: 'platform_prompt', characters: prompt.length, manifestId: input.manifest.id, renderDigest: input.manifest.renderDigest, providerAcceptance: false } });
-      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, visibility: contract.visibility, signal: controller.signal, onEvent,
+      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
         onAppendReady: dispatcher => { if (['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
         onInputRead: observation => {
           const h = this.store.cooperation.handoffs(i.conversationId).find(h => h.invocationId === i.id && h.nativeDeliveryId === observation.nativeDeliveryId);
           if (h) this.store.cooperation.appendResult(h.id, observation);
         },
-        onInteraction: request => this.store.interactions.wait(i.id, JSON.parse(redact(JSON.stringify(request))), 'codex', controller.signal),
+        checkNativePermission: (id,thread,turn,item) => !controller.signal.aborted && this.store.interactions.canReturn(i.id,id,thread,turn,item),
+        onNativePermissionCancelled: () => this.cancel(i.id),
+        onNativePermissionLost: id => this.store.interactions.revokeReturn(i.id,id),
+        onInteraction: request => {
+          const raw = JSON.stringify(request), safe = redact(raw);
+          if (request.gitDelivery) return Promise.resolve({state:'declined'});
+          if ((request.fileChange || request.nativeCommand) && (raw !== safe || !this.store.checkNativeFilePermission(i.id))) return Promise.resolve({state:'declined'});
+          return this.store.interactions.wait(i.id, JSON.parse(safe), i.member.carrier === 'claude-cli' ? 'claude' : 'codex', controller.signal);
+        },
         onInteractionResolved: requestId => this.store.interactions.resolved(i.id, requestId),
         onToolCall: async (name, args, callId) => {
           const current = this.store.invocation(i.id); if (current.status !== 'running' || controller.signal.aborted) throw new AppError(409, 'Invocation no longer accepts callbacks.');
           this.store.visibility.assertTool(i.id, name);
           this.store.bindToolCall(i.id, name, args, callId);
+          if (name.startsWith('project_web_')) return researchPublicWeb(this.store,i.id,name,args,callId,controller.signal,redact);
+          if (name === 'project_git_deliver') {
+            await changes?.settle();
+            return deliverGit(this.store,i.id,args,callId,controller.signal,redact,()=>this.cancel(i.id));
+          }
+          if (name === 'project_environment_check') return runEnvironmentCheck(this.store,i.id,args,callId,controller.signal,
+            this.runtime.runProjectReviewTest?.bind(this.runtime),()=>this.cancel(i.id));
+          if (name === 'project_mcp_search') {
+            if (typeof args.query === 'string' && redact(args.query) !== args.query) throw new AppError(403,'查询含有受保护信息。');
+            return this.store.searchProjectMcp(i.id,args,callId,controller.signal,redact);
+          }
+          if (name === 'project_npm_test') return this.store.projectReviews.authorNpmTest(i.id,args,callId,controller.signal,this.runtime.runProjectReviewTest?.bind(this.runtime));
+          if (name === 'project_export_request') return this.store.projectExports.tool(i.id,args,callId,controller.signal);
+          if (name === 'project_review_read') return this.store.projectReviews.read(i.id,args,callId,controller.signal);
+          if (name === 'project_review_list') return this.store.projectReviews.list(i.id,args,callId,controller.signal);
+          if (name === 'project_review_test') return this.store.projectReviews.verifyTests(i.id,args,callId,controller.signal,this.runtime.runProjectReviewTest?.bind(this.runtime));
+          if (name === 'project_work_propose') return this.store.projects.propose(i.id, JSON.parse(redact(JSON.stringify(args))), callId);
           if (name.startsWith('cross_')) return this.store.cross.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
           if (name.startsWith('action_')) return this.store.actions.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
           if (name.startsWith('memory_')) return this.store.memory.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
@@ -115,10 +154,15 @@ export class CollaborationEngine {
           if (name.startsWith('task_')) { const result = this.store.tasks.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId); this.kick(); return result; }
           if (name !== 'collaboration_request') throw new AppError(400, 'Unsupported collaboration tool.');
           const content = typeof args.content === 'string' ? redact(args.content) : '';
-          const admitted = this.store.requestCollaboration(i.id, callId, { targets: args.targets as string[], content }, this.options.maxDepth);
+          const admitted = this.store.requestCollaboration(i.id, callId, { targets: args.targets as string[], content, ...(args.projectReview !== undefined ? {projectReview:args.projectReview} : {}) }, this.options.maxDepth);
           this.kick(); return admitted;
         },
       });
+      await changes?.settle();
+      if (contract.projectReview && !controller.signal.aborted) {
+        const check = await this.store.projectReviews.check(i.conversationId,i.id,controller.signal);
+        if (this.store.invocation(i.id).status === 'running') onEvent({kind:'tool',detail:{origin:'project_review',state:'checked',...check}});
+      }
       await this.appending.get(i.id);
       if (result.nativeSessionId) onEvent({ kind: 'session', detail: { nativeSessionId: result.nativeSessionId, nativeTurnId: result.nativeTurnId, continuity: result.continuity } });
       this.store.finish(i.id, this.stopping ? 'interrupted' : 'succeeded', this.stopping ? '服务停止，执行结果等待核查。' : redact(result.text), undefined, this.options.maxDepth);
@@ -131,8 +175,9 @@ export class CollaborationEngine {
           this.store.recordEvidence(current.id, { kind: 'not_accepted', detail: { reason: '平台输入准备失败，尚未调用承载。' } });
           this.store.recordEvidence(current.id, { kind: 'transport_settled', detail: { confirmed: true, scope: 'platform_preflight', reason: 'No runtime invocation started.' } });
         }
-        const status = this.stopping ? 'interrupted' : current.status === 'cancel_requested' ? 'cancelled' : 'failed';
-        this.store.finish(current.id, status, redact(error instanceof Error ? error.message : '运行时执行失败。').slice(0, 3000), undefined, this.options.maxDepth);
+        const unknown = error instanceof RuntimeOutcomeUnknown;
+        const status = this.stopping ? 'interrupted' : current.status === 'cancel_requested' ? 'cancelled' : unknown ? 'interrupted' : 'failed';
+        this.store.finish(current.id, status, redact(error instanceof Error ? error.message : '运行时执行失败。').slice(0, 3000), undefined, this.options.maxDepth, unknown && !this.stopping ? 'runtime_unknown' : undefined);
       } catch { /* Preserve exact invocation when storage/lease ownership is unavailable. */ }
     }
   }
@@ -177,6 +222,7 @@ export class CollaborationEngine {
   async stop(): Promise<void> {
     if (this.stopping) return;
     this.stopping = true; if (this.timer) clearInterval(this.timer);
+    await this.pulls.stop();
     for (const item of this.executions.values()) item.controller.abort(new Error('Service stopping.'));
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([Promise.allSettled([...this.executions.values()].map(e => e.done)), new Promise<void>(resolve => { timer = setTimeout(resolve, 5000); })]);

@@ -1,7 +1,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AccountObservation, CollaborationAccount, RuntimeModel } from '../../shared/collaboration.js';
+import { verifiedProjectCodexHome } from './official-codex-history.js';
 import { cliEnv, JsonProcess, type Json } from './runtime-common.js';
 import { initializeCodex, isolatedCodexArgs } from './runtime-codex.js';
 const exec = promisify(execFile);
@@ -51,22 +54,58 @@ async function claudeCatalog(command: string): Promise<RuntimeModel[]> {
     const response = await initialized; return modelsFrom(response.models, 'claude');
   } finally { clearTimeout(timer); await proc.stop(); }
 }
+export function resolveCodexExecutable(configured=process.env.COLLAB_CODEX_PATH): string | undefined {
+  const name=configured || 'codex';
+  const candidates=name.includes(sep) ? [resolve(name)] : (process.env.PATH ?? '').split(delimiter).filter(isAbsolute).map(dir=>join(dir,name));
+  if (!configured && process.platform==='darwin') {
+    candidates.push('/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex');
+  }
+  for (const candidate of candidates) {
+    try {
+      const path=realpathSync(candidate);
+      if (!/[\x00-\x1f\x7f]/.test(path) && statSync(path).isFile()) {
+        accessSync(path,constants.X_OK);
+        return path;
+      }
+    } catch { /* Continue checking the service's executable search path. */ }
+  }
+}
+
+export function projectLoginGuidance(configured?:string): {loginCommand?:string;loginIssue?:string} {
+  const binary=resolveCodexExecutable(configured);
+  if (!binary) return {loginIssue:'未检测到可执行的 Codex CLI。请安装 Codex，或在服务环境设置 COLLAB_CODEX_PATH 后重启。'};
+  const quote=(value:string)=>"'"+value.replaceAll("'", "'\\''")+"'";
+  try {
+    const home=verifiedProjectCodexHome();
+    if (/[\x00-\x1f\x7f]/.test(home)) throw new Error();
+    return {loginCommand:'CODEX_HOME='+quote(home)+' '+quote(binary)+' login'};
+  } catch { return {loginIssue:'请先核对服务配置的项目专用登录目录及私有权限。'}; }
+}
+
 /** Read-only discovery. It never starts a model turn, logs raw provider bodies, or returns login credentials. */
 export async function discoverAccount(account: CollaborationAccount, commands: { codex: string; claude: string }): Promise<AccountObservation> {
   const native = account.provider === 'codex' || account.provider === 'claude';
   const command = account.provider === 'codex' ? commands.codex : commands.claude;
   const result: AccountObservation = { accountId: account.id, accountRevision: account.revision ?? 1, checkedAt: new Date().toISOString(), installed: !native, configured: account.auth === 'cli' || !!(account.apiKeyEnv && process.env[account.apiKeyEnv]?.trim()), connection: 'unknown', identity: { state: 'unknown' }, models: [], catalogSource: 'unavailable', quota: { state: 'unknown' } };
   try {
-    if (native) { try { result.version = bounded((await exec(command, ['--version'], { env: cliEnv(), timeout: 6000, maxBuffer: 64000 })).stdout.trim()); result.installed = true; } catch { result.reason = '本机未检测到运行时。'; } }
+    const env=cliEnv();
+    if (account.codexHome==='project') {
+      try { env.CODEX_HOME=verifiedProjectCodexHome(); }
+      catch { result.reason='项目专用登录目录未就绪，请核对服务的专用目录及权限。'; return result; }
+    }
+    if (native) { try { result.version = bounded((await exec(command, ['--version'], { env, timeout: 6000, maxBuffer: 64000 })).stdout.trim()); result.installed = true; } catch { result.reason = '本机未检测到运行时。'; } }
     if (account.auth === 'api') await apiModels(account, result);
     else if (!result.installed) result.identity = { state: 'unknown' };
     else if (account.provider === 'codex') {
-      const proc = new JsonProcess(command, await isolatedCodexArgs(command, tmpdir()), { env: cliEnv(), cwd: tmpdir() });
+      const proc = new JsonProcess(command, await isolatedCodexArgs(command, tmpdir(), env), { env, cwd: tmpdir() });
       const timer = setTimeout(() => proc.kill('SIGKILL'), 15000); timer.unref();
       try {
         await initializeCodex(proc); result.connection = 'reachable';
         const { account: identity } = await proc.call('account/read', { refreshToken: false });
         result.identity = identity?.type === 'chatgpt' ? { state: 'authenticated', label: bounded(identity.email) ?? 'ChatGPT（CLI 未提供身份名称）' } : { state: 'not_authenticated' };
+        if (account.codexHome === 'project' && result.identity.state !== 'authenticated') {
+          result.reason='项目专用账户尚未完成官方登录。'; return result;
+        }
         let cursor: string | undefined;
         for (let page = 0; page < 10; page++) {
           const list = await proc.call('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) });

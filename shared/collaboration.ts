@@ -1,9 +1,19 @@
 /** Independently implemented continuous-collaboration protocol, round 1. */
-export type Carrier = 'codex-app-server' | 'claude-cli' | 'openai-api' | 'anthropic-api';
+export const carrierNames = {
+  'codex-app-server': 'Codex CLI', 'claude-cli': 'Claude Code CLI', 'hermes-agent': 'Hermes Agent',
+  'openai-api': 'OpenAI 兼容 API', 'anthropic-api': 'Anthropic API',
+} as const;
+export type Carrier = keyof typeof carrierNames;
+export function supportsAccount(carrier: Carrier, account: Pick<CollaborationAccount, 'provider' | 'auth'>) {
+  if (carrier === 'hermes-agent') return account.auth === 'api' && ['openai', 'codex'].includes(account.provider);
+  const provider = { 'codex-app-server': 'codex', 'claude-cli': 'claude', 'openai-api': 'openai', 'anthropic-api': 'anthropic' }[carrier];
+  return !!provider && account.provider === provider;
+}
 export type ExecutionMode = 'serial' | 'parallel';
 export type InvocationStatus = 'prepared' | 'running' | 'succeeded' | 'failed' | 'interrupted' | 'cancel_requested' | 'cancelled';
 export interface CollaborationAccount {
   id: string; name: string; provider: 'codex' | 'claude' | 'openai' | 'anthropic';
+  codexHome?: 'project';
   auth: 'cli' | 'api'; apiKeyEnv?: string; baseUrl?: string; revision?: number; deletedAt?: string;
 }
 export interface Member {
@@ -15,6 +25,7 @@ export interface Conversation {
   id: string; title: string; memberIds: string[]; defaultMemberId: string;
   createdAt: string; updatedAt: string; revision?: number;
   preferredMemberIds?: string[]; routingMode?: 'normal' | 'concierge';
+  importedFor?: string;
   pinned?: boolean; archivedAt?: string; workspaceGrant?: WorkspaceGrant;
   deletedAt?: string; favorite?: boolean; branch?: { conversationId: string; messageId: string; cutoff: number };
   memberGroups?: { name: string; memberIds: string[] }[];
@@ -24,9 +35,39 @@ export interface ConversationMessage {
   memberId?: string; sourceId?: string; responseId?: string; content: string; createdAt: string; sequence?: number;
   attachmentIds?: string[]; replyTo?: string;
   visibility?: MessageVisibility; revision?: number; deletedAt?: string; excerptRefs?: MessageExcerpt[];
+  importedOrigin?: ImportedOrigin;
   branchOrigin?: { conversationId: string; messageId: string }; excerptConversationId?: string;
 }
+export interface ProjectTestEvidence {
+  evidenceId: string; argv: string[]; snapshotSha256: string; exitCode: number;
+}
+export interface ProjectRepair {
+  authorInvocationId: string; reviewInvocationId: string; failedTest: ProjectTestEvidence;
+  /** Checks observed on the same initial snapshot. Older repairs track failedTest alone. */
+  checks?: ProjectTestEvidence[];
+}
+export interface ProjectReviewScope {
+  revisionAuthorInvocationId?: string;
+  retestOfRepairInvocationId?: string;
+  failedTest?: ProjectTestEvidence;
+  authorTest?: ProjectTestEvidence;
+  mode?: 'project';
+  npmTest?: true;
+  projectNpmChecks?: true;
+  paths: string[]; grantRevision: number; originalSourceId: string; rereadOf?: string; initialReviewSourceId?: string;
+}
+export interface ProjectReviewCheck {
+  checkedAt: string;
+  files: { path: string; status: 'unchanged' | 'changed' | 'unavailable' | 'unread'; sha256?: string; currentSha256?: string }[];
+}
 export interface SourceWork {
+  projectRepair?: ProjectRepair;
+  projectCiRepair?: { interactionId: string; commit: string };
+  allowCiRepair?: true;
+  allowReviewRevision?: true;
+  projectReview?: ProjectReviewScope;
+  projectWork?: true; projectGrantRevision?: number; projectConsultation?: true;
+  projectFollowupOf?: ProjectFollowupOrigin;
   id: string; conversationId: string; kind: 'user' | 'a2a' | 'a2a_failure' | 'mention' | 'task' | 'task_handoff' | 'artifact_review' | 'job_result' | 'multi_mention' | 'cross_message' | 'action';
   content: string; requestedTargets: string[]; bindingState: 'bound' | 'unresolved';
   parentInvocationId?: string; authorMemberId?: string; revision: number; sequence: number;
@@ -58,8 +99,22 @@ export interface MemoryVersion { id: string; entryId: string; conversationId: st
 export interface MemorySnapshot { entryId: string; versionId: string; revision: number; key: string; content: string; digest: string }
 export interface SearchHit { kind: 'threads' | 'docs' | 'memory' | 'sessions'; conversationId: string; id: string; title: string; excerpt: string }
 export interface SearchResult { mode: 'lexical'; hits: SearchHit[]; truncated: boolean; scanned: number; degraded: false; scope: string }
-export interface WorkspaceGrant { path: string; device: number; inode: number; authorizedAt: string; revision: number; mode: 'read-only' }
-export interface ConversationAttachment { id: string; conversationId: string; name: string; mediaType: 'text/plain'; bytes: number; digest: string; createdAt: string }
+export interface McpReaderGrant { id:string; label:string; origin:string; tool:string; revision:string }
+export interface WorkspaceGrant { mcpReader?: McpReaderGrant; path: string; device: number; inode: number; authorizedAt: string; revision: number; mode: 'read-only' | 'project-work';
+  reviewMode?: 'project'; nativeFileApprovals?: true;
+  conversationId?: string; memberIds?: string[]; memberBindings?: Record<string, string>;
+}
+export interface ProjectFollowupOrigin { invocationId: string; sourceId: string; responseId: string; memberId: string }
+export interface ProjectIntent {
+  origin?: ProjectFollowupOrigin;
+  state?: 'pending' | 'cancelled';
+  id: string; conversationId: string; content: string; memberIds: string[]; revision: number; createdAt: string;
+}
+export interface ProjectCapability { memberId: string; available: boolean; reason?: string }
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp';
+export interface ImageInputReference { attachmentId: string; mediaType: ImageMediaType; digest: string }
+export interface RuntimeImageInput extends ImageInputReference { base64: string }
+export interface ConversationAttachment { id: string; conversationId: string; name: string; mediaType: 'text/plain' | ImageMediaType; bytes: number; digest: string; createdAt: string }
 export interface RuntimeModel { id: string; name: string; efforts: string[]; isDefault?: boolean }
 export interface AccountObservation {
   accountId: string; accountRevision: number; checkedAt: string; installed: boolean; version?: string;
@@ -73,6 +128,7 @@ export interface RuntimeDefault { carrier: Carrier; accountId: string; model?: s
 export interface ConfigurationPreview {
   id: string; kind: 'default' | 'workspace'; configurationRevision: number; expiresAt: string;
   value: RuntimeDefault | WorkspaceGrant; conversationId?: string; conversationRevision?: number;
+  projectCapabilities?: ProjectCapability[]; intentId?: string; intentRevision?: number;
   affectedMemberIds: string[]; unaffectedMemberIds: string[]; appliedAt?: string;
 }
 export interface Delivery {
@@ -111,7 +167,16 @@ export interface AcceptanceEvidence {
 export interface CollaborationEvent {
   id: number; conversationId: string; type: string; data: Record<string, unknown>; createdAt: string;
 }
+export interface ProjectFileExport {
+  id: string; conversationId: string; invocationId: string; memberId: string;
+  path: string; fileName: string; bytes: number; sha256: string; revision: number;
+  payloadDigest: string; createdAt: string; expiresAt: string; targetPath?: string;
+  state: 'pending' | 'ready' | 'writing' | 'written' | 'declined' | 'expired' | 'cancelled' | 'failed' | 'unknown';
+  reason?: string;
+}
 export interface ConversationDetail {
+  projectExports?: ProjectFileExport[];
+  projectIntents?: ProjectIntent[];
   conversation: Conversation; messages: ConversationMessage[]; sources: SourceWork[]; deliveries: Delivery[];
   batches: DispatchBatch[]; invocations: CollaborationInvocation[]; responses: CollaborationResponse[];
   consumptions: Consumption[]; evidence: AcceptanceEvidence[]; events: CollaborationEvent[];
@@ -188,16 +253,34 @@ export interface ArtifactReview {
   submission?: { responseId: string; inputRevision: number; cancelRevision: number };
 }
 export interface InteractionQuestion { id: string; question: string; options?: string[] }
+export interface NativeFileChange { path: string; action: 'create' | 'patch' | 'write'; preview: string }
+export interface NativeCommandApproval { command: string; cwd: string }
+export interface ProjectPullTarget {
+  base: string; localBranch: string; expectedHead: string | null; repair: boolean; number?: number;
+}
+export interface ProjectCiCheck {
+  name: string; state: 'pending' | 'passed' | 'failed' | 'skipped'; url?: string; summary?: string;
+}
+export interface ProjectPullStatus {
+  state: 'waiting' | 'pending' | 'passed' | 'failed' | 'unavailable' | 'superseded' | 'closed' | 'stopped';
+  commit: string; observedHead?: string; number?: number; url?: string; checks?: ProjectCiCheck[]; reason?: string;
+}
+export interface GitDeliveryPreview {pull?:ProjectPullTarget; remote:string; branch:string; local:string; parent:string; commit:string; message:string; files:string[]; diff:string}
 export interface NativeInteractionRequest {
+  gitDelivery?: GitDeliveryPreview;
+  nativeCommand?: NativeCommandApproval;
+  fileChange?: NativeFileChange;
   providerRequestId: string; kind: 'question' | 'approval' | 'elicitation'; operation: string;
   nativeSessionId?: string; nativeTurnId?: string; nativeItemId?: string;
   questions?: InteractionQuestion[]; payload: Record<string, unknown>;
 }
 export interface RuntimeInteraction extends NativeInteractionRequest {
+  pullStatus?: ProjectPullStatus; repairSourceId?: string;
+  cancelledByUser?: true;
   id: string; conversationId: string; invocationId: string; memberId: string; sourceId: string;
   sourceRevision: number; inputRevision: number; cancelRevision: number; payloadDigest: string; revision: number;
   state: 'pending' | 'answered' | 'declined' | 'expired' | 'cancelled' | 'unsupported';
-  transport: 'platform' | 'codex'; createdAt: string; expiresAt: string; answers?: Record<string, string>;
+  transport: 'platform' | 'codex' | 'claude' | 'project-npm' | 'project-check' | 'project-git'; createdAt: string; expiresAt: string; answers?: Record<string, string>;
   delivery: 'not_sent' | 'returned_to_adapter' | 'unknown'; reason?: string;
 }
 export type OrdinaryTaskStatus = 'todo' | 'doing' | 'blocked' | 'done';
@@ -234,11 +317,17 @@ export interface ResponsibilityItem {
 }
 /** A native binding belongs to one conversation/member, never to an account alone. */
 export interface NativeSessionIdentity {
+  projectAccountFingerprint?: string;
+  historyOwner?: { account: string; user: string };
   supported: boolean; version?: string; fingerprint?: string; reason: string;
 }
 export interface NativeSessionPlan {
   bindingId?: string; mode: 'fresh' | 'resume' | 'replace' | 'unsupported'; reason: string;
   nativeSessionId?: string; previousAnchor?: string; identity?: NativeSessionIdentity;
+  /** Native history from a turn containing images must never be resumed. */
+  imageTurnOnly?: true;
+  /** VM checkpoints are immutable and scoped to the exact previous successful invocation. */
+  fingerprint?: string; previousInvocationId?: string;
 }
 export interface NativeSessionBinding {
   id: string; conversationId: string; memberId: string; sequence: number; previousBindingId?: string;
@@ -277,6 +366,9 @@ export interface ExecutionContractSnapshot {
   reviewSnapshot?: ArtifactReview;
   primarySourceId?: string;
   workspaceGrant?: WorkspaceGrant;
+  projectWork?: true; projectContinuity?: true; mayProposeProject?: true;
+  webResearch?: true; gitDelivery?: true;
+  projectReview?: ProjectReviewScope; mayRequestProjectReview?: true; mayExportProjectFile?: true; mayRunProjectNpmTest?: true; projectNpmChecks?: true;
   visibility?: MessageVisibility; visibilityEpoch?: number; materialDigest?: string; memorySnapshot?: MemorySnapshot[];
 }
 export interface InputManifestItem {
@@ -286,7 +378,7 @@ export interface InputManifestItem {
 }
 export interface InputManifest {
   id: string; invocationId: string; responseId: string; inputRevision: number; sourceRevision: number; contractId: string;
-  historyCutoff: number; items: InputManifestItem[];
+  historyCutoff: number; items: InputManifestItem[]; images?: ImageInputReference[];
   budget: { maxEstimatedTokens: number; usedEstimatedTokens: number; method: string };
   payloadRef: string; renderVersion: string; renderDigest: string; digestStage: 'platform_prompt';
   assemblyState: 'prepared'; createdAt: string; caller?: { memberId: string; invocationId: string };
@@ -318,11 +410,14 @@ export interface HoldRecheck {
 }
 export interface RuntimeCapability {
   carrier: Carrier; installed: boolean; version?: string; available: boolean; reason?: string;
+  loginRequired?: boolean;
   append: boolean; authentication: 'cli' | 'api'; verified: 'unverified' | 'protocol_tested' | 'live_tested';
+  nativeProject?: Record<'api' | 'cli', { available: boolean; reason: string }>;
 }
 export interface CollaborationBootstrap {
+  mcpReaders?: McpReaderGrant[];
   version: string; workspace: string; csrfToken: string; members: Member[];
-  accounts: (CollaborationAccount & { configured: boolean })[];
+  accounts: (CollaborationAccount & { configured: boolean; loginCommand?: string; loginIssue?: string })[];
   conversations: Conversation[]; runtimes: RuntimeCapability[]; eventCursor: number;
   defaults?: RuntimeDefault[]; accountObservations?: AccountObservation[]; configurationRevision?: number;
 }
@@ -335,23 +430,78 @@ export interface RuntimeEvent {
   detail: Record<string, unknown>;
 }
 export interface RuntimeRequest {
+  images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;
   onEvent: (event: RuntimeEvent) => void;
   onToolCall: (name: string, args: Record<string, unknown>, callId: string) => Promise<unknown>;
-  onInteraction?: (request: NativeInteractionRequest) => Promise<{ state: RuntimeInteraction['state']; answers?: Record<string, string> }>;
+  onNativePermissionCancelled?: () => void;
+  onInteraction?: (request: NativeInteractionRequest) => Promise<{ state: RuntimeInteraction['state']; cancelledByUser?: true; answers?: Record<string, string> }>;
+  checkNativePermission?: (id:string, thread:string, turn:string, item:string) => boolean;
+  onNativePermissionLost?: (id:string) => void;
   onInteractionResolved?: (providerRequestId: string) => void;
   onAppendReady?: (dispatcher: AppendDispatcher) => void;
   onInputRead?: (observation: AppendObservation) => void;
-  workspaceGrant?: WorkspaceGrant; visibility?: MessageVisibility;
+  workspaceGrant?: WorkspaceGrant; visibility?: MessageVisibility; projectWork?: true; projectContinuity?: true; mayProposeProject?: true;
+  webResearch?: true; gitDelivery?: true;
+  projectReview?: ProjectReviewScope; mayRequestProjectReview?: true; mayExportProjectFile?: true; mayRunProjectNpmTest?: true; projectNpmChecks?: true;
 }
 export interface RuntimeResult {
   text: string; nativeSessionId?: string; nativeTurnId?: string; continuity: 'fresh' | 'resumed' | 'unknown';
 }
+export interface ProjectDomainObservation {
+  state: 'running' | 'exited' | 'unknown';
+  reason: string;
+}
+export interface ProjectNpmTestHooks {
+  authorizeDownload(info: {lockSha256: string; packages: string[]}): Promise<void>;
+  onPhase(phase: 'waiting_for_project' | 'preparing' | 'testing'): void;
+}
+export interface ProjectReviewTestRequest {
+  projectNpmChecks?: true;
+  npm?: ProjectNpmTestHooks;
+  authorInvocationId?: string;
+  grant: WorkspaceGrant;
+  argv: string[];
+  signal: AbortSignal;
+  verifyAuthorization(): void;
+}
+export interface ProjectReviewTestResult {
+  argv: string[];
+  exitCode: number;
+  output: string;
+  truncated: boolean;
+  snapshotSha256: string;
+  treeExited: true;
+}
 export interface CollaborationRuntime {
+  projectLoginGuidance?(): {loginCommand?:string;loginIssue?:string};
+  runProjectReviewTest?(request: ProjectReviewTestRequest): Promise<ProjectReviewTestResult>;
+  inspectProjectDomain?(invocationId: string, evidence: AcceptanceEvidence[]): Promise<ProjectDomainObservation>;
   invoke(request: RuntimeRequest): Promise<RuntimeResult>;
   probe(): Promise<RuntimeCapability[]>;
+  projectWorkAvailability?(member: Member, account: CollaborationAccount, grant?: WorkspaceGrant): { available: boolean; reason: string };
   discoverAccount?(account: CollaborationAccount): Promise<AccountObservation>;
   inspect?(request: RuntimeInspectionRequest): Promise<RuntimeInspection>;
-  sessionIdentity?(request: Pick<RuntimeRequest, 'member' | 'account' | 'cwd'>): Promise<NativeSessionIdentity>;
+  historyIdentity?(request: Pick<RuntimeRequest,'member'|'account'|'cwd'>): Promise<NativeSessionIdentity>;
+  sessionIdentity?(request: Pick<RuntimeRequest, 'member' | 'account' | 'cwd' | 'projectWork' | 'projectContinuity' | 'workspaceGrant'>): Promise<NativeSessionIdentity>;
+}
+
+export interface ImportedOrigin {
+  carrier: 'codex-app-server' | 'claude-cli'; accountId: string; identity: string;
+  project: string; projectIdentity: string; sessionId: string; anchor: string; digest: string; timestamp: string;
+}
+export interface HistoryProject { id: string; path: string }
+export interface HistoryChoice { id: string; title: string; time: string; count: number }
+export interface HistoryLine { role: 'user' | 'assistant'; text: string; anchor: string; time: string }
+export interface HistoryPreview { token: string; lines: HistoryLine[]; project: string; account: string; member: string; title: string }
+
+export interface ProjectInspectionSnapshot {
+  invocationId: string; checkedAt: string;
+  acceptance: CollaborationInvocation['acceptance']; teardown: CollaborationInvocation['teardown'];
+  terminal: 'succeeded' | 'failed' | 'unknown';
+  domain: {state:'running'|'exited'|'unknown'; reason:string};
+  operations: {callId:string; name:string; state:'started'|'completed'|'failed'|'unknown'; paths:string[]; observedAt:string; exitCode?:number}[];
+  files: {path:string; origin:'receipt'|'selected'; status:'present'|'unavailable'; sha256?:string; bytes?:number}[];
+  truncated:boolean; canPickFile:boolean;
 }

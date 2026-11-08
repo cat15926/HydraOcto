@@ -1,6 +1,6 @@
 {
   "name": "multi-agent-collab",
-  "version": "0.10.0",
+  "version": "0.25.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,22 +9,25 @@
   "scripts": {
     "dev": "tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build:server": "tsc -p tsconfig.server.json",
+    "build:server": "tsc -p tsconfig.server.json && node scripts/copy-runtime-assets.mjs",
     "build": "npm run build:server && vite build",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "start": "node --env-file-if-exists=.env dist/server/index.js",
     "test": "npm run build:server && tsx --test --test-concurrency=4 tests/*.test.ts",
     "docs:check": "node scripts/check-docs.mjs",
-    "docs:check:archive": "node scripts/check-docs.mjs --archive"
+    "docs:check:archive": "node scripts/check-docs.mjs --archive",
+    "history:terminal": "node --env-file-if-exists=.env --import tsx scripts/history-terminal.ts"
   },
   "dependencies": {
     "react": "19.2.0",
-    "react-dom": "19.2.0"
+    "react-dom": "19.2.0",
+    "ws": "8.21.0"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "5.1.0",
     "tsx": "4.20.6",
     "typescript": "5.9.3",

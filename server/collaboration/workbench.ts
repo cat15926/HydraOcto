@@ -1,21 +1,40 @@
+import { carrierNames, supportsAccount } from '../../shared/collaboration.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import type { AccountObservation, Carrier, CollaborationAccount, ConfigurationPreview, Conversation, ConversationAttachment, ConversationMessage, Member, RuntimeDefault, SendMessage, WorkspaceGrant } from '../../shared/collaboration.js';
+import type { AccountObservation, Carrier, CollaborationAccount, ConfigurationPreview, Conversation, ConversationAttachment, ConversationMessage, Member, RuntimeDefault, SendMessage, ProjectCapability, WorkspaceGrant } from '../../shared/collaboration.js';
+import { decodeUpload } from './attachment-data.js';
+import { projectCodexHome } from './official-codex-history.js';
 import { AppError, now } from '../store.js';
 import type { CollaborationStore } from './store.js';
 
-const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+const digest = (text: string | Buffer) => createHash('sha256').update(text).digest('hex');
 const conflict = (text: string): never => { throw new AppError(409, text, 'workbench_conflict'); };
 const text = (v: unknown, label: string, max = 200): string => { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new AppError(400, `${label}无效。`); return v.trim(); };
-export const carrierProvider = { 'codex-app-server': 'codex', 'claude-cli': 'claude', 'openai-api': 'openai', 'anthropic-api': 'anthropic' } as const;
 export function verifyWorkspace(grant: WorkspaceGrant): void {
+  protectProjectLogin(grant.path,grant.mode);
   try { const path = realpathSync(grant.path), s = statSync(path); if (path !== grant.path || !s.isDirectory() || s.dev !== grant.device || s.ino !== grant.inode) throw new Error(); }
   catch { throw new AppError(409, '工作区目录身份已改变，请重新预览并授权。', 'workspace_changed'); }
 }
 function overlap(a: string, b: string) { const rel = relative(a, b); return !rel || rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); }
+/** Native project commands must not edit the service or read its configuration, even with an external database. */
+export function projectPrivateRoots(): string[] {
+  const moduleRoot = resolve(import.meta.dirname, '../..');
+  const sourceRoot = existsSync(resolve(moduleRoot,'package.json')) ? moduleRoot : dirname(moduleRoot);
+  return [sourceRoot, projectCodexHome(), resolve('.env'), ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR, process.env.COLLAB_PROJECT_VM_CONFIG]
+    .filter((path): path is string => !!path).map(path => resolve(path)), ...['.codex','.claude','.ssh','.aws'].map(name => resolve(homedir(),name))];
+}
 function canonicalPath(path: string): string { try { return realpathSync(path); } catch { const parent = dirname(path); return parent === path ? path : resolve(canonicalPath(parent), path.slice(parent.length + (parent.endsWith(sep) ? 0 : 1))); } }
+
+// This check also applies to grants created before the dedicated login home was configured.
+export function protectProjectLogin(path:string, mode:WorkspaceGrant['mode']) {
+  const home=canonicalPath(projectCodexHome()), root=canonicalPath(path);
+  const includesVisibleHome=overlap(root,home) && !relative(root,home).split(sep).some(name=>name.startsWith('.'));
+  if (overlap(home,root) || includesVisibleHome || (mode==='project-work' && overlap(root,home))) {
+    throw new AppError(403,'工作区包含项目专用登录的私有数据，请选择独立的项目文件夹。');
+  }
+}
 
 /** Human workbench commands share the collaboration transaction and never change historical snapshots. */
 export class WorkbenchService {
@@ -36,8 +55,9 @@ export class WorkbenchService {
     const account = this.account(accountId!);
     const model = member.modelBinding === 'follow' ? d?.model : member.model;
     const effort = member.modelBinding === 'follow' ? d?.effort : member.effort;
-    if (account.provider !== carrierProvider[member.carrier]) throw new AppError(400, '成员运行时与账户不匹配。');
+    if (!supportsAccount(member.carrier, account)) throw new AppError(400, '成员运行时与账户不匹配。');
     if (account.auth === 'api' && !model) throw new AppError(400, 'API 账户需要明确模型。');
+    if (member.carrier === 'hermes-agent' && effort) throw new AppError(400, 'Hermes 使用模型默认推理强度。');
     return { ...member, accountId: account.id, model, effort };
   }
   conversation(id: string) { return this.data.get<Conversation>('cc_conversations', id); }
@@ -56,27 +76,51 @@ export class WorkbenchService {
   attachments(cid: string): ConversationAttachment[] { return this.data.rows('cc_attachments', cid); }
   upload(cid: string, input: Record<string, unknown>) {
     return this.port.tx(() => this.port.command(`upload:${cid}:${text(input.requestId, '请求标识')}`, input, () => {
-      if (this.conversation(cid).archivedAt) conflict('请先恢复归档会话。');
+      if (this.store.visibility.assertConversation(cid).archivedAt) conflict('请先恢复归档会话。');
       const name = text(input.name, '文件名', 160);
       if (/[\\/\x00-\x1f]/.test(name) || name === '.' || name === '..' || name.startsWith('.')) throw new AppError(400, '文件名不允许路径或隐藏文件。');
-      if (typeof input.base64 !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.base64)) throw new AppError(400, '附件编码无效。');
-      if (!['text/plain', 'text/markdown', 'text/csv', 'text/javascript', 'text/typescript', 'text/html', 'text/css', 'application/json', 'application/xml', 'text/xml', ''].includes(String(input.mediaType ?? ''))) throw new AppError(415, '当前仅支持 UTF-8 文本和代码附件，暂不支持图片/PDF。');
-      const bytes = Buffer.from(input.base64, 'base64'); if (!bytes.length || bytes.length > 32768) throw new AppError(413, '每个附件需要 1–32 KiB。');
-      let content: string; try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new AppError(415, '附件需要有效 UTF-8 编码。'); }
-      if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(content) || /^%PDF-|^\x89PNG/.test(content)) throw new AppError(415, '附件包含二进制内容。');
-      // A UTF-8 BOM is accepted but kept in the digest and actual payload.
-      content = bytes.toString('utf8');
-      const a: ConversationAttachment = { id: randomUUID(), conversationId: cid, name, mediaType: 'text/plain', bytes: bytes.length, digest: digest(content), createdAt: now() };
+      const { bytes, stored, mediaType } = decodeUpload(input.mediaType, input.base64);
+      const a: ConversationAttachment = { id: randomUUID(), conversationId: cid, name, mediaType, bytes: bytes.length, digest: digest(bytes), createdAt: now() };
       this.store.db.prepare('INSERT INTO cc_attachments VALUES(?,?,?)').run(a.id, cid, JSON.stringify(a));
-      this.store.db.prepare('INSERT INTO cc_attachment_contents VALUES(?,?)').run(a.id, content);
+      this.store.db.prepare('INSERT INTO cc_attachment_contents VALUES(?,?)').run(a.id, stored);
       this.port.event(cid, 'attachment.uploaded', { attachmentId: a.id, name, bytes: a.bytes, digest: a.digest, source: 'user_upload' }); return a;
     }));
   }
   attachmentContent(id: string) {
     const attachment = this.data.get<ConversationAttachment>('cc_attachments', id);
+    if (attachment.mediaType !== 'text/plain') throw new AppError(415, '请通过消息中的图片预览查看此附件。');
     const row = this.store.db.prepare('SELECT content FROM cc_attachment_contents WHERE attachment_id=?').get(id) as { content: string } | undefined;
     if (!row || digest(row.content) !== attachment.digest) conflict('附件正文缺失或摘要不一致。');
     return { attachment, content: row!.content };
+  }
+  attachment(id: string) { return this.data.get<ConversationAttachment>('cc_attachments', id); }
+  imageReferences(cid: string, ids: string[] = []) {
+    return ids.flatMap(id => {
+      const a = this.attachment(id);
+      if (a.conversationId !== cid) throw new AppError(400, '附件必须属于当前会话。');
+      return a.mediaType === 'text/plain' ? [] : [{ attachmentId: a.id, mediaType: a.mediaType, digest: a.digest }];
+    });
+  }
+  imageBytes(a: ConversationAttachment): Buffer {
+    if (a.mediaType === 'text/plain') throw new AppError(415, '此附件为文本。');
+    const row = this.store.db.prepare('SELECT content FROM cc_attachment_contents WHERE attachment_id=?').get(a.id);
+    const bytes = typeof row?.content === 'string' ? Buffer.from(row.content, 'base64') : Buffer.alloc(0);
+    if (!bytes.length || bytes.length !== a.bytes || digest(bytes) !== a.digest) throw new AppError(409, '图片正文缺失或摘要不一致。');
+    return bytes;
+  }
+  sentImage(cid: string, id: string, memberId?: string) {
+    const messages = this.store.visibility.readable(cid, memberId);
+    if (!messages.some(message => message.attachmentIds?.includes(id))) throw new AppError(404, '图片不可访问。');
+    const attachment = this.attachment(id);
+    if (attachment.conversationId !== cid) throw new AppError(404, '图片不属于此会话。');
+    return { attachment, bytes: this.imageBytes(attachment) };
+  }
+  copyImageToBranch(id: string, cid: string) {
+    const a = this.attachment(id);
+    const copy = { ...a, conversationId: cid, id: randomUUID() };
+    this.store.db.prepare('INSERT INTO cc_attachments VALUES(?,?,?)').run(copy.id, cid, JSON.stringify(copy));
+    this.store.db.prepare('INSERT INTO cc_attachment_contents VALUES(?,?)').run(copy.id, this.imageBytes(a).toString('base64'));
+    return copy.id;
   }
   compose(cid: string, input: SendMessage): string {
     if (this.conversation(cid).archivedAt) conflict('请先恢复归档会话再发送。');
@@ -90,7 +134,12 @@ export class WorkbenchService {
       parts.push(`\n<reply-context messageId=${JSON.stringify(m.id)} author=${JSON.stringify(m.memberId ?? m.author)}>\n${m.content.slice(0, 8000)}${m.content.length > 8000 ? '\n[引用超过 8,000 字符，余文未包含]' : ''}\n</reply-context>`);
     }
     for (const id of ids) {
-      const { attachment: a, content } = this.attachmentContent(id); if (a.conversationId !== cid) throw new AppError(400, '附件必须属于当前会话。');
+      const a = this.attachment(id); if (a.conversationId !== cid) throw new AppError(400, '附件必须属于当前会话。');
+      if (a.mediaType !== 'text/plain') {
+        parts.push(`[图片附件 ${JSON.stringify(a.name)} · ${a.mediaType} · SHA-256 ${a.digest}]`);
+        continue;
+      }
+      const { content } = this.attachmentContent(id);
       bytes += a.bytes;
       parts.push(`\n<user-attachment id=${JSON.stringify(a.id)} name=${JSON.stringify(a.name)} sha256=${JSON.stringify(a.digest)}>\n${content}\n</user-attachment>`);
     }
@@ -101,26 +150,110 @@ export class WorkbenchService {
   private idle(cid: string) {
     if (this.store.invocations(cid).some(i => !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(i.status) || i.teardown !== 'confirmed') || this.store.cooperation.queue(cid).sources.length) conflict('工作区切换需要会话没有待投递来源或未释放执行。');
   }
-  private workspace(path: string, revision: number): WorkspaceGrant {
+  private workspace(path: string, revision: number, mode: WorkspaceGrant['mode'] = 'read-only'): WorkspaceGrant {
     if (!isAbsolute(path)) throw new AppError(400, '工作区需要绝对路径。');
     let actual: string; try { actual = realpathSync(path); if (!statSync(actual).isDirectory()) throw new Error(); } catch { throw new AppError(400, '工作区目录不存在。'); }
+    protectProjectLogin(actual,mode);
     const privateRoots = [this.store.options.artifactDir ?? resolve('.local-data/collaboration-artifacts'), ...((this.store.db.prepare('PRAGMA database_list').all() as { file: string }[]).filter(r => r.file).map(r => dirname(r.file))), resolve(homedir(), '.codex'), resolve(homedir(), '.claude'), resolve(homedir(), '.ssh'), resolve(homedir(), '.aws')].map(canonicalPath);
     // An inherited project may contain .local-data; hidden paths remain unreadable. Its private child cannot be selected.
     if (actual === sep || actual === homedir() || actual.split(sep).some(p => p.startsWith('.')) || privateRoots.some(p => overlap(p, actual) || (overlap(actual, p) && !relative(actual, p).split(sep).some(x => x.startsWith('.'))))) throw new AppError(403, '此目录覆盖私有数据，不能作为授权工作区。');
-    const s = statSync(actual); return { path: actual, device: s.dev, inode: s.ino, authorizedAt: now(), revision, mode: 'read-only' };
+    if (mode === 'project-work') {
+      const protectedRoots = [...privateRoots, ...projectPrivateRoots().map(canonicalPath)];
+      if (overlap(actual, canonicalPath(homedir())) || protectedRoots.some(root => overlap(actual, root) || overlap(root, actual))) {
+        throw new AppError(403, '此目录包含账户或平台私有数据，请选择独立的项目文件夹。');
+      }
+    }
+    const s = statSync(actual); return { path: actual, device: s.dev, inode: s.ino, authorizedAt: now(), revision, mode };
   }
+  checkImportDirectory(path:string) { this.workspace(path,1); }
   checkFolderSelection(cid: string, expectedRevision: number) {
     const c = this.conversation(cid);
     if (c.archivedAt || c.deletedAt) conflict('请先恢复此会话，再选择项目文件夹。');
     if ((c.revision ?? 1) !== expectedRevision) conflict('会话已变化，请重新选择项目文件夹。');
     this.idle(cid);
   }
+  projectMemberBinding(memberId: string): string | undefined {
+    const raw = this.store.members().find(m => m.id === memberId && m.enabled && !m.deletedAt);
+    if (!raw || !['codex-app-server', 'claude-cli'].includes(raw.carrier)) return;
+    try {
+      const m = this.resolveMember(raw), a = this.account(m.accountId);
+      return digest(JSON.stringify([m.id, m.revision, m.carrier, m.model, m.effort, a.id, a.revision, a.auth]));
+    } catch { return undefined; }
+  }
+  projectCapability(memberId: string, grant?: WorkspaceGrant): ProjectCapability {
+    if (!this.projectMemberBinding(memberId)) return { memberId, available: false, reason: '此成员未配置可用的 Codex 或 Claude Code 账户。' };
+    const m = this.resolveMember(this.store.members().find(m => m.id === memberId)!);
+    const account = this.account(m.accountId);
+    if (grant?.nativeFileApprovals && m.carrier === 'claude-cli' && account.auth === 'cli')
+      return {memberId,available:false,reason:'此账户暂不能逐次确认项目操作，可选择使用 API 账户的 Claude Code 或 Codex。'};
+    return { memberId, ...(this.store.options.projectWorkAvailability?.(m, account, grant) ??
+      { available: false, reason: '此运行时与账户组合尚未验证项目执行隔离，目前仅可只读咨询。' }) };
+  }
   previewWorkspace(cid: string, input: Record<string, unknown>) {
     return this.port.tx(() => {
-      const c = this.conversation(cid); this.idle(cid);
-      const grant = this.workspace(text(input.path, '工作区', 2000), (c.workspaceGrant?.revision ?? 0) + 1);
-      return this.savePreview({ kind: 'workspace', value: grant, conversationId: cid, conversationRevision: c.revision ?? 1, affectedMemberIds: c.memberIds, unaffectedMemberIds: [] });
+      const c = this.conversation(cid);
+      this.checkFolderSelection(cid, input.expectedRevision === undefined ? c.revision ?? 1 : Number(input.expectedRevision));
+      const mode = input.mode === undefined ? 'read-only' : input.mode;
+      if (mode !== 'read-only' && mode !== 'project-work') throw new AppError(400, '未知的项目授权范围。');
+      if (input.mcpReaderId !== undefined && (mode !== 'project-work' || typeof input.mcpReaderId !== 'string' || !this.store.options.mcpReaders)) throw new AppError(400,'请在项目工作授权中选择已登记的资料源。');
+      if (input.nativeFileApprovals !== undefined && (input.nativeFileApprovals !== true || mode !== 'project-work')) {
+        throw new AppError(400, '原生文件审批仅用于项目工作。');
+      }
+      if (input.reviewMode !== undefined && (input.reviewMode !== 'project' || mode !== 'project-work')) {
+        throw new AppError(400, '项目评审需要项目工作授权。');
+      }
+      if (mode === 'project-work' && c.importedFor) conflict('请在公开会话发起项目工作，导入的私人会话保留只读。');
+      let path: string;
+      if (input.fromPreviewId !== undefined) {
+        const old = this.data.get<ConfigurationPreview>('cc_configuration_previews', text(input.fromPreviewId, '目录候选'));
+        if (old.kind !== 'workspace' || old.conversationId !== cid || old.conversationRevision !== (c.revision ?? 1) ||
+            old.configurationRevision !== this.store.configurationRevision() || old.appliedAt || Date.parse(old.expiresAt) <= Date.now()) conflict('原目录预览已过期，请重新选择。');
+        const value = old.value as WorkspaceGrant; verifyWorkspace(value); path = value.path;
+      } else if (input.useCurrent === true) {
+        if (!c.workspaceGrant) throw new AppError(409, '此会话尚未绑定项目目录。');
+        verifyWorkspace(c.workspaceGrant); path = c.workspaceGrant.path;
+      } else path = text(input.path, '工作区', 2000);
+      const grant = this.workspace(path, (c.workspaceGrant?.revision ?? 0) + 1, mode);
+      let capabilities: ProjectCapability[] | undefined;
+      if (mode === 'project-work') {
+        grant.conversationId = cid;
+        if (input.mcpReaderId !== undefined) grant.mcpReader = this.store.options.mcpReaders!.lookup(input.mcpReaderId);
+        if (input.nativeFileApprovals === true) grant.nativeFileApprovals = true;
+        if (input.reviewMode === 'project') grant.reviewMode = 'project';
+        grant.memberBindings = {};
+        for (const memberId of c.memberIds) {
+          const binding = this.projectMemberBinding(memberId);
+          if (binding) grant.memberBindings[memberId] = binding;
+        }
+        grant.memberIds = Object.keys(grant.memberBindings);
+        if (!grant.memberIds.length) conflict('请先为会话配置 Codex 或 Claude Code 成员。');
+        capabilities = c.memberIds.map(t => this.projectCapability(t, grant));
+      }
+      const intent = input.intentId === undefined ? undefined : this.store.projects.requirePending(cid, input.intentId);
+      if (intent && mode !== 'project-work') throw new AppError(400, '继续项目委托需要工作授权。');
+      const affectedMemberIds = grant.memberIds ?? c.memberIds;
+      return this.savePreview({ kind: 'workspace', value: grant, conversationId: cid, conversationRevision: c.revision ?? 1,
+        affectedMemberIds, unaffectedMemberIds: c.memberIds.filter(t => !affectedMemberIds.includes(t)), projectCapabilities: capabilities,
+        ...(intent ? { intentId: intent.id, intentRevision: intent.revision } : {}) });
     });
+  }
+  revokeWorkspace(cid: string, expected: number, requestId: string) {
+    return this.port.tx(() => this.port.command('workspace-revoke:' + requestId, { cid, expected }, () => {
+      const c = this.conversation(cid), grant = c.workspaceGrant;
+      if (!grant || grant.mode !== 'project-work' || (c.revision ?? 1) !== expected) throw new AppError(409, '项目授权已变化，请刷新。');
+      c.workspaceGrant = { path: grant.path, device: grant.device, inode: grant.inode, authorizedAt: now(), revision: grant.revision + 1, mode: 'read-only' };
+      c.revision = expected + 1; c.updatedAt = now(); this.put('cc_conversations', c);
+      const stopped = this.store.invocations(cid).filter(i => i.teardown !== 'confirmed' || i.status === 'prepared').filter(i => {
+        const snapshot = this.store.contract(i.id);
+        if (!snapshot.primarySourceId) return false;
+        const source = this.data.get<import('../../shared/collaboration.js').SourceWork>('cc_sources', snapshot.primarySourceId);
+        return (source.projectWork || !!source.projectReview) && snapshot.workspaceGrant?.revision === grant.revision;
+      }).map(i => i.id);
+      for (const id of stopped) this.store.cancel(id);
+      this.configChanged(); this.store.cross.sweep();
+      this.port.event(cid, 'workspace.revoked', { revision: c.workspaceGrant.revision, stopped });
+      return { stopped, grant: c.workspaceGrant };
+    }));
   }
   private savePreview(input: Omit<ConfigurationPreview, 'id' | 'configurationRevision' | 'expiresAt'>): ConfigurationPreview {
     const p: ConfigurationPreview = { ...input, id: randomUUID(), configurationRevision: this.store.configurationRevision(), expiresAt: new Date(Date.now() + 300000).toISOString() };
@@ -135,10 +268,11 @@ export class WorkbenchService {
   }
   previewDefault(input: Record<string, unknown>) {
     return this.port.tx(() => {
-      const carrier = String(input.carrier) as Carrier; if (!(carrier in carrierProvider)) throw new AppError(400, '运行时无效。');
+      const carrier = String(input.carrier) as Carrier; if (!Object.hasOwn(carrierNames, carrier)) throw new AppError(400, '运行时无效。');
       const account = this.account(text(input.accountId, '账户'));
-      if (account.provider !== carrierProvider[carrier]) throw new AppError(400, '默认账户与运行时不匹配。');
+      if (!supportsAccount(carrier, account)) throw new AppError(400, '默认账户与运行时不匹配。');
       const model = input.model ? text(input.model, '模型') : undefined, effort = input.effort ? text(input.effort, '推理强度', 30) : undefined;
+      if (carrier === 'hermes-agent' && effort) throw new AppError(400, 'Hermes 使用模型默认推理强度。');
       this.catalog(account.id, model, effort);
       const members = this.store.members().filter(m => m.carrier === carrier && !m.deletedAt);
       for (const m of members.filter(m => m.accountBinding === 'follow' || m.modelBinding === 'follow')) this.catalog(m.accountBinding === 'follow' ? account.id : m.accountId, m.modelBinding === 'follow' ? model : m.model, m.modelBinding === 'follow' ? effort : m.effort);
@@ -151,10 +285,12 @@ export class WorkbenchService {
       if (p.appliedAt || p.configurationRevision !== this.store.configurationRevision() || Date.parse(p.expiresAt) <= Date.now()) conflict('配置预览已失效，请重新预览。');
       if ((p.kind === 'workspace') !== !!cid || p.conversationId !== cid) throw new AppError(400, '预览不属于此操作。');
       if (p.kind === 'workspace') {
-        const c = this.conversation(cid!); this.idle(c.id); if ((c.revision ?? 1) !== p.conversationRevision) conflict('会话已变化，请重新预览授权。');
-        const grant = p.value as WorkspaceGrant; verifyWorkspace(grant); this.workspace(grant.path, grant.revision);
+        const c = this.conversation(cid!); this.checkFolderSelection(c.id, p.conversationRevision!);
+        const grant = p.value as WorkspaceGrant; verifyWorkspace(grant); this.workspace(grant.path, grant.revision, grant.mode);
+        if (grant.mcpReader && this.store.options.mcpReaders?.lookup(grant.mcpReader.id).revision !== grant.mcpReader.revision) conflict('资料源配置已变化，请重新预览。');
         c.workspaceGrant = { ...grant, authorizedAt: now() }; c.revision = (c.revision ?? 1) + 1; c.updatedAt = now(); this.put('cc_conversations', c);
         this.store.cross.sweep(); this.port.event(c.id, 'workspace.authorized', { grant: c.workspaceGrant, source: 'user_authorization' });
+        if (p.intentId) this.store.projects.continue(c.id, p.intentId, p.intentRevision!, true);
       } else {
         const value = p.value as RuntimeDefault; this.account(value.accountId); this.catalog(value.accountId, value.model, value.effort);
         this.store.db.prepare('INSERT INTO cc_runtime_defaults VALUES(?,?) ON CONFLICT(carrier) DO UPDATE SET value=excluded.value').run(value.carrier, JSON.stringify(value));
@@ -184,6 +320,7 @@ export class WorkbenchService {
     return this.port.tx(() => this.port.command(`delete-${kind}:${id}:${text(input.requestId, '请求标识')}`, input, () => {
       const table = kind === 'members' ? 'cc_members' : 'cc_accounts';
       const value = this.data.get<Member | CollaborationAccount>(table, id);
+      if (kind==='accounts' && (value as CollaborationAccount).codexHome==='project') conflict('项目专用登录为内置账户，可以为成员改选其他账户。');
       if ((value.revision ?? 1) !== input.expectedRevision || value.deletedAt) conflict('配置已变化，请刷新。');
       if (kind === 'accounts' && (this.store.members().some(m => !m.deletedAt && (m.accountBinding !== 'follow' && m.accountId === id || this.defaults().some(d => d.accountId === id && d.carrier === m.carrier && m.accountBinding === 'follow'))) || this.defaults().some(d => d.accountId === id))) conflict('账户仍被成员或运行时默认配置引用，请先调整绑定。');
       value.deletedAt = now(); value.revision = (value.revision ?? 1) + 1; if ('enabled' in value) value.enabled = false;

@@ -31,6 +31,45 @@ function success(store: CollaborationStore, id: string, sid: string, anchor: str
   store.finish(id, 'succeeded', 'OK');
 }
 
+for (const privateMessage of [false, true]) test(`image turn isolates native history on both sides (${privateMessage ? 'private' : 'public'})`, () => {
+  const { owner, store, conversation } = setup();
+  try {
+    const cid = conversation.id;
+    const audience = privateMessage ? { privateTo: ['codex'] } : {};
+    const send = (content: string, attachmentIds?: string[]) => store.send(cid, { ...audience, content, requestId: randomUUID(), attachmentIds });
+    const plan = () => {
+      const invocation = store.admitNext()!.invocations[0]!;
+      return { invocation, session: store.prepareSession(invocation.id, identity) };
+    };
+    send('@codex ORIGINAL-TEXT');
+    const first = plan();
+    success(store, first.invocation.id, 'text-thread', 'text-anchor');
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
+    const image = store.workbench.upload(cid, { requestId: randomUUID(), name: 'proof.png', mediaType: 'image/png', base64: png }).result;
+    send('@codex IMAGE-QUESTION', [image.id]);
+    const current = plan();
+    assert.equal(current.session.mode, 'replace');
+    assert.equal(current.session.imageTurnOnly, true);
+    assert.equal(current.session.nativeSessionId, undefined);
+    assert.ok(store.prepareInput(current.invocation.id).prompt.includes('ORIGINAL-TEXT'));
+    const follow = send('@codex FOLLOW-UP').source;
+    assert.equal(store.detail(cid).deliveries.find(d => d.sourceId === follow.id)?.continuation, undefined);
+    assert.equal(store.cooperation.canConsume(current.invocation, follow), false);
+    success(store, current.invocation.id, 'image-thread', 'image-anchor');
+    assert.equal(store.nativeSessions(cid).at(-1)?.status, 'sealed');
+    const next = plan();
+    assert.equal(next.session.mode, 'replace');
+    assert.equal(next.session.nativeSessionId, undefined);
+    const { prompt, manifest } = store.prepareInput(next.invocation.id);
+    assert.ok(prompt.includes('IMAGE-QUESTION'));
+    assert.ok(!prompt.includes(png));
+    assert.equal(store.runtimeImages(next.invocation.id, manifest), undefined);
+    success(store, next.invocation.id, 'new-text-thread', 'new-text-anchor');
+    send('@codex MORE-TEXT');
+    assert.equal(plan().session.nativeSessionId, 'new-text-thread');
+  } finally { owner.close(); }
+});
+
 test('N3: durable same-member native binding survives restart; different members and conversations cannot share it', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'n3-binding-')); let owner: Store | undefined;
   try {
@@ -117,7 +156,7 @@ test('N3: schema v2 upgrades without rewriting old contracts or fabricating nati
     h.owner.db.prepare('UPDATE cc_contracts SET value=? WHERE id=?').run(JSON.stringify(c), c.id);
     h.owner.db.exec('DROP TABLE cc_native_sessions; UPDATE cc_schema SET version=2');
     const store = new CollaborationStore(h.owner);
-    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 9);
+    assert.equal((h.owner.db.prepare('SELECT version FROM cc_schema').get() as any).version, 13);
     assert.deepEqual(store.contract(i.id), c); assert.deepEqual(store.nativeSessions(h.conversation.id), []);
     assert.equal(store.prepareSession(i.id, identity).mode, 'unsupported');
   } finally { h.owner.close(); }

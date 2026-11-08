@@ -2,6 +2,7 @@ import type { ConversationDetail } from '../shared/collaboration';
 
 export const workspaceTools = [
   { id: 'project', title: '项目与成员', icon: 'folder', keywords: '项目 工作区 目录 文件夹 只读 授权 默认成员 设置' },
+  { id: 'preview', title: '项目预览', icon: 'grid', keywords: '预览 网页 日志 启动 停止 静态项目' },
   { id: 'knowledge', title: '会话资料', icon: 'book', keywords: '记忆 查找 搜索 材料 可见范围 权限 成员组 收藏 已读 导出 回收站' },
   { id: 'tasks', title: '任务跟进', icon: 'check', keywords: '任务 负责人 交接 进度 状态' },
   { id: 'artifacts', title: '产物与评审', icon: 'file', keywords: '产物 审批 发布 评审 文件 版本 问题 回答' },
@@ -137,7 +138,10 @@ export function describeTarget(target: WorkspaceTarget, detail: ConversationDeta
       return entry && version ? { title: `${entry.key} · v${version.number}`, icon: 'book' } : missing;
     }
     case 'invocation': return detail.invocations.some(i => i.id === target.invocationId) ? { title: `执行 · ${target.invocationId.slice(0, 8)}`, icon: 'pulse' } : missing;
-    case 'interaction': return detail.interactions?.some(i => i.id === target.interactionId) ? { title: '成员提问', icon: 'question' } : missing;
+    case 'interaction': {
+      const item = detail.interactions?.find(i => i.id === target.interactionId);
+      return item ? { title: item.kind === 'approval' ? '操作确认' : item.transport === 'project-npm' ? '下载测试依赖' : '成员提问', icon: 'question' } : missing;
+    }
     case 'action': { const action = detail.actions?.find(a => a.id === target.actionId); return action ? { title: action.title, icon: 'link' } : missing; }
     case 'message': return detail.messages.some(m => m.id === target.messageId && !m.deletedAt) ? { title: '引用的消息', icon: 'message' } : missing;
   }

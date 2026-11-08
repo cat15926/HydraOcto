@@ -1,3 +1,5 @@
+import type { githubApi } from './collaboration/project-github.js';
+import { McpReaders } from './collaboration/mcp-reader.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
@@ -14,7 +16,7 @@ import { CollaborationStore } from './collaboration/store.js';
 import { ArtifactFiles } from './collaboration/artifact-files.js';
 import { CollaborationEngine } from './collaboration/engine.js';
 import { createCollaborationRuntime } from './collaboration/runtime.js';
-import { chooseProjectFolder, type FolderPicker } from './collaboration/folder-picker.js';
+import { chooseProjectFolder, chooseInspectionFile, type ProjectFilePicker, type FolderPicker } from './collaboration/folder-picker.js';
 import { collaborationHttp } from './collaboration/http.js';
 
 export interface ApplicationOptions {
@@ -22,7 +24,8 @@ export interface ApplicationOptions {
   provider?: Provider; modelBaseUrl?: string; modelName?: string; modelApiKey?: string;
   approvalTtlMs?: number; providerTimeoutMs?: number; leaseMs?: number; startWorker?: boolean;
   collaborationRuntime?: CollaborationRuntime;
-  folderPicker?: FolderPicker;
+  projectGitHub?: typeof githubApi;
+  folderPicker?: FolderPicker; projectFilePicker?: ProjectFilePicker;
 }
 const TEXT_LIMIT = 20_000;
 function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError(400, 'Expected a JSON object.'); return value as Record<string, unknown>; }
@@ -39,10 +42,10 @@ function validateRole(body: unknown): CreateRole {
   if (!Array.isArray(value.tools) || value.tools.length > TOOL_NAMES.length || value.tools.some(tool => !TOOL_NAMES.includes(tool as ToolName)) || new Set(value.tools).size !== value.tools.length) throw new AppError(400, 'tools must be a unique list of supported tools.');
   return { name: textField(value.name, 'name', 80), description: textField(value.description, 'description', 1000), instructions: textField(value.instructions, 'instructions', 10_000), tools: value.tools as ToolName[] };
 }
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(request: IncomingMessage, limit = 400_000): Promise<unknown> {
   if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')) throw new AppError(415, 'Mutations require application/json.', 'json_required');
   let bytes = 0; const chunks: Buffer[] = [];
-  for await (const chunk of request) { const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string); bytes += buffer.length; if (bytes > 400_000) throw new AppError(413, 'Request body exceeds 400 KB.'); chunks.push(buffer); }
+  for await (const chunk of request) { const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string); bytes += buffer.length; if (bytes > limit) throw new AppError(413, '请求内容超过允许的大小。'); chunks.push(buffer); }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; } catch { throw new AppError(400, 'Request body is not valid JSON.'); }
 }
 function json(response: ServerResponse, status: number, body: unknown): void { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(body)); }
@@ -67,16 +70,18 @@ export async function createApplication(options: ApplicationOptions = {}) {
   await gateway.init();
   // Validate before opening/acquiring the database lease; rejected configuration has no live worker.
   new ArtifactFiles(resolve(dataDir, 'collaboration-artifacts'), workspace).validate();
+  const mcpReaders = new McpReaders(process.env.COLLAB_MCP_READERS,process.env);
   const store = new Store(resolve(dataDir, 'platform.sqlite'), { ...(options.leaseMs ? { leaseMs: options.leaseMs } : {}) });
   store.recover();
   const provider = options.provider ?? createProvider({ baseUrl: modelBaseUrl, model: modelName, apiKey: modelApiKey, timeoutMs: options.providerTimeoutMs });
   const worker = new Worker(store, gateway, provider, { approvalTtlMs: options.approvalTtlMs, providerTimeoutMs: options.providerTimeoutMs, secrets });
   const commands = new Commands(store, worker, gateway);
   const csrfToken = randomBytes(32).toString('hex');
-  const collaborationStore = new CollaborationStore(store, { workspace, artifactDir: resolve(dataDir, 'collaboration-artifacts') });
-  const collaborationRuntime = options.collaborationRuntime ?? createCollaborationRuntime();
-  const collaborationEngine = new CollaborationEngine(collaborationStore, collaborationRuntime, { workspace });
-  const collaborationRoutes = collaborationHttp({ store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, folderPicker: options.folderPicker ?? chooseProjectFolder, workspace, csrfToken, verifyCsrf, readJson, json });
+  const collaborationRuntime = options.collaborationRuntime ?? createCollaborationRuntime({privateRoots:[dataDir]});
+  const collaborationStore = new CollaborationStore(store, { workspace, mcpReaders, singleProjectVm: !options.collaborationRuntime, artifactDir: resolve(dataDir, 'collaboration-artifacts'),
+    projectWorkAvailability: collaborationRuntime.projectWorkAvailability?.bind(collaborationRuntime) });
+  const collaborationEngine = new CollaborationEngine(collaborationStore, collaborationRuntime, { workspace, projectGitHub:options.projectGitHub });
+  const collaborationRoutes = collaborationHttp({ dataDir, store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, folderPicker: options.folderPicker ?? chooseProjectFolder, projectFilePicker:options.projectFilePicker ?? chooseInspectionFile, workspace, csrfToken, verifyCsrf, readJson, json });
   const streams = new Set<ServerResponse>();
   let closed = false; let listeningPort = port; let started = false; let leaseLost = false;
   function stopForLeaseLoss(): void {

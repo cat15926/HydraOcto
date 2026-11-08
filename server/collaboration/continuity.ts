@@ -3,10 +3,23 @@ import type { ExecutionContractSnapshot, NativeSessionIdentity, RuntimeUsage } f
 import { canonical } from '../store.js';
 
 export const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
-export function sessionFingerprint(contract: ExecutionContractSnapshot, identity: NativeSessionIdentity): string {
+export function sessionFingerprint(contract: ExecutionContractSnapshot, identity: NativeSessionIdentity, imageInvocationId?: string): string {
   const m = contract.memberSnapshot, a = contract.accountMetadataSnapshot;
   return digest({ carrier: m.carrier, account: a, model: m.model, effort: m.effort, instructions: m.instructions,
+    ...(imageInvocationId ? { imageInvocationId } : {}),
     ...(contract.visibilityEpoch !== undefined ? { visibility: contract.visibility, visibilityEpoch: contract.visibilityEpoch } : {}),
+    ...(contract.workspaceGrant?.mode === 'project-work' ? {
+      project: { mode: contract.projectWork ? 'project-work' : 'read-only', revision: contract.workspaceGrant.revision,
+        device: contract.workspaceGrant.device, inode: contract.workspaceGrant.inode, binding: contract.workspaceGrant.memberBindings?.[m.id] },
+    } : {}),
+    ...(contract.projectContinuity ? { projectContinuity:'vm-checkpoint-v1' } : {}),
+    ...(contract.projectReview ? {reviewSource:contract.primarySourceId} : {}),
+    ...(contract.mayRunProjectNpmTest ? {projectNpmTest:contract.projectNpmChecks ? 2 : 1} : {}),
+    ...(contract.webResearch ? {webResearch:true} : {}),
+    ...(contract.gitDelivery ? {gitDelivery:true} : {}),
+    ...(contract.mayExportProjectFile ? {projectExportTool:true} : {}),
+    ...(contract.mayRequestProjectReview ? {projectReviewTool:true} : {}),
+    ...(contract.mayProposeProject ? { mayProposeProject: true } : {}),
     workspace: contract.workspaceScope, tools: contract.toolPolicyVersion,
     adapter: contract.adapterCapabilityVersion, runtime: identity.fingerprint });
 }

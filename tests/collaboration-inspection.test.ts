@@ -22,6 +22,23 @@ function observation(input: RuntimeRequest, nativeSessionId?: string, nativeTurn
   return { invocationId: input.invocationId, conversationId: input.conversationId, member: input.member, account: input.account, nativeSessionId, nativeTurnId };
 }
 const probe: CollaborationRuntime['probe'] = async () => [];
+test('the inspected runtime forwards a reviewer test to its registered executor', async () => {
+  const runtime = withRuntimeInspection({
+    probe, invoke: async () => { throw new Error('unexpected model invocation'); },
+    async runProjectReviewTest(request) {
+      request.verifyAuthorization();
+      return {argv:request.argv,exitCode:7,output:'fixture',truncated:false,snapshotSha256:'a'.repeat(64),treeExited:true};
+    },
+  });
+  let checked = 0;
+  assert.ok(runtime.runProjectReviewTest);
+  const result = await runtime.runProjectReviewTest({
+    argv:['test'], signal:AbortSignal.timeout(1000), verifyAuthorization:()=>{ checked++; },
+    grant:{path:tmpdir(),device:1,inode:1,mode:'project-work',authorizedAt:'fixture',revision:1,reviewMode:'project'},
+  });
+  assert.equal(checked,1);
+  assert.equal(result.exitCode,7);
+});
 function receipts(input: RuntimeRequest) {
   input.onEvent({ kind: 'session', detail: { nativeSessionId: 'native-1', continuity: 'fresh' } });
   input.onEvent({ kind: 'accepted', detail: { nativeSessionId: 'native-1', nativeTurnId: 'turn-1', evidence: 'fixture-native' } });
