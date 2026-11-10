@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="2026年11月10日，多Agent协作调度、责任闭环、通用协作能力及LLM智能团队架构讨论纪要。">
+<title>多 Agent 协作调度与智能团队架构讨论纪要</title>
+<style>
+:root { color-scheme: light; --ink:#24343b; --muted:#596a72; --line:#dbe3e4; --paper:#fff; --accent:#1f626d; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:24px; }
+body { margin:0; background:#f5f6f3; color:var(--ink); font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif; font-size:16px; line-height:1.9; }
+.document { max-width:1230px; margin:auto; display:grid; grid-template-columns:235px minmax(0,1fr); gap:40px; padding:44px 30px 70px; }
+aside { position:sticky; top:24px; align-self:start; font-size:13px; line-height:1.65; }
+.eyebrow { color:var(--accent); font-weight:600; letter-spacing:0.04em; margin:0 0 10px; }
+.nav-title { margin:0 0 12px; color:var(--muted); }
+nav ol { padding:0; margin:0; list-style:none; }
+nav li { margin:0 0 8px; }
+nav a { text-decoration:none; color:var(--muted); display:block; padding:3px 0; }
+nav a:hover, nav a:focus-visible { color:var(--accent); text-decoration:underline; }
+.aside-note { border-top:1px solid var(--line); padding-top:14px; margin-top:18px; color:var(--muted); }
+main { min-width:0; background:var(--paper); padding:38px 45px 46px; border-top:4px solid var(--accent); }
+h1 { font-size:29px; line-height:1.5; letter-spacing:0.01em; margin:0 0 25px; color:#163e48; }
+h2 { font-size:22px; line-height:1.6; margin:42px 0 16px; padding-top:12px; border-top:1px solid var(--line); }
+h3 { font-size:18px; line-height:1.7; margin:28px 0 12px; color:#214e59; }
+p { margin:0 0 16px; }
+strong { font-weight:650; color:#163e48; }
+a { color:var(--accent); text-underline-offset:3px; overflow-wrap:anywhere; }
+blockquote { margin:20px 0; padding:14px 18px; border-left:3px solid #6d9ba1; background:#f0f6f5; }
+blockquote p:last-child { margin-bottom:0; }
+code { font-family:Consolas,"Microsoft YaHei",monospace; font-size:0.88em; background:#f1f4f5; padding:1px 4px; border-radius:3px; overflow-wrap:anywhere; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+ul,ol { padding-left:1.55em; }
+li { margin:8px 0; }
+.table-wrap { width:100%; overflow-x:auto; margin:20px 0; }
+table { border-collapse:collapse; width:100%; font-size:14px; line-height:1.8; table-layout:fixed; }
+th,td { padding:10px 11px; border-bottom:1px solid var(--line); vertical-align:top; text-align:left; overflow-wrap:anywhere; }
+th { background:#f2f6f5; color:#234b54; font-weight:600; }
+tr:nth-child(even) td { background:#fafbf9; }
+td:first-child,th:first-child { width:24%; }
+.diagram { margin:25px 0; padding:20px 8px; background:#fff; border:1px solid var(--line); break-inside:avoid; overflow-x:auto; }
+.diagram svg { display:block; width:100%; height:auto; max-height:1000px; margin:auto; }
+.diagram text { font-family:"Microsoft YaHei","Segoe UI",sans-serif!important; }
+figcaption { margin-top:14px; color:var(--muted); font-size:13px; text-align:center; }
+.footer { margin-top:36px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+@media(max-width:980px) { .document { grid-template-columns:1fr; padding:20px 16px 36px; gap:20px; max-width:850px; } aside { position:static; } nav ol { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:2px 18px; } .aside-note { display:none; } main { padding:28px 26px; } }
+@media(max-width:540px) { body { font-size:15px; } .document { padding:12px 8px 25px; } main { padding:22px 15px; } h1 { font-size:24px; } h2 { font-size:20px; } nav ol { grid-template-columns:1fr; } table { min-width:540px; } .diagram { padding:12px 3px; } .diagram svg { min-width:580px; max-width:none!important; } figcaption { text-align:left; } }
+@media print { @page { size:A4; margin:17mm; } body { background:#fff; font-size:10pt; } .document { display:block; max-width:none; padding:0; } aside { display:none; } main { padding:0; border:0; } h1 { font-size:20pt; } h2 { font-size:15pt; break-after:avoid; } h3 { break-after:avoid; } table { font-size:9pt; } tr { break-inside:avoid; } .table-wrap { overflow:visible; } .diagram { max-height:220mm; } a { text-decoration:none; } }
+</style>
+</head>
+<body>
+<div class="document">
+<aside aria-label="文档导航">
+<p class="eyebrow">2026 · 11 · 10</p>
+<p class="nav-title">讨论纪要 · 图文归档</p>
+<nav aria-label="目录"><ol><li><a href="#section-1">1 当日讨论脉络</a></li><li><a href="#section-2">2 当前源码的模块与调度主链</a></li><li><a href="#section-3">3 当前状态机的实际模式</a></li><li><a href="#section-4">4 A2A 与责任传导的源码结论</a></li><li><a href="#section-5">5 方案演进与已调整的方向</a></li><li><a href="#section-6">6 用户明确的架构原则与平台定位</a></li><li><a href="#section-7">7 通用协作模型的设计候选</a></li><li><a href="#section-8">8 目标看护与责任补交</a></li><li><a href="#section-9">9 拟人团队需要的基础能力</a></li><li><a href="#section-10">10 两个场景对同一内核的检验</a></li><li><a href="#section-11">11 后续细化与落地建议</a></li><li><a href="#section-12">12 验收矩阵与观察指标</a></li><li><a href="#section-13">13 待进一步讨论的问题</a></li><li><a href="#section-14">14 源码定位与阅读顺序</a></li></ol></nav>
+<p class="aside-note">源码基线 fe1486e<br>已明确原则与设计候选分别记录<br>内容和流程图均可离线阅读</p>
+</aside>
+<main><h1>多 Agent 协作调度与智能团队架构讨论纪要</h1>
+<p>讨论日期：2026 年 11 月 10 日，Asia/Shanghai。<br>项目：Multi Agent Collab。源码基线：<code>fe1486e3eb85164f3d5be89bb34345ac1ea3409b</code>，产品版本 <code>0.25.0</code>，服务标识 <code>0.25.0-p8-pr-ci</code>。<br>文档性质：源码调研与架构讨论归档。架构方向与用户明确原则已记录；数据模型、接口、具体策略及开发范围仍需细化。本次归档不将讨论稿升级为正式实施指导。</p>
+<p>今天的讨论从现有项目的消息路由和调度源码出发，发现了“执行结束但责任没有继续传递”的缺口；随后通过研发评审和狼人杀两个场景，逐步明确了通用平台与任务规则的边界。最终方向是：<strong>LLM 团队承担认知、判断和决策，平台提供目标、任务、责任传导与可靠调度的基础能力。</strong></p>
+<p>用户明确提出的三项架构约束是：</p>
+<blockquote>
+<p>1、所有场景共用交付、等待、校验、补交和恢复机制；<br>2、这套调度平台应该适配所有的任务类型；<br>3、调度核心无需增加针对某个场景的特殊分支。</p>
+</blockquote>
+<p>用户进一步明确平台愿景：</p>
+<blockquote>
+<p>需要充分发挥 LLM 作为大脑的能力，平台作为责任、任务、目标传导和调度的媒介，提供完善的基础能力，让多个 Agent 组成的团队变成无限逼近拟人的智能团队。</p>
+</blockquote>
+<h2 id="section-1">1 当日讨论脉络</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>顺序</th>
+<th>用户提出的问题或要求</th>
+<th>本轮形成的认识</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>更新代码</td>
+<td>拉取时 <code>main</code> 与远端一致，提交为 <code>fe1486e</code>；当时服务健康检查正常。</td>
+</tr>
+<tr>
+<td>2</td>
+<td>基于源码分析有哪些模块及职责</td>
+<td>核心由路由、持久状态、执行驱动、上下文、承载适配及各领域服务组成。</td>
+</tr>
+<tr>
+<td>3</td>
+<td>A2A 协作的发起者是谁</td>
+<td>普通 A2A 由执行中的 Agent 调用工具发起；平台校验身份、保存来源并调度。特定受管退修也会由平台生成 A2A 来源。</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Claude 只写“需要 Codex 修复”，是否保证责任传导</td>
+<td>普通文字不能保证生成后续修复工作；执行成功与业务问题解决分别记录。</td>
+</tr>
+<tr>
+<td>5</td>
+<td>是否存在交接协议缺失后的提醒兜底</td>
+<td>已有正式交接检查和部分责任诊断，缺少通用的“应交付而未交付”检测与自动补交。</td>
+</tr>
+<tr>
+<td>6</td>
+<td>当前状态机是什么逻辑模式</td>
+<td>多个领域状态机，通过显式命令、运行证据、事务和周期对账共同推进。</td>
+</tr>
+<tr>
+<td>7</td>
+<td>给出以问题为导向的图文优化方案</td>
+<td>初步提出交付契约、结构化结果、有限补交、责任状态及验收机制。</td>
+</tr>
+<tr>
+<td>8</td>
+<td>是否能让 Agent 自主玩狼人杀，用户只旁观</td>
+<td>当前具备部分多人协作原语，但缺少可靠的持续推进、角色视角和规则执行组合。</td>
+</tr>
+<tr>
+<td>9</td>
+<td>反对引入专用游戏平台控制器</td>
+<td>专用场景控制器的建议被否定；应当以通用协作能力承载不同任务实例。</td>
+</tr>
+<tr>
+<td>10</td>
+<td>明确三项泛化约束</td>
+<td>共用基础机制、任务类型不受核心限制、核心不增加场景分支。</td>
+</tr>
+<tr>
+<td>11</td>
+<td>强调 LLM 为大脑，平台为媒介</td>
+<td>协议应承载团队动态形成的约定；业务决策交给 Agent，平台负责事实、权限、责任和执行连续性。</td>
+</tr>
+<tr>
+<td>12</td>
+<td>将今天讨论内容落盘</td>
+<td>保存本纪要及可离线阅读的图文版，作为后续设计依据。</td>
+</tr>
+</tbody></table></div>
+<h2 id="section-2">2 当前源码的模块与调度主链</h2>
+<p>当前实现可以归纳为单机、会话驱动、按来源持久调度的多 Agent 协作系统。<code>store.ts</code> 维护状态和调度规则，<code>engine.ts</code> 驱动实际执行，<code>runtime*.ts</code> 适配 CLI 或 API。服务还保留独立的 legacy 顺序任务入口。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/shared/collaboration.ts#L135">S01</a><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L521">S03</a></p>
+<figure class="diagram" aria-label="流程图 1"><svg id="discussion-diagram-0" width="100%" xmlns="http://www.w3.org/2000/svg" class="flowchart" style="max-width: 424px;" viewBox="0 0 424 772" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#discussion-diagram-0{font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:16px;fill:#173b42;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#discussion-diagram-0 .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#discussion-diagram-0 .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#discussion-diagram-0 .error-icon{fill:#f3f4f6;}#discussion-diagram-0 .error-text{fill:#0c0b09;stroke:#0c0b09;}#discussion-diagram-0 .edge-thickness-normal{stroke-width:1px;}#discussion-diagram-0 .edge-thickness-thick{stroke-width:3.5px;}#discussion-diagram-0 .edge-pattern-solid{stroke-dasharray:0;}#discussion-diagram-0 .edge-thickness-invisible{stroke-width:0;fill:none;}#discussion-diagram-0 .edge-pattern-dashed{stroke-dasharray:3;}#discussion-diagram-0 .edge-pattern-dotted{stroke-dasharray:2;}#discussion-diagram-0 .marker{fill:#66858b;stroke:#66858b;}#discussion-diagram-0 .marker.cross{stroke:#66858b;}#discussion-diagram-0 svg{font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:16px;}#discussion-diagram-0 p{margin:0;}#discussion-diagram-0 .label{font-family:Microsoft YaHei,Segoe UI,sans-serif;color:#173b42;}#discussion-diagram-0 .cluster-label text{fill:#0c0b09;}#discussion-diagram-0 .cluster-label span{color:#0c0b09;}#discussion-diagram-0 .cluster-label span p{background-color:transparent;}#discussion-diagram-0 .label text,#discussion-diagram-0 span{fill:#173b42;color:#173b42;}#discussion-diagram-0 .node rect,#discussion-diagram-0 .node circle,#discussion-diagram-0 .node ellipse,#discussion-diagram-0 .node polygon,#discussion-diagram-0 .node path{fill:#edf4f4;stroke:#759ba1;stroke-width:1px;}#discussion-diagram-0 .rough-node .label text,#discussion-diagram-0 .node .label text,#discussion-diagram-0 .image-shape .label,#discussion-diagram-0 .icon-shape .label{text-anchor:middle;}#discussion-diagram-0 .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#discussion-diagram-0 .rough-node .label,#discussion-diagram-0 .node .label,#discussion-diagram-0 .image-shape .label,#discussion-diagram-0 .icon-shape .label{text-align:center;}#discussion-diagram-0 .node.clickable{cursor:pointer;}#discussion-diagram-0 .root .anchor path{fill:#66858b!important;stroke-width:0;stroke:#66858b;}#discussion-diagram-0 .arrowheadPath{fill:#000000;}#discussion-diagram-0 .edgePath .path{stroke:#66858b;stroke-width:2.0px;}#discussion-diagram-0 .flowchart-link{stroke:#66858b;fill:none;}#discussion-diagram-0 .edgeLabel{background-color:#ffffff;text-align:center;}#discussion-diagram-0 .edgeLabel p{background-color:#ffffff;}#discussion-diagram-0 .edgeLabel rect{opacity:0.5;background-color:#ffffff;fill:#ffffff;}#discussion-diagram-0 .labelBkg{background-color:rgba(255, 255, 255, 0.5);}#discussion-diagram-0 .cluster rect{fill:#f3f4f6;stroke:hsl(220, 0%, 85.8823529412%);stroke-width:1px;}#discussion-diagram-0 .cluster text{fill:#0c0b09;}#discussion-diagram-0 .cluster span{color:#0c0b09;}#discussion-diagram-0 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:12px;background:#f3f4f6;border:1px solid hsl(220, 0%, 85.8823529412%);border-radius:2px;pointer-events:none;z-index:100;}#discussion-diagram-0 .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#173b42;}#discussion-diagram-0 rect.text{fill:none;stroke-width:0;}#discussion-diagram-0 .icon-shape,#discussion-diagram-0 .image-shape{background-color:#ffffff;text-align:center;}#discussion-diagram-0 .icon-shape p,#discussion-diagram-0 .image-shape p{background-color:#ffffff;padding:2px;}#discussion-diagram-0 .icon-shape rect,#discussion-diagram-0 .image-shape rect{opacity:0.5;background-color:#ffffff;fill:#ffffff;}#discussion-diagram-0 .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#discussion-diagram-0 .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#discussion-diagram-0 :root{--mermaid-font-family:Microsoft YaHei,Segoe UI,sans-serif;}</style><g><marker id="discussion-diagram-0_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-0_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-0_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="discussion-diagram-0_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="discussion-diagram-0_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-0_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"><path d="M225,56L225,70L225,80" id="L_U_R_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_U_R_0" data-points="W3sieCI6MjI1LCJ5Ijo1Nn0seyJ4IjoyMjUsInkiOjcwfSx7IngiOjIyNSwieSI6ODR9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M225,132L225,146L225,156" id="L_R_S_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_R_S_0" data-points="W3sieCI6MjI1LCJ5IjoxMzJ9LHsieCI6MjI1LCJ5IjoxNDZ9LHsieCI6MjI1LCJ5IjoxNjB9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M166.263,208L132,222L132,232" id="L_S_D_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_S_D_0" data-points="W3sieCI6MTY2LjI2MzE1Nzg5NDczNjg1LCJ5IjoyMDh9LHsieCI6MTMyLCJ5IjoyMjJ9LHsieCI6MTMyLCJ5IjoyMzZ9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M132,284L132,298L132,308" id="L_D_A_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_D_A_0" data-points="W3sieCI6MTMyLCJ5IjoyODR9LHsieCI6MTMyLCJ5IjoyOTh9LHsieCI6MTMyLCJ5IjozMTJ9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M132,360L132,374L132,384" id="L_A_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_B_0" data-points="W3sieCI6MTMyLCJ5IjozNjB9LHsieCI6MTMyLCJ5IjozNzR9LHsieCI6MTMyLCJ5IjozODh9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M132,436L132,450L132,460" id="L_B_I_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_I_0" data-points="W3sieCI6MTMyLCJ5Ijo0MzZ9LHsieCI6MTMyLCJ5Ijo0NTB9LHsieCI6MTMyLCJ5Ijo0NjR9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M132,536L132,550L132,560" id="L_I_C_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_I_C_0" data-points="W3sieCI6MTMyLCJ5Ijo1MzZ9LHsieCI6MTMyLCJ5Ijo1NTB9LHsieCI6MTMyLCJ5Ijo1NjR9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M132,612L132,626L132,636" id="L_C_RT_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_C_RT_0" data-points="W3sieCI6MTMyLCJ5Ijo2MTJ9LHsieCI6MTMyLCJ5Ijo2MjZ9LHsieCI6MTMyLCJ5Ijo2NDB9XQ==" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M125.684,688L122,702L122,712" id="L_RT_E_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_RT_E_0" data-points="W3sieCI6MTI1LjY4NDIxMDUyNjMxNTgsInkiOjY4OH0seyJ4IjoxMjIsInkiOjcwMn0seyJ4IjoxMjIsInkiOjcxNn1d" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M197.053,688L235,702L265.56,714.487" id="L_RT_T_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_RT_T_0" data-points="W3sieCI6MTk3LjA1MjYzMTU3ODk0NzM3LCJ5Ijo2ODh9LHsieCI6MjM1LCJ5Ijo3MDJ9LHsieCI6MjY5LjI2MzE1Nzg5NDczNjgsInkiOjcxNn1d" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path><path d="M334.316,716L338,702L338,664L338,626L338,588L338,550L338,500L338,450L338,412L338,374L338,336L338,298L338,260L338,222L300.16,209.275" id="L_T_S_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T_S_0" data-points="W3sieCI6MzM0LjMxNTc4OTQ3MzY4NDIsInkiOjcxNn0seyJ4IjozMzgsInkiOjcwMn0seyJ4IjozMzgsInkiOjY2NH0seyJ4IjozMzgsInkiOjYyNn0seyJ4IjozMzgsInkiOjU4OH0seyJ4IjozMzgsInkiOjU1MH0seyJ4IjozMzgsInkiOjUwMH0seyJ4IjozMzgsInkiOjQ1MH0seyJ4IjozMzgsInkiOjQxMn0seyJ4IjozMzgsInkiOjM3NH0seyJ4IjozMzgsInkiOjMzNn0seyJ4IjozMzgsInkiOjI5OH0seyJ4IjozMzgsInkiOjI2MH0seyJ4IjozMzgsInkiOjIyMn0seyJ4IjoyOTYuMzY4NDIxMDUyNjMxNTYsInkiOjIwOH1d" marker-end="url(#discussion-diagram-0_flowchart-v2-pointEnd)"></path></g><g class="edgeLabels"><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g class="edgeLabel"><g class="label" data-id="L_U_R_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_R_S_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_S_D_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_D_A_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_A_B_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_B_I_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_I_C_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_C_RT_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_RT_E_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_RT_T_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_T_S_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g></g><g class="nodes"><g class="node default" id="flowchart-U-0" transform="translate(225, 32)"><rect class="basic label-container" style="" x="-56" y="-24" width="112" height="48"></rect><g class="label" style="" transform="translate(-32, -12)"><rect></rect><foreignObject width="64" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>用户消息</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-R-1" transform="translate(225, 108)"><rect class="basic label-container" style="" x="-88" y="-24" width="176" height="48"></rect><g class="label" style="" transform="translate(-64, -12)"><rect></rect><foreignObject width="128" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>路由选择目标成员</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-S-3" transform="translate(225, 184)"><rect class="basic label-container" style="" x="-120.921875" y="-24" width="241.84375" height="48"></rect><g class="label" style="" transform="translate(-96.921875, -12)"><rect></rect><foreignObject width="193.84375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>SourceWork 保存输入来源</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-D-5" transform="translate(132, 260)"><rect class="basic label-container" style="" x="-113.5859375" y="-24" width="227.171875" height="48"></rect><g class="label" style="" transform="translate(-89.5859375, -12)"><rect></rect><foreignObject width="179.171875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Delivery 建立各成员投递</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-A-7" transform="translate(132, 336)"><rect class="basic label-container" style="" x="-104" y="-24" width="208" height="48"></rect><g class="label" style="" transform="translate(-80, -12)"><rect></rect><foreignObject width="160" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>检查顺序、占用和授权</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-B-9" transform="translate(132, 412)"><rect class="basic label-container" style="" x="-112.765625" y="-24" width="225.53125" height="48"></rect><g class="label" style="" transform="translate(-88.765625, -12)"><rect></rect><foreignObject width="177.53125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>DispatchBatch 共同领取</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-I-11" transform="translate(132, 500)"><rect class="basic label-container" style="" x="-124" y="-36" width="248" height="72"></rect><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Invocation 建立各成员执行记录</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-C-13" transform="translate(132, 588)"><rect class="basic label-container" style="" x="-88" y="-24" width="176" height="48"></rect><g class="label" style="" transform="translate(-64, -12)"><rect></rect><foreignObject width="128" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>冻结契约与上下文</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-RT-15" transform="translate(132, 664)"><rect class="basic label-container" style="" x="-114.3828125" y="-24" width="228.765625" height="48"></rect><g class="label" style="" transform="translate(-90.3828125, -12)"><rect></rect><foreignObject width="180.765625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Runtime 调用 CLI 或 API</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-E-17" transform="translate(122, 740)"><rect class="basic label-container" style="" x="-96" y="-24" width="192" height="48"></rect><g class="label" style="" transform="translate(-72, -12)"><rect></rect><foreignObject width="144" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>保存结果与运行证据</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-T-19" transform="translate(328, 740)"><rect class="basic label-container" style="" x="-88" y="-24" width="176" height="48"></rect><g class="label" style="" transform="translate(-64, -12)"><rect></rect><foreignObject width="128" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>成员调用协作工具</p></span></div></foreignObject></g></g></g></g></g></svg><figcaption>图 1 当前源码的来源投递与执行主链</figcaption></figure>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>模块</th>
+<th>主要文件</th>
+<th>当前职责</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>服务与接口</td>
+<td><code>server/index.ts</code>、<code>collaboration/http.ts</code></td>
+<td>装配服务、提供业务命令与查询、通过 SSE 更新工作台。</td>
+</tr>
+<tr>
+<td>共享模型</td>
+<td><code>shared/collaboration.ts</code></td>
+<td>定义账户、成员、会话、来源、投递、执行、回复及领域协议。</td>
+</tr>
+<tr>
+<td>成员和工作区</td>
+<td><code>workbench.ts</code>、<code>account-discovery.ts</code></td>
+<td>配置成员、账户、模型、附件与工作区授权，解析本轮有效配置。</td>
+</tr>
+<tr>
+<td>路由</td>
+<td><code>routing.ts</code></td>
+<td>根据显式点名、偏好及有效历史选择目标，与忙闲调度分开。</td>
+</tr>
+<tr>
+<td>持久调度内核</td>
+<td><code>store.ts</code></td>
+<td>原子领取、执行绑定、输入冻结、终态、A2A、失败回报、取消和恢复。</td>
+</tr>
+<tr>
+<td>连续协作</td>
+<td><code>cooperation.ts</code></td>
+<td>队列顺序、优先级、撤回、退避、待办归并、活动追加和多人征询。</td>
+</tr>
+<tr>
+<td>执行驱动</td>
+<td><code>engine.ts</code></td>
+<td>周期扫描和即时推进，调用承载，分发工具调用，处理取消与结果。</td>
+</tr>
+<tr>
+<td>上下文和原生续接</td>
+<td><code>context.ts</code>、<code>continuity.ts</code>、<code>runtime-session.ts</code></td>
+<td>组装可见输入，记录摘要，按身份和历史证据决定新建或续接。</td>
+</tr>
+<tr>
+<td>运行时和核查</td>
+<td><code>runtime*.ts</code>、<code>inspection.ts</code></td>
+<td>对接 Codex、Claude Code、Hermes 和两类 API，提供能力与准确执行观察。</td>
+</tr>
+<tr>
+<td>普通任务</td>
+<td><code>tasks.ts</code></td>
+<td>管理任务、负责人、执行绑定和正式交接。</td>
+</tr>
+<tr>
+<td>产物和交互</td>
+<td><code>artifacts.ts</code>、<code>interactions.ts</code></td>
+<td>产物版本、审批、受管作业、评审及用户问题或权限请求。</td>
+</tr>
+<tr>
+<td>跨会话和专用责任</td>
+<td><code>cross.ts</code>、<code>actions.ts</code></td>
+<td>管理准确端点授权、跨会话消息、Action 候选、退回和条件唤醒。</td>
+</tr>
+<tr>
+<td>可见性和记忆</td>
+<td><code>visibility.ts</code>、<code>memory.ts</code>、<code>history-import.ts</code></td>
+<td>私聊、选段、分支、长期记忆、词法检索和既有 CLI 历史导入。</td>
+</tr>
+<tr>
+<td>项目工作</td>
+<td><code>project-*</code></td>
+<td>项目授权与隔离执行、文件评审、依赖与测试、退修复验、网页、预览、导出及 Git 交付。</td>
+</tr>
+<tr>
+<td>工作台</td>
+<td><code>web/CollaborationApp.tsx</code> 及各面板</td>
+<td>提供聊天、状态、责任、项目和配置入口；实际调度规则在后端。</td>
+</tr>
+</tbody></table></div>
+<p>几个关键对象必须分别理解：<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/shared/collaboration.ts#L135">S02</a></p>
+<ul>
+<li><code>SourceWork</code>：一份需要处理的输入，可来自用户、A2A、任务或条件唤醒。</li>
+<li><code>Delivery</code>：该输入对某名成员的投递责任。</li>
+<li><code>DispatchBatch</code>：本次共同领取的成员集合，保存串行或并行模式和历史截止点。</li>
+<li><code>Invocation</code>：某名成员的一次准确执行。</li>
+<li><code>Response</code>：该执行的输出，以及它承接的来源集合。</li>
+<li><code>Consumption</code>：关联来源、成员投递和准确回复的承接回执，区分初始输入、工具读取和活动追加。</li>
+</ul>
+<p><strong>投递已承接不代表承载已接受，也不代表任务完成。</strong> 批次创建时就可能记录 Consumption，而 Invocation 仍为 <code>prepared</code>，接受状态为 <code>unknown</code>。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L521">S03</a></p>
+<h2 id="section-3">3 当前状态机的实际模式</h2>
+<p>当前模式是多个领域状态机协同，状态转换由显式命令和运行证据触发，使用 SQLite 事务保存，再由周期对账推进。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L259">S01</a></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>对象或维度</th>
+<th>当前状态</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>来源绑定</td>
+<td><code>unresolved / bound</code></td>
+</tr>
+<tr>
+<td>Delivery</td>
+<td><code>pending / held / consumed / withdrawn</code></td>
+</tr>
+<tr>
+<td>Invocation</td>
+<td><code>prepared / running / succeeded / failed / interrupted / cancel_requested / cancelled</code></td>
+</tr>
+<tr>
+<td>承载接受</td>
+<td><code>unknown / accepted / not_accepted</code></td>
+</tr>
+<tr>
+<td>执行退出</td>
+<td><code>unknown / confirmed</code></td>
+</tr>
+<tr>
+<td>普通 Task</td>
+<td><code>todo / doing / blocked / done</code>，另有冻结、降级和放弃等处置记录</td>
+</tr>
+<tr>
+<td>Task Handoff</td>
+<td><code>waiting / applied / cancelled / refused</code></td>
+</tr>
+<tr>
+<td>Action</td>
+<td><code>preparing / queued / active / candidate / waiting / returning / replaceable / completed / cancelled / blocked</code></td>
+</tr>
+<tr>
+<td>Action 等待</td>
+<td><code>waiting / ready / fired / expired / cancelled</code></td>
+</tr>
+<tr>
+<td>产物评审</td>
+<td><code>pending / submitted / expired / stale / cancelled</code></td>
+</tr>
+</tbody></table></div>
+<p>执行结果、接受和退出相互独立。成员占用的释放要求执行达到终态，并且退出已经确认；单独看到 <code>succeeded</code> 不足以证明资源释放。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L501">S05</a></p>
+<p>正式任务交接先保存 <code>waiting</code>，将新投递置为 <code>held</code>；核对原责任版本、来源、授权和准确执行退出后，才在事务内切换负责人并释放新投递。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/tasks.ts#L190">S09</a></p>
+<p>引擎每 500ms 及相关业务变化后推进工作。它调用任务、Action、产物和协作服务的对账逻辑，扫描可执行来源。业务表保存当前状态，事件表保存审计和订阅所需事件；提交后再通知订阅者。请求 ID 与内容摘要用于命令幂等。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L259">S01</a></p>
+<p>已有机制较重视准确执行身份、取消保护、资源释放和重复派工防护。通用责任闭环的缺口主要在于：<strong>应当提交结果或安排下一步的 Agent，没有完成这项义务时，平台缺少统一的自动跟进路径。</strong></p>
+<h2 id="section-4">4 A2A 与责任传导的源码结论</h2>
+<h3>4.1 普通 A2A 的发起者</h3>
+<p>执行中的 Agent 调用 <code>collaboration_request</code>，平台通过准确 <code>invocationId</code> 绑定发起成员和原执行，创建新的来源及投递。发起身份不由正文声明。一次请求 1–2 个其他成员，默认协作深度上限为 8，另有单执行请求数量和相同内容往返防护。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L695">S07</a></p>
+<p>普通 A2A 协助不会自动改变普通 Task 的负责人。普通成功不会自动唤回请求者；具备准确调用与消费证明的执行失败，会生成失败回报来源。专用项目退修流程也会由平台根据证据生成 A2A 来源，因此“A2A 总由模型主动调用”只适用于普通请求路径。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/project-revisions.ts#L94">S08</a></p>
+<h3>4.2 Claude 说需要 Codex 修复的情况</h3>
+<p>如果 Claude 正常完成评审，在正文中写“发现问题，需要 Codex 修复”，该轮执行通常仍为 <code>succeeded</code>。这段文字本身不会生成修复委托，也不会触发仅针对 <code>failed</code> 执行的普通 A2A 失败回报。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L738">S08</a></p>
+<p>普通串行成功回复在满足条件时，可以通过行首 <code>@成员</code> 触发文字接力；并行批次会抑制这种接力。专用项目评审和项目修订执行被排除在普通文字接力之外，写了 <code>@Codex</code> 也不能据此保证项目退修。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L738">S08</a></p>
+<h3>4.3 已有专用退修路径</h3>
+<p>现有项目退修要求用户原始委托明确启用“有问题继续改”，绑定原作者和评审者，取得受支持检查的失败命令、退出码、版本快照等回执，并核对双方正常退出和授权。平台随后派回原作者；作者在新版本自测通过后，再交原评审者复验。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/project-revisions.ts#L94">S11</a></p>
+<p>只有静态代码审查文字、没有符合条件的失败检查时，不会触发这条退修。已有测试明确覆盖“评审说请继续改，但没有失败测试回执”的不派工行为。当前复验记录 <code>passed / failed / unverified</code>，不会无限自动修到通过。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/tests/collaboration-project-review.test.ts#L367">S12</a></p>
+<h3>4.4 已有诊断及其边界</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>机制</th>
+<th>已有行为</th>
+<th>当前边界</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Task 正式交接</td>
+<td>校验版本和退出证据后应用交接</td>
+<td>需要先有明确交接请求。</td>
+</tr>
+<tr>
+<td>Task 责任投影</td>
+<td>可标记任务未完成却无执行承接的 <code>attention / void</code></td>
+<td>主要提供诊断，没有通用自动补交。</td>
+</tr>
+<tr>
+<td>Action 对账</td>
+<td>活动执行退出但无候选时转为 <code>replaceable</code></td>
+<td>等待明确后续，没有自动要求原成员补交。</td>
+</tr>
+<tr>
+<td>产物评审</td>
+<td>要求 <code>review_submit</code> 提交结论</td>
+<td>缺失时可能保持待提交，最后到期或失效。</td>
+</tr>
+<tr>
+<td>项目退修</td>
+<td>在特定失败检查条件下推进</td>
+<td>尚未覆盖任意审查意见和所有责任节点。</td>
+</tr>
+</tbody></table></div>
+<p>以上分别见任务、Action 和产物评审实现。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/actions.ts#L152">S09</a><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/artifacts.ts#L199">S13</a></p>
+<h2 id="section-5">5 方案演进与已调整的方向</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>讨论阶段</th>
+<th>当时提出的思路</th>
+<th>归档时的处理</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>从研发缺口入手</td>
+<td>增加交付契约、结构化结果、有限补交、状态机和验收</td>
+<td>保留为通用基础能力的设计候选。</td>
+</tr>
+<tr>
+<td>用狼人杀检验</td>
+<td>增加专用游戏控制器管理身份、阶段及结算</td>
+<td>用户明确反对，不作为最终架构方向。</td>
+</tr>
+<tr>
+<td>收敛通用运行时</td>
+<td>将角色、状态、义务、收集和转换表达为任务协议</td>
+<td>保留，但需避免要求所有任务预先定义完整流程。</td>
+</tr>
+<tr>
+<td>明确 LLM 为大脑</td>
+<td>让团队动态规划、协商、判断和调整，平台承载决定</td>
+<td>作为最终顶层定位。</td>
+</tr>
+</tbody></table></div>
+<p>专用游戏控制器的提议曾用于解释当时缺少的能力，用户随后指出其违背平台泛化原则。后续设计不得把这个历史提议误写成已确认需求，也不得以同样方式为每类任务增加专用闭环控制器。</p>
+<h2 id="section-6">6 用户明确的架构原则与平台定位</h2>
+<p>三项硬约束保持原义：所有场景共用交付、等待、校验、补交和恢复机制；平台适配所有任务类型；调度核心不增加针对特定场景的特殊分支。</p>
+<p>“适配所有任务类型”的工程含义是，任务类型不受调度内核限制。具体知识、判断、规则和工具能力由 Agent、任务约定及授权能力提供。能力暂不可用时，实例保留责任并明确等待或受阻，不能虚构完成。</p>
+<p>平台应承担 LLM 团队的组织与执行基础设施。LLM 负责理解、推理、协商和决策；平台让目标、承诺和决定准确传递、持续可追踪，并在中断后接续。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>工作</th>
+<th>LLM 团队负责</th>
+<th>平台负责</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>目标</td>
+<td>理解意图、识别歧义、提出完成依据</td>
+<td>保存原始目标、约束、授权及有效变更。</td>
+</tr>
+<tr>
+<td>计划</td>
+<td>分解、选择方法、调整优先级</td>
+<td>保存版本、关联和依赖。</td>
+</tr>
+<tr>
+<td>组织</td>
+<td>分工、征询、协商、委托专家和重新安排</td>
+<td>维护准确身份、责任及权限。</td>
+</tr>
+<tr>
+<td>结果</td>
+<td>评审、质疑、验证和决定是否继续</td>
+<td>提供版本、事实、来源与执行证据。</td>
+</tr>
+<tr>
+<td>异常</td>
+<td>判断换方法、重试、换成员或受阻</td>
+<td>发现遗漏、中断和超时，恢复准确现场。</td>
+</tr>
+<tr>
+<td>完成</td>
+<td>获授权成员或条件确认目标满足</td>
+<td>核对验收权限、结果绑定和必要退出证据。</td>
+</tr>
+</tbody></table></div>
+<p>团队可以形成临时负责人、执行者、评审者和专家；不要求所有会话永久存在一个固定协调者。平台不能通过普通文字改写权威事实和授权。</p>
+<figure class="diagram" aria-label="流程图 2"><svg id="discussion-diagram-1" width="100%" xmlns="http://www.w3.org/2000/svg" class="flowchart" style="max-width: 601.125px;" viewBox="0 0 601.125 670" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#discussion-diagram-1{font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:16px;fill:#173b42;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#discussion-diagram-1 .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#discussion-diagram-1 .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#discussion-diagram-1 .error-icon{fill:#f3f4f6;}#discussion-diagram-1 .error-text{fill:#0c0b09;stroke:#0c0b09;}#discussion-diagram-1 .edge-thickness-normal{stroke-width:1px;}#discussion-diagram-1 .edge-thickness-thick{stroke-width:3.5px;}#discussion-diagram-1 .edge-pattern-solid{stroke-dasharray:0;}#discussion-diagram-1 .edge-thickness-invisible{stroke-width:0;fill:none;}#discussion-diagram-1 .edge-pattern-dashed{stroke-dasharray:3;}#discussion-diagram-1 .edge-pattern-dotted{stroke-dasharray:2;}#discussion-diagram-1 .marker{fill:#66858b;stroke:#66858b;}#discussion-diagram-1 .marker.cross{stroke:#66858b;}#discussion-diagram-1 svg{font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:16px;}#discussion-diagram-1 p{margin:0;}#discussion-diagram-1 .label{font-family:Microsoft YaHei,Segoe UI,sans-serif;color:#173b42;}#discussion-diagram-1 .cluster-label text{fill:#0c0b09;}#discussion-diagram-1 .cluster-label span{color:#0c0b09;}#discussion-diagram-1 .cluster-label span p{background-color:transparent;}#discussion-diagram-1 .label text,#discussion-diagram-1 span{fill:#173b42;color:#173b42;}#discussion-diagram-1 .node rect,#discussion-diagram-1 .node circle,#discussion-diagram-1 .node ellipse,#discussion-diagram-1 .node polygon,#discussion-diagram-1 .node path{fill:#edf4f4;stroke:#759ba1;stroke-width:1px;}#discussion-diagram-1 .rough-node .label text,#discussion-diagram-1 .node .label text,#discussion-diagram-1 .image-shape .label,#discussion-diagram-1 .icon-shape .label{text-anchor:middle;}#discussion-diagram-1 .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#discussion-diagram-1 .rough-node .label,#discussion-diagram-1 .node .label,#discussion-diagram-1 .image-shape .label,#discussion-diagram-1 .icon-shape .label{text-align:center;}#discussion-diagram-1 .node.clickable{cursor:pointer;}#discussion-diagram-1 .root .anchor path{fill:#66858b!important;stroke-width:0;stroke:#66858b;}#discussion-diagram-1 .arrowheadPath{fill:#000000;}#discussion-diagram-1 .edgePath .path{stroke:#66858b;stroke-width:2.0px;}#discussion-diagram-1 .flowchart-link{stroke:#66858b;fill:none;}#discussion-diagram-1 .edgeLabel{background-color:#ffffff;text-align:center;}#discussion-diagram-1 .edgeLabel p{background-color:#ffffff;}#discussion-diagram-1 .edgeLabel rect{opacity:0.5;background-color:#ffffff;fill:#ffffff;}#discussion-diagram-1 .labelBkg{background-color:rgba(255, 255, 255, 0.5);}#discussion-diagram-1 .cluster rect{fill:#f3f4f6;stroke:hsl(220, 0%, 85.8823529412%);stroke-width:1px;}#discussion-diagram-1 .cluster text{fill:#0c0b09;}#discussion-diagram-1 .cluster span{color:#0c0b09;}#discussion-diagram-1 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:12px;background:#f3f4f6;border:1px solid hsl(220, 0%, 85.8823529412%);border-radius:2px;pointer-events:none;z-index:100;}#discussion-diagram-1 .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#173b42;}#discussion-diagram-1 rect.text{fill:none;stroke-width:0;}#discussion-diagram-1 .icon-shape,#discussion-diagram-1 .image-shape{background-color:#ffffff;text-align:center;}#discussion-diagram-1 .icon-shape p,#discussion-diagram-1 .image-shape p{background-color:#ffffff;padding:2px;}#discussion-diagram-1 .icon-shape rect,#discussion-diagram-1 .image-shape rect{opacity:0.5;background-color:#ffffff;fill:#ffffff;}#discussion-diagram-1 .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#discussion-diagram-1 .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#discussion-diagram-1 :root{--mermaid-font-family:Microsoft YaHei,Segoe UI,sans-serif;}</style><g><marker id="discussion-diagram-1_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-1_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-1_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="discussion-diagram-1_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="discussion-diagram-1_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-1_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"><path d="M333.344,56L333.344,70L333.344,80" id="L_U_A_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_U_A_0" data-points="W3sieCI6MzMzLjM0Mzc1LCJ5Ijo1Nn0seyJ4IjozMzMuMzQzNzUsInkiOjcwfSx7IngiOjMzMy4zNDM3NSwieSI6ODR9XQ==" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M333.344,132L333.344,146L333.344,156" id="L_A_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_B_0" data-points="W3sieCI6MzMzLjM0Mzc1LCJ5IjoxMzJ9LHsieCI6MzMzLjM0Mzc1LCJ5IjoxNDZ9LHsieCI6MzMzLjM0Mzc1LCJ5IjoxNjB9XQ==" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M273.975,208L239.344,222L239.344,232" id="L_B_P_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_P_0" data-points="W3sieCI6MjczLjk3NTMyODk0NzM2ODQ0LCJ5IjoyMDh9LHsieCI6MjM5LjM0Mzc1LCJ5IjoyMjJ9LHsieCI6MjM5LjM0Mzc1LCJ5IjoyMzZ9XQ==" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M159.903,284L113.563,298L113.563,320" id="L_P_E_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_P_E_0" data-points="W3sieCI6MTU5LjkwMjk2MDUyNjMxNTc4LCJ5IjoyODR9LHsieCI6MTEzLjU2MjUsInkiOjI5OH0seyJ4IjoxMTMuNTYyNSwieSI6MzI0fV0=" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M113.563,372L113.563,410.5L113.563,433" id="L_E_F_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_E_F_0" data-points="W3sieCI6MTEzLjU2MjUsInkiOjM3Mn0seyJ4IjoxMTMuNTYyNSwieSI6NDEwLjV9LHsieCI6MTEzLjU2MjUsInkiOjQzN31d" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M113.563,485L113.563,499L262.771,521.539" id="L_F_J_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_F_J_0" data-points="W3sieCI6MTEzLjU2MjUsInkiOjQ4NX0seyJ4IjoxMTMuNTYyNSwieSI6NDk5fSx7IngiOjI2Ni43MjY1NjI1LCJ5Ijo1MjIuMTM2MzM1NDAzNzI2N31d" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M463.523,517.111L553.125,499L553.125,461L553.125,410.5L553.125,348L553.125,298L553.125,260L553.125,222L441.285,202.663" id="L_J_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_J_B_0" data-points="W3sieCI6NDYzLjUyMzQzNzUsInkiOjUxNy4xMTA5NTQxMjIzNDA0fSx7IngiOjU1My4xMjUsInkiOjQ5OX0seyJ4Ijo1NTMuMTI1LCJ5Ijo0NjF9LHsieCI6NTUzLjEyNSwieSI6NDEwLjV9LHsieCI6NTUzLjEyNSwieSI6MzQ4fSx7IngiOjU1My4xMjUsInkiOjI5OH0seyJ4Ijo1NTMuMTI1LCJ5IjoyNjB9LHsieCI6NTUzLjEyNSwieSI6MjIyfSx7IngiOjQzNy4zNDM3NSwieSI6MjAxLjk4MTUxNTcxMTY0NTF9XQ==" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M365.125,561L365.125,587.5L365.125,610" id="L_J_C_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_J_C_0" data-points="W3sieCI6MzY1LjEyNSwieSI6NTYxfSx7IngiOjM2NS4xMjUsInkiOjU4Ny41fSx7IngiOjM2NS4xMjUsInkiOjYxNH1d" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M318.785,284L365.125,298L365.125,308" id="L_P_W_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_P_W_0" data-points="W3sieCI6MzE4Ljc4NDUzOTQ3MzY4NDIsInkiOjI4NH0seyJ4IjozNjUuMTI1LCJ5IjoyOTh9LHsieCI6MzY1LjEyNSwieSI6MzEyfV0=" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M365.125,384L365.125,410.5L365.125,433" id="L_W_R_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_W_R_0" data-points="W3sieCI6MzY1LjEyNSwieSI6Mzg0fSx7IngiOjM2NS4xMjUsInkiOjQxMC41fSx7IngiOjM2NS4xMjUsInkiOjQzN31d" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path><path d="M365.125,485L365.125,499L365.125,509" id="L_R_J_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_R_J_0" data-points="W3sieCI6MzY1LjEyNSwieSI6NDg1fSx7IngiOjM2NS4xMjUsInkiOjQ5OX0seyJ4IjozNjUuMTI1LCJ5Ijo1MTN9XQ==" marker-end="url(#discussion-diagram-1_flowchart-v2-pointEnd)"></path></g><g class="edgeLabels"><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g class="edgeLabel"><g class="label" data-id="L_U_A_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_A_B_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_B_P_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_P_E_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_E_F_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_F_J_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel" transform="translate(553.125, 348)"><g class="label" data-id="L_J_B_0" transform="translate(-43, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="86" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">继续或调整</tspan></tspan></text></g></g></g><g class="edgeLabel" transform="translate(365.125, 587.5)"><g class="label" data-id="L_J_C_0" transform="translate(-51, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="102" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">满足完成标准</tspan></tspan></text></g></g></g><g class="edgeLabel"><g class="label" data-id="L_P_W_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel" transform="translate(365.125, 410.5)"><g class="label" data-id="L_W_R_0" transform="translate(-83, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="166" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">遗漏、停滞或条件到达</tspan></tspan></text></g></g></g><g class="edgeLabel"><g class="label" data-id="L_R_J_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g></g><g class="nodes"><g class="node default" id="flowchart-U-0" transform="translate(333.34375, 32)"><rect class="basic label-container" style="" x="-80" y="-24" width="160" height="48"></rect><g class="label" style="" transform="translate(-56, -12)"><rect></rect><foreignObject width="112" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>用户目标与授权</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-A-1" transform="translate(333.34375, 108)"><rect class="basic label-container" style="" x="-98.3984375" y="-24" width="196.796875" height="48"></rect><g class="label" style="" transform="translate(-74.3984375, -12)"><rect></rect><foreignObject width="148.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>LLM 团队理解与协商</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-B-3" transform="translate(333.34375, 184)"><rect class="basic label-container" style="" x="-104" y="-24" width="208" height="48"></rect><g class="label" style="" transform="translate(-80, -12)"><rect></rect><foreignObject width="160" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>形成计划、职责和承诺</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-P-5" transform="translate(239.34375, 260)"><rect class="basic label-container" style="" x="-80" y="-24" width="160" height="48"></rect><g class="label" style="" transform="translate(-56, -12)"><rect></rect><foreignObject width="112" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>平台登记并调度</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-E-7" transform="translate(113.5625, 348)"><rect class="basic label-container" style="" x="-105.5625" y="-24" width="211.125" height="48"></rect><g class="label" style="" transform="translate(-81.5625, -12)"><rect></rect><foreignObject width="163.125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Agent 自主执行与协作</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-F-9" transform="translate(113.5625, 461)"><rect class="basic label-container" style="" x="-104" y="-24" width="208" height="48"></rect><g class="label" style="" transform="translate(-80, -12)"><rect></rect><foreignObject width="160" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>形成结果、事实和证据</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-J-11" transform="translate(365.125, 537)"><rect class="basic label-container" style="" x="-98.3984375" y="-24" width="196.796875" height="48"></rect><g class="label" style="" transform="translate(-74.3984375, -12)"><rect></rect><foreignObject width="148.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>LLM 团队评估与判断</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-C-15" transform="translate(365.125, 638)"><rect class="basic label-container" style="" x="-80" y="-24" width="160" height="48"></rect><g class="label" style="" transform="translate(-56, -12)"><rect></rect><foreignObject width="112" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>按授权完成验收</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-W-17" transform="translate(365.125, 348)"><rect class="basic label-container" style="" x="-124" y="-36" width="248" height="72"></rect><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>平台持续检查责任和运行状态</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-R-19" transform="translate(365.125, 461)"><rect class="basic label-container" style="" x="-97.5625" y="-24" width="195.125" height="48"></rect><g class="label" style="" transform="translate(-73.5625, -12)"><rect></rect><foreignObject width="147.125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>唤醒准确责任 Agent</p></span></div></foreignObject></g></g></g></g></g></svg><figcaption>图 2 LLM 团队判断与平台责任传导</figcaption></figure>
+
+<h2 id="section-7">7 通用协作模型的设计候选</h2>
+<p>以下是下一步细化所需的概念，不等于已经确定数据库结构或工具名称。</p>
+<h3>7.1 目标 工作与责任承诺</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>对象</th>
+<th>表达内容</th>
+<th>防止的问题</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>目标</td>
+<td>为什么做、要达到什么、受哪些约束</td>
+<td>执行很多动作却偏离用户意图。</td>
+</tr>
+<tr>
+<td>工作</td>
+<td>当前做什么、依赖什么、产生什么结果</td>
+<td>计划无法拆分、汇合或动态调整。</td>
+</tr>
+<tr>
+<td>责任承诺</td>
+<td>谁需要交付、跟进或作出判断</td>
+<td>一段回复结束后责任消失。</td>
+</tr>
+</tbody></table></div>
+<p>一个目标可以关联多个工作项。普通协助、阶段执行和正式负责人变更分别记录；评审通常不需要反复切换 Task 的负责人。协商和承诺是组织行为，不给每次已有正式交接强加额外“接单确认”。</p>
+<h3>7.2 六类通用基础能力</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>能力</th>
+<th>统一职责</th>
+<th>现有基础及扩展方向</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>协作实例</td>
+<td>目标、当前约定、状态、预算、结束条件及事件历史</td>
+<td>关联现有会话、Task 或 Action，具体关联模型待定。</td>
+</tr>
+<tr>
+<td>受控信息空间</td>
+<td>按成员、分组和观察者权限提供材料</td>
+<td>扩展 visibility，支持公共与本人私有信息组合。</td>
+</tr>
+<tr>
+<td>交付义务</td>
+<td>谁需要在何种条件下提交什么</td>
+<td>引用准确 Invocation、来源和版本，复用投递。</td>
+</tr>
+<tr>
+<td>收集与等待</td>
+<td>等待全部、指定数量、首个有效结果或事件</td>
+<td>复用条件等待，补充持久收集和汇合规则。</td>
+</tr>
+<tr>
+<td>校验与提交</td>
+<td>检查身份、版本、权限及结果条件，原子更新</td>
+<td>复用事务、幂等和运行证据。</td>
+</tr>
+<tr>
+<td>续跑与恢复</td>
+<td>唤醒、补交、有限恢复、取消和超限处理</td>
+<td>接入 engine 对账循环，防止工作静默停住。</td>
+</tr>
+</tbody></table></div>
+<h3>7.3 协议承载团队约定</h3>
+<p>协议可以从首轮 Agent 对任务的理解逐步形成，在授权内增加子工作、参与者、等待条件和后续安排。允许串行、并行、循环、分支和动态组织，不要求所有任务先画成固定 DAG。</p>
+<p>协议变更需要保存版本和原因，核对提出者权限，保护已开始执行的冻结输入。改变用户原目标或扩大授权，必须遵守原授权边界。</p>
+<p>自然交流保持丰富语义。具体委托、等待、交付、验收和责任变化通过轻量操作登记；不要求每条消息都成为固定 JSON 表单。</p>
+<h3>7.4 三种校验责任</h3>
+<ul>
+<li>结构校验：提交格式、成员身份、版本、目标、重复及必要字段。</li>
+<li>可执行约束：获准次数、状态转换、收集条件和已表达的机械规则。</li>
+<li>语义判断：评审是否充分、问题是否成立、下一步是否合理，由获授权的 Agent 判断并记录依据。</li>
+</ul>
+<p>结构合法不代表结论正确。复杂语义可以通过独立评审、异议和复验加强；多名 Agent 一致表态也需要保留证据来源。</p>
+<h2 id="section-8">8 目标看护与责任补交</h2>
+<p>建议建立一个通用的不变量：</p>
+<blockquote>
+<p>每个尚未结束的受管协作实例，都必须具有可执行的工作、明确的等待条件，或可解释的阻塞状态。</p>
+</blockquote>
+<p>如果目标未结束，但已经没有活动工作、等待条件或明确阻塞，平台应识别责任悬空，提供当前事实并唤醒准确责任 Agent，由其决定继续执行、补充验证、调整分工、登记等待或明确结束。</p>
+<p>这项“目标看护”只负责发现过程缺口和恢复思考入口。平台不依据一段普通自然语言擅自编造业务下一步。</p>
+<figure class="diagram" aria-label="流程图 3"><svg id="discussion-diagram-2" width="100%" xmlns="http://www.w3.org/2000/svg" class="flowchart" style="max-width: 771.801025390625px;" viewBox="0 0 771.801025390625 709.734375" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#discussion-diagram-2{font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:16px;fill:#173b42;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#discussion-diagram-2 .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#discussion-diagram-2 .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#discussion-diagram-2 .error-icon{fill:#f3f4f6;}#discussion-diagram-2 .error-text{fill:#0c0b09;stroke:#0c0b09;}#discussion-diagram-2 .edge-thickness-normal{stroke-width:1px;}#discussion-diagram-2 .edge-thickness-thick{stroke-width:3.5px;}#discussion-diagram-2 .edge-pattern-solid{stroke-dasharray:0;}#discussion-diagram-2 .edge-thickness-invisible{stroke-width:0;fill:none;}#discussion-diagram-2 .edge-pattern-dashed{stroke-dasharray:3;}#discussion-diagram-2 .edge-pattern-dotted{stroke-dasharray:2;}#discussion-diagram-2 .marker{fill:#66858b;stroke:#66858b;}#discussion-diagram-2 .marker.cross{stroke:#66858b;}#discussion-diagram-2 svg{font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:16px;}#discussion-diagram-2 p{margin:0;}#discussion-diagram-2 .label{font-family:Microsoft YaHei,Segoe UI,sans-serif;color:#173b42;}#discussion-diagram-2 .cluster-label text{fill:#0c0b09;}#discussion-diagram-2 .cluster-label span{color:#0c0b09;}#discussion-diagram-2 .cluster-label span p{background-color:transparent;}#discussion-diagram-2 .label text,#discussion-diagram-2 span{fill:#173b42;color:#173b42;}#discussion-diagram-2 .node rect,#discussion-diagram-2 .node circle,#discussion-diagram-2 .node ellipse,#discussion-diagram-2 .node polygon,#discussion-diagram-2 .node path{fill:#edf4f4;stroke:#759ba1;stroke-width:1px;}#discussion-diagram-2 .rough-node .label text,#discussion-diagram-2 .node .label text,#discussion-diagram-2 .image-shape .label,#discussion-diagram-2 .icon-shape .label{text-anchor:middle;}#discussion-diagram-2 .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#discussion-diagram-2 .rough-node .label,#discussion-diagram-2 .node .label,#discussion-diagram-2 .image-shape .label,#discussion-diagram-2 .icon-shape .label{text-align:center;}#discussion-diagram-2 .node.clickable{cursor:pointer;}#discussion-diagram-2 .root .anchor path{fill:#66858b!important;stroke-width:0;stroke:#66858b;}#discussion-diagram-2 .arrowheadPath{fill:#000000;}#discussion-diagram-2 .edgePath .path{stroke:#66858b;stroke-width:2.0px;}#discussion-diagram-2 .flowchart-link{stroke:#66858b;fill:none;}#discussion-diagram-2 .edgeLabel{background-color:#ffffff;text-align:center;}#discussion-diagram-2 .edgeLabel p{background-color:#ffffff;}#discussion-diagram-2 .edgeLabel rect{opacity:0.5;background-color:#ffffff;fill:#ffffff;}#discussion-diagram-2 .labelBkg{background-color:rgba(255, 255, 255, 0.5);}#discussion-diagram-2 .cluster rect{fill:#f3f4f6;stroke:hsl(220, 0%, 85.8823529412%);stroke-width:1px;}#discussion-diagram-2 .cluster text{fill:#0c0b09;}#discussion-diagram-2 .cluster span{color:#0c0b09;}#discussion-diagram-2 div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:12px;background:#f3f4f6;border:1px solid hsl(220, 0%, 85.8823529412%);border-radius:2px;pointer-events:none;z-index:100;}#discussion-diagram-2 .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#173b42;}#discussion-diagram-2 rect.text{fill:none;stroke-width:0;}#discussion-diagram-2 .icon-shape,#discussion-diagram-2 .image-shape{background-color:#ffffff;text-align:center;}#discussion-diagram-2 .icon-shape p,#discussion-diagram-2 .image-shape p{background-color:#ffffff;padding:2px;}#discussion-diagram-2 .icon-shape rect,#discussion-diagram-2 .image-shape rect{opacity:0.5;background-color:#ffffff;fill:#ffffff;}#discussion-diagram-2 .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#discussion-diagram-2 .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#discussion-diagram-2 :root{--mermaid-font-family:Microsoft YaHei,Segoe UI,sans-serif;}</style><g><marker id="discussion-diagram-2_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-2_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-2_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="discussion-diagram-2_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></circle></marker><marker id="discussion-diagram-2_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><marker id="discussion-diagram-2_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"></path></marker><g class="root"><g class="clusters"></g><g class="edgePaths"><path d="M406.934,56L406.934,70L406.934,80" id="L_A_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_B_0" data-points="W3sieCI6NDA2LjkzMzU5Mzc1LCJ5Ijo1Nn0seyJ4Ijo0MDYuOTMzNTkzNzUsInkiOjcwfSx7IngiOjQwNi45MzM1OTM3NSwieSI6ODR9XQ==" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M286.934,128.004L104,158.5L104,264.867" id="L_B_C_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_C_0" data-points="W3sieCI6Mjg2LjkzMzU5Mzc1LCJ5IjoxMjguMDA0Mzg0MjExNjgwMDV9LHsieCI6MTA0LCJ5IjoxNTguNX0seyJ4IjoxMDQsInkiOjI2OC44NjcxODc1fV0=" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M357.064,132L302,158.5L302,264.867" id="L_B_D_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_D_0" data-points="W3sieCI6MzU3LjA2NDE2MzA1NjkzMDcsInkiOjEzMn0seyJ4IjozMDIsInkiOjE1OC41fSx7IngiOjMwMiwieSI6MjY4Ljg2NzE4NzV9XQ==" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M456.803,132L511.867,158.5L511.867,181" id="L_B_E_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_E_0" data-points="W3sieCI6NDU2LjgwMzAyNDQ0MzA2OTMsInkiOjEzMn0seyJ4Ijo1MTEuODY3MTg3NSwieSI6MTU4LjV9LHsieCI6NTExLjg2NzE4NzUsInkiOjE4NX1d" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M459.881,348.749L386.867,427.234L386.867,449.734" id="L_E_F_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_E_F_0" data-points="W3sieCI6NDU5Ljg4MTQzNDkxNzA5MDg3LCJ5IjozNDguNzQ4NjIyNDE3MDkwODd9LHsieCI6Mzg2Ljg2NzE4NzUsInkiOjQyNy4yMzQzNzV9LHsieCI6Mzg2Ljg2NzE4NzUsInkiOjQ1My43MzQzNzV9XQ==" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M386.867,525.734L386.867,539.734L386.867,549.734" id="L_F_G_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_F_G_0" data-points="W3sieCI6Mzg2Ljg2NzE4NzUsInkiOjUyNS43MzQzNzV9LHsieCI6Mzg2Ljg2NzE4NzUsInkiOjUzOS43MzQzNzV9LHsieCI6Mzg2Ljg2NzE4NzUsInkiOjU1My43MzQzNzV9XQ==" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M386.867,625.734L386.867,639.734L476.379,657.69" id="L_G_H_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_G_H_0" data-points="W3sieCI6Mzg2Ljg2NzE4NzUsInkiOjYyNS43MzQzNzV9LHsieCI6Mzg2Ljg2NzE4NzUsInkiOjYzOS43MzQzNzV9LHsieCI6NDgwLjMwMDc4MTI1LCJ5Ijo2NTguNDc2OTY3MDE5Nzk1OX1d" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M672.301,658.278L763.801,639.734L763.801,589.734L763.801,539.734L763.801,489.734L763.801,427.234L763.801,292.867L763.801,158.5L530.894,125.542" id="L_H_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_H_B_0" data-points="W3sieCI6NjcyLjMwMDc4MTI1LCJ5Ijo2NTguMjc4Mzc1fSx7IngiOjc2My44MDA3ODEyNSwieSI6NjM5LjczNDM3NX0seyJ4Ijo3NjMuODAwNzgxMjUsInkiOjU4OS43MzQzNzV9LHsieCI6NzYzLjgwMDc4MTI1LCJ5Ijo1MzkuNzM0Mzc1fSx7IngiOjc2My44MDA3ODEyNSwieSI6NDg5LjczNDM3NX0seyJ4Ijo3NjMuODAwNzgxMjUsInkiOjQyNy4yMzQzNzV9LHsieCI6NzYzLjgwMDc4MTI1LCJ5IjoyOTIuODY3MTg3NX0seyJ4Ijo3NjMuODAwNzgxMjUsInkiOjE1OC41fSx7IngiOjUyNi45MzM1OTM3NSwieSI6MTI0Ljk4MTEwNzI5MjE5MTE1fV0=" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path><path d="M563.853,348.749L636.867,427.234L636.867,461.734" id="L_E_I_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_E_I_0" data-points="W3sieCI6NTYzLjg1Mjk0MDA4MjkwOTEsInkiOjM0OC43NDg2MjI0MTcwOTA4N30seyJ4Ijo2MzYuODY3MTg3NSwieSI6NDI3LjIzNDM3NX0seyJ4Ijo2MzYuODY3MTg3NSwieSI6NDY1LjczNDM3NX1d" marker-end="url(#discussion-diagram-2_flowchart-v2-pointEnd)"></path></g><g class="edgeLabels"><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g><rect class="background" style="stroke: none"></rect></g><g class="edgeLabel"><g class="label" data-id="L_A_B_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel" transform="translate(104, 158.5)"><g class="label" data-id="L_B_C_0" transform="translate(-67, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="134" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">义务齐全且有后续</tspan></tspan></text></g></g></g><g class="edgeLabel" transform="translate(302, 158.5)"><g class="label" data-id="L_B_D_0" transform="translate(-74.5, -12.5)"><g><rect class="background" style="" x="-2" y="-3" width="149" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">目标已满足完成标准</tspan></tspan></text></g></g></g><g class="edgeLabel" transform="translate(511.8671875, 158.5)"><g class="label" data-id="L_B_E_0" transform="translate(-74.5, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="149" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">结果缺失或责任悬空</tspan></tspan></text></g></g></g><g class="edgeLabel" transform="translate(386.8671875, 427.234375)"><g class="label" data-id="L_E_F_0" transform="translate(-19, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="38" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">允许</tspan></tspan></text></g></g></g><g class="edgeLabel"><g class="label" data-id="L_F_G_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_G_H_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel"><g class="label" data-id="L_H_B_0" transform="translate(0, 0)"><text y="-10.1"><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"></tspan></text></g></g><g class="edgeLabel" transform="translate(636.8671875, 427.234375)"><g class="label" data-id="L_E_I_0" transform="translate(-35, -12.5)"><g><rect class="background" style="" x="-3" y="-3" width="70" height="25"></rect><text y="-10.1" style=""><tspan class="text-outer-tspan" x="0" y="-0.1em" dy="1.1em"><tspan font-style="normal" class="text-inner-tspan" font-weight="normal">暂不允许</tspan></tspan></text></g></g></g></g><g class="nodes"><g class="node default" id="flowchart-A-0" transform="translate(406.93359375, 32)"><rect class="basic label-container" style="" x="-112" y="-24" width="224" height="48"></rect><g class="label" style="" transform="translate(-88, -12)"><rect></rect><foreignObject width="176" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>本轮返回或相关事件到达</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-B-1" transform="translate(406.93359375, 108)"><rect class="basic label-container" style="" x="-120" y="-24" width="240" height="48"></rect><g class="label" style="" transform="translate(-96, -12)"><rect></rect><foreignObject width="192" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>检查已登记义务与目标状态</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-C-3" transform="translate(104, 292.8671875)"><rect class="basic label-container" style="" x="-96" y="-24" width="192" height="48"></rect><g class="label" style="" transform="translate(-72, -12)"><rect></rect><foreignObject width="144" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>继续既定调度或等待</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-D-5" transform="translate(302, 292.8671875)"><rect class="basic label-container" style="" x="-80" y="-24" width="160" height="48"></rect><g class="label" style="" transform="translate(-56, -12)"><rect></rect><foreignObject width="112" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>按授权进行验收</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-E-7" transform="translate(511.8671875, 292.8671875)"><polygon points="107.8671875,0 215.734375,-107.8671875 107.8671875,-215.734375 0,-107.8671875" class="label-container" transform="translate(-107.3671875, 107.8671875)"></polygon><g class="label" style="" transform="translate(-83.8671875, -12)"><rect></rect><foreignObject width="167.734375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>退出、授权和预算允许?</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-F-9" transform="translate(386.8671875, 489.734375)"><rect class="basic label-container" style="" x="-124" y="-36" width="248" height="72"></rect><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>唤醒准确责任 Agent 并提供事实</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-G-11" transform="translate(386.8671875, 589.734375)"><rect class="basic label-container" style="" x="-124" y="-36" width="248" height="72"></rect><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Agent 补交结果或提出后续安排</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-H-13" transform="translate(576.30078125, 677.734375)"><rect class="basic label-container" style="" x="-96" y="-24" width="192" height="48"></rect><g class="label" style="" transform="translate(-72, -12)"><rect></rect><foreignObject width="144" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>统一校验与原子登记</p></span></div></foreignObject></g></g><g class="node default" id="flowchart-I-17" transform="translate(636.8671875, 489.734375)"><rect class="basic label-container" style="" x="-104" y="-24" width="208" height="48"></rect><g class="label" style="" transform="translate(-80, -12)"><rect></rect><foreignObject width="160" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>核查、等待或明确阻塞</p></span></div></foreignObject></g></g></g></g></g></svg><figcaption>图 3 目标看护与责任补交的设计候选</figcaption></figure>
+
+<p>补交结果和重新执行业务工作分别管理。补交只要求补齐既有结论、证据或安排；重新修改项目、重跑检查等工作应有相应授权和独立预算。补交次数、业务修复轮数、超时和成本上限的具体默认值仍待确认，讨论中出现的“一次补交、一轮修复”仅是早期建议。</p>
+<p>原执行正常返回可以保持 <code>succeeded</code>，交付义务仍可处于未履行状态。补交通过新的准确执行承接，不覆盖原始结果。旧执行退出未知时，先核查或等待，不能以补交绕开占用保护。</p>
+<p>结果登记与后续派发需要一致性：满足释放条件时在事务内保存结果和唯一后续来源；尚未满足时保存待释放状态，再幂等推进。每个阶段、代次和有效提交要能关联唯一的后续工作，避免两个机制重复续跑。</p>
+<p>取消、撤权、成员不可用、材料过期或超限时，责任不消失。平台应明确展示当前责任人、缺失项、阻塞原因及可用处理方式。</p>
+<h2 id="section-9">9 拟人团队需要的基础能力</h2>
+<ol>
+<li><strong>动态组织。</strong> 成员在授权池内选择协作者，形成临时职责并根据新情况重新安排。</li>
+<li><strong>承诺连续。</strong> 自然交流中的关键工作安排可被准确登记，任务完成与责任变更有来源和证据。</li>
+<li><strong>正式等待。</strong> Agent 登记等什么、由谁继续、何时超时，平台持久监听，避免持续轮询和空转。</li>
+<li><strong>主动跟进。</strong> 平台发现停滞并恢复责任成员的思考机会，Agent 判断下一步。</li>
+<li><strong>有边界的共同记忆。</strong> 公共、个人和分组信息分别可控；事实、假设、判断和承诺保持区分。</li>
+<li><strong>异议与自检。</strong> 成员可以质疑结论、提供反证、请求独立评审，意见不同不被简单抹平。</li>
+<li><strong>组织经验积累。</strong> 复盘建议形成有来源、有版本、生效范围明确的知识或团队约定，可追溯与撤回；不据此宣称模型权重已经更新。</li>
+<li><strong>自主范围清晰。</strong> 在用户授权及预算内自主解决问题，超出范围时明确处理；验收权可授予角色或规则，不强制所有任务由用户逐轮确认。</li>
+</ol>
+<p>“无限逼近拟人智能团队”作为演进方向，通过可观察能力逐步检验：自主分工、有效协商、主动跟进、持续记忆、独立验证以及对交付结果负责。</p>
+<h2 id="section-10">10 两个场景对同一内核的检验</h2>
+<h3>10.1 研发评审</h3>
+<p>用户委托 Codex 修复并请 Claude 评审。Codex 实施并请求评审；Claude 发现问题但未登记处理安排。平台识别评审义务未履行，唤醒 Claude，附原委托、版本和已有意见。Claude 判断后提交修订请求；平台核对原作者、授权、退出和预算后派发。</p>
+<p>Codex 可以修复、提出异议、补充证据或寻求第三方意见，并登记相应等待。直到获授权验收者确认目标满足，或团队明确说明受阻原因，平台持续维护责任与下一步。</p>
+<p>无失败测试的静态代码问题也可成为有证据的修订理由，不能强行包装为测试失败。新版本必须有对应评审，旧版本通过结论不能批准新内容。</p>
+<h3>10.2 用户只旁观的狼人杀</h3>
+<p>当前源码支持多个成员及部分公开私聊隔离，但缺少将长期自动推进、秘密信息、行动收集和结算可靠组合起来的能力。普通成功不回唤，征询只汇总，深度限制也不适合作为整局持续运行机制。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/cooperation.ts#L144">S07</a></p>
+<p>秘密身份不能简单放入成员职责：同伴目录会包含职责片段。现有公开执行过滤未公开私聊，私聊又禁止若干跨范围协作工具，因此不能直接等同于“玩家持有私有身份并参与公开回合”的通用信息投影。<a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/visibility.ts#L45">S06</a></p>
+<p>最终方向以通用原语表达：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>狼人杀表达</th>
+<th>通用协作表达</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>玩家、主持、观众</td>
+<td>临时角色与权限。</td>
+</tr>
+<tr>
+<td>身份、存活状态、轮次</td>
+<td>按主体授权的状态与材料。</td>
+</tr>
+<tr>
+<td>发言、投票、行动</td>
+<td>带格式、期限和次数约束的交付义务。</td>
+</tr>
+<tr>
+<td>收齐行动</td>
+<td>持久收集条件。</td>
+</tr>
+<tr>
+<td>阶段变化与结算</td>
+<td>任务协议中的条件转换和获授权判断。</td>
+</tr>
+<tr>
+<td>主持忘记继续</td>
+<td>目标未结束且无后续工作的通用看护。</td>
+</tr>
+<tr>
+<td>玩家漏答</td>
+<td>通用补交与协议约定的超时处理。</td>
+</tr>
+<tr>
+<td>游戏结束</td>
+<td>实例完成条件。</td>
+</tr>
+</tbody></table></div>
+<p>游戏知识与规则仍需在任务约定、角色职责或可执行约束中表达。调度核心不增加职业、昼夜、投票或胜负等专用分支。观众权限与玩家信息输入分别控制；用户开局后无需充当每轮催办者或裁决者。</p>
+<p>该场景的验收应检查自主推进到结果，或在不可恢复异常下明确暂停并保存记录。不能把“角色扮演对话能够继续”直接视为规则和隐私已经得到保障。</p>
+<h2 id="section-11">11 后续细化与落地建议</h2>
+<p>以下为设计候选，不是已启动阶段，也未改变当前产品实施进度。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>建议步骤</th>
+<th>范围</th>
+<th>达成条件</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>明确通用对象和语义</td>
+<td>目标、工作、责任、结果、等待、验收及自主授权</td>
+<td>两个差异场景可用相同模型表达。</td>
+</tr>
+<tr>
+<td>补齐基础执行机制</td>
+<td>契约、结果登记、持久收集、条件续跑、补交和悬空检查</td>
+<td>跨场景复用同一状态转换和恢复路径。</td>
+</tr>
+<tr>
+<td>验证连续性与控制边界</td>
+<td>取消、撤权、版本变化、重复提交、重启和执行未知</td>
+<td>不丢责任、不重复执行、不绕过授权。</td>
+</tr>
+<tr>
+<td>验证动态团队</td>
+<td>临时角色、异议、重新分工、记忆与主动跟进</td>
+<td>Agent 可自主调整，核心无需场景判断。</td>
+</tr>
+</tbody></table></div>
+<p>代码层面可优先复用 <code>store.ts</code> 的事务和幂等、<code>engine.ts</code> 的对账、现有投递与执行模型，以及 Task/Action 的责任绑定。是否新增独立责任服务、如何关联没有 Task 的普通委托、工具是否统一入口等，需先细化。</p>
+<p>新能力应按新签发策略启用。历史冻结契约保留原语义，不能凭新规则补造旧责任证据。已有项目退修与未来通用推进之间，需要唯一的推进责任，防止同时创建后续工作。</p>
+<p>确认后的规则再汇入代码仓正式指导；实现和适用独立验收分别记录。草案、图示和原始验收证据继续放在本地资料库，不加入 <code>docs/</code>。</p>
+<h2 id="section-12">12 验收矩阵与观察指标</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>验收场景</th>
+<th>预期行为</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Agent 只写自然语言，遗漏已承诺交付</td>
+<td>缺失可检测，按策略唤醒原责任成员补交或判断。</td>
+</tr>
+<tr>
+<td>目标未完成且无人继续</td>
+<td>识别责任悬空，提供事实并恢复责任成员的决策入口。</td>
+</tr>
+<tr>
+<td>同一结果重复提交</td>
+<td>结果与后续来源均幂等，不重复派工。</td>
+</tr>
+<tr>
+<td>多个结果并行到达</td>
+<td>按准确参与集合、版本和收集条件汇合。</td>
+</tr>
+<tr>
+<td>执行返回但退出未知</td>
+<td>保持核查或等待，不启动冲突执行。</td>
+</tr>
+<tr>
+<td>在登记、释放和派发边界重启</td>
+<td>从持久状态恢复，不丢责任，不重复执行。</td>
+</tr>
+<tr>
+<td>用户取消或撤权</td>
+<td>停止对应后续推进，迟到结果只保留审计。</td>
+</tr>
+<tr>
+<td>已评审材料发生变化</td>
+<td>旧结论保留历史，当前版本重新核对。</td>
+</tr>
+<tr>
+<td>结果有分歧</td>
+<td>保留意见与依据，由获授权成员决定验证或后续安排。</td>
+</tr>
+<tr>
+<td>成员不可用、超时或预算耗尽</td>
+<td>使用已约定处理策略，或进入明确阻塞。</td>
+</tr>
+<tr>
+<td>用户仅旁观</td>
+<td>在初始授权内自行推进，完成权不被固定绑定为用户逐轮确认。</td>
+</tr>
+<tr>
+<td>接入新的任务类型</td>
+<td>主要改变任务约定、职责和能力，调度核心不出现新的场景分支。</td>
+</tr>
+</tbody></table></div>
+<p>持续观察的指标可以包括：用户干预次数、责任悬空率、重复执行率、无效往返、独立验证后的有效完成率、恢复成功率、调用成本与时长，以及新增任务是否要求修改核心。具体采样口径、阈值和默认预算仍待定义。</p>
+<p>平台可验证的基本承诺是，每项已登记工作具有准确责任、状态和下一步或明确阻塞。任务最终成功、复杂判断正确和团队能力提升，需要相应证据与独立验证。</p>
+<h2 id="section-13">13 待进一步讨论的问题</h2>
+<ol>
+<li>目标、工作和责任承诺如何关联当前 Task/Action，如何处理没有显式 Task 的协作？</li>
+<li>从自然交流形成可执行承诺时，采用成员主动工具、获授权的跟进 Agent，还是两者组合？</li>
+<li>哪些节点必须有交付约定，如何让约定足够轻量，避免表单化？</li>
+<li>团队如何选择临时组织者、验收者和后继责任人，如何处理协商失败？</li>
+<li>目标看护何时触发，如何避免昂贵空转、重复唤醒或错误打断？</li>
+<li>补交、重试、重新评审、重新执行和业务修复如何分别计数及授权？</li>
+<li>多人并行工作何时汇合，如何处理部分失败、否决、意见冲突和取消？</li>
+<li>如何组合公共、个人、分组和观察者视图，保证原生续接与信息边界一致？</li>
+<li>Agent 提出的协议变更何时生效，怎样保护在途执行和旧证据？</li>
+<li>自动完成与人工验收如何按任务授权，如何解释“完成但未验证”或“明确受阻”？</li>
+<li>团队记忆和复盘建议如何验证、版本化和撤回，如何避免把推测变成事实？</li>
+<li>如何通过跨场景验收证明复用同一机制，并持续防止专用逻辑侵入调度核心？</li>
+</ol>
+<h2 id="section-14">14 源码定位与阅读顺序</h2>
+<p>建议阅读顺序：共享模型 → 路由 → <code>store.ts</code> 的发送、准入、A2A、终态 → 引擎 → 连续协作 → 任务、Action 和可见性 → 项目退修及对应测试。</p>
+<p>以下链接固定到本次源码基线；本地代码目录为 <code>D:\project\Multi-agent</code>。源码结论对应此提交，后续版本变化应重新核对。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>引用</th>
+<th>文件与位置</th>
+<th>支持内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/engine.ts#L26">S01</a></td>
+<td><code>server/collaboration/engine.ts:26</code></td>
+<td>启动、500ms 扫描、对账和执行驱动。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/shared/collaboration.ts#L135">S02</a></td>
+<td><code>shared/collaboration.ts:135</code></td>
+<td>投递、批次、执行、回复和消费模型。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L521">S03</a></td>
+<td><code>server/collaboration/store.ts:521</code></td>
+<td>来源准入、批次及准确承接关系。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L259">S04</a></td>
+<td><code>server/collaboration/store.ts:259</code></td>
+<td>事务、事件和持久状态。命令幂等位于 318 行附近。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L501">S05</a></td>
+<td><code>server/collaboration/store.ts:501</code></td>
+<td>执行终态与退出证据共同决定占用。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/context.ts#L70">S06</a></td>
+<td><code>server/collaboration/context.ts:70</code></td>
+<td>同伴职责目录与冻结输入。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L695">S07</a></td>
+<td><code>server/collaboration/store.ts:695</code></td>
+<td>普通 A2A 身份、深度、数量及防往返。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/store.ts#L738">S08</a></td>
+<td><code>server/collaboration/store.ts:738</code></td>
+<td>终态、失败回报、文字接力及排除条件。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/tasks.ts#L190">S09</a></td>
+<td><code>server/collaboration/tasks.ts:190</code></td>
+<td>正式交接。责任诊断位于 249 行附近。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/actions.ts#L152">S10</a></td>
+<td><code>server/collaboration/actions.ts:152</code></td>
+<td>执行退出无候选时等待后续，以及条件唤醒。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/project-revisions.ts#L94">S11</a></td>
+<td><code>server/collaboration/project-revisions.ts:94</code></td>
+<td>失败检查退修、作者自测、原评审复验及结论。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/tests/collaboration-project-review.test.ts#L367">S12</a></td>
+<td><code>tests/collaboration-project-review.test.ts:367</code></td>
+<td>无失败回执不退修、复验限次等测试。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/artifacts.ts#L199">S13</a></td>
+<td><code>server/collaboration/artifacts.ts:199</code></td>
+<td>固定版本评审及结构化结论；到期扫描在 117 行附近。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/cooperation.ts#L144">S14</a></td>
+<td><code>server/collaboration/cooperation.ts:144</code></td>
+<td>多人征询收集、只汇总不自动回唤及恢复边界。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/visibility.ts#L45">S15</a></td>
+<td><code>server/collaboration/visibility.ts:45</code></td>
+<td>公开与私聊历史过滤、工具边界。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/tests/collaboration-kernel.test.ts#L24">S16</a></td>
+<td><code>tests/collaboration-kernel.test.ts:24</code></td>
+<td>幂等、成组等待、重叠顺序和独立成员绕行。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/tests/collaboration-cooperation.test.ts#L32">S17</a></td>
+<td><code>tests/collaboration-cooperation.test.ts:32</code></td>
+<td>排序、归并、追加、多方结果及异常恢复场景。</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cat15926/Multi-Agent-collab/blob/fe1486e3eb85164f3d5be89bb34345ac1ea3409b/server/collaboration/routing.ts#L42">S18</a></td>
+<td><code>server/collaboration/routing.ts:42</code></td>
+<td>确定性目标路由。</td>
+</tr>
+</tbody></table></div>
+<p>本纪要中的实现结论来自源码及测试内容核对，未把历史独立验收记录当作本机新验收。今天未因本次调研或归档重新调用真实模型验证上述业务能力。</p>
+<p class="footer">本地资料归档 · 保留 Markdown 可编辑版本 · 源码链接固定到讨论基线提交</p></main>
+</div>
+</body>
+</html>
