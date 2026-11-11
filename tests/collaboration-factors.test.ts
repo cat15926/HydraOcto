@@ -41,7 +41,7 @@ test('projections hide private anchors even when the authorized derivative is us
     assert.ok(!JSON.stringify(projected).includes(issued.factorId));
     h.factors.issue(h.cid,{...input,requestId:'new',content:'第二份材料'});
     assert.deepEqual(h.factors.snapshot(h.cid,h.actor('claude'),'public',cutoff),projected);
-    const user=h.store.send(h.cid,{requestId:'ask',content:'@Claude 给出你的公开建议。'});
+    const user=h.store.send(h.cid,{requestId:'ask',publicStatementFor:'claude',content:'@Claude 给出你的公开建议。'});
     const id=h.run();h.finish(id,input.publicExpression);
     const speech=h.store.detail(h.cid).messages.find(m=>m.memberId==='claude')!;
     const own=h.factors.list(h.cid,h.actor('claude')).find(f=>f.sourceRef.id===speech.id)!;

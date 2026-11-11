@@ -9,13 +9,14 @@ import {createApplication} from '../server/index.ts';
 
 const dir=await mkdtemp(join(tmpdir(),'hydra-personal-ui-'));
 const work=join(dir,'work');await mkdir(work);
-const app=await createApplication({workspace:work,dataDir:join(dir,'db'),port:0,staticDir:resolve(process.env.VALIDATION_STATIC_DIR||'dist/web'),collaborationRuntime:{probe:async()=>[],invoke:async()=>{throw Error('Unexpected model call');}}});
+const app=await createApplication({workspace:work,dataDir:join(dir,'db'),port:0,staticDir:resolve(process.env.VALIDATION_STATIC_DIR||'dist/web'),collaborationRuntime:{probe:async()=>[],invoke:async request=>{assert.equal(request.memberContextMode,'writing');request.onEvent({kind:'accepted',detail:{fixture:true}});request.onEvent({kind:'process_exit',detail:{confirmed:true}});return {text:'合成公开回复。',continuity:'fresh'};}}});
 const browser=await puppeteer.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true,args:['--disable-background-networking']});
-const room=app.collaborationStore.create({requestId:randomUUID(),title:'会话资料',memberIds:['claude','codex'],defaultMemberId:'claude'}).conversation;
+
 const {url}=await app.start();assert.notEqual(new URL(url).port,'4310');
 const runs=[];
 try{
  for(const width of [1390,390]){
+  const room=app.collaborationStore.create({requestId:randomUUID(),title:'会话资料 '+width,memberIds:['claude','codex'],defaultMemberId:'claude'}).conversation;
   const page=await browser.newPage();let watched;
   page.setDefaultTimeout(8000);
   const step=label=>console.log(width,label);
@@ -24,19 +25,39 @@ try{
     try {await handle.asElement().click();}finally{await handle.dispose();}
   };
   const wait=(f,...args)=>page.waitForFunction(f,{timeout:6000},...args);
+  async function clickVisible(selector){
+    await page.waitForSelector(selector,{visible:true});
+    await page.$eval(selector,el=>el.scrollIntoView({block:'nearest',behavior:'instant'}));
+    await wait(s=>{
+      const item=document.querySelector(s);if(!item)return false;
+      const r=item.getBoundingClientRect();
+      return item.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));
+    },selector);
+    await page.locator(selector).click();
+  }
   const panel='.cc-member-materials:not([hidden])';
   const txt=panel+' textarea';const marker='受限原件-'+randomUUID();
   const scope='[aria-label="成员视角预览"]';
   try{
     step('open workbench');await page.setViewport({width,height:844});await page.goto(url);
+    const row='.cc-thread-main[title="'+room.title+'"]';
     if(width<480) {
-      await page.waitForSelector('[aria-label="打开会话列表"]',{visible:true});await page.click('[aria-label="打开会话列表"]');
+      await page.locator('[aria-label="打开会话列表"]').click();
+      await page.waitForSelector('.cc-sidebar.cc-open '+row,{visible:true});
     }
-    step('select room');await page.waitForSelector('.cc-thread-main',{visible:true});await page.click('.cc-thread-main');
+    step('select room');
+    await clickVisible(row);
+    await wait(title=>document.querySelector('.cc-conversation-title-row h1')?.textContent===title,room.title);
+    if(width<480){
+      await wait(()=>!document.querySelector('.cc-sidebar.cc-open'));
+      await page.$eval('.cc-sidebar',async el=>{await Promise.allSettled(el.getAnimations().map(a=>a.finished));});
+    }
+    step('workspace tools');
     await page.waitForSelector('.cc-workspace-toggle',{visible:true});
-    if(await page.$eval('.cc-workspace-toggle',e=>e.getAttribute('aria-expanded'))!=='true')await page.click('.cc-workspace-toggle');
-    step('workspace tools');await page.waitForSelector('.cc-workspace-add',{visible:true});await page.click('.cc-workspace-add');
-    await page.click('[data-workspace-tool="knowledge"]');
+    if(await page.$eval('.cc-workspace-toggle',e=>e.getAttribute('aria-expanded')!=='true'))await clickVisible('.cc-workspace-toggle');
+    await page.waitForSelector('#cc-workspace .cc-workspace-add',{visible:true});
+    if(await page.$eval('.cc-workspace-add',e=>e.getAttribute('aria-expanded')!=='true'))await clickVisible('.cc-workspace-add');
+    await clickVisible('[data-workspace-tool="knowledge"]');
     await tryButton('[role=tab]','可见范围');
     await page.select(scope,'claude');await tryButton(panel+' button','提供资料');
     await wait(s=>document.activeElement===document.querySelector(s),txt);
@@ -71,9 +92,33 @@ try{
     await page.bringToFront();await tryButton(panel+' button','撤回资料');await tryButton(panel+' button','保留资料');
     assert(await page.$(panel+' article'));
     await tryButton(panel+' button','撤回资料');await tryButton(panel+' button','确认撤回');await wait(s=>!document.querySelector(s+' article'),panel);
+    // A selected/explicitly licensed expression enables the invitation.
+    await tryButton(panel+' button','提供资料');
+    const plain=await page.$$(panel+' form textarea');await plain[0].type(marker);await plain[1].type('允许继续。');
+    await tryButton(submit,'保存资料');await tryButton(panel+' button','请此成员公开发言');await tryButton(panel+' button','取消邀请');
+    await wait(()=>document.activeElement?.textContent==='请此成员公开发言');
+    assert.equal(app.collaborationStore.invocations(room.id).length,0);
+    // Drop the response after the server accepted it. A retry must reuse the ID.
+    await page.evaluate(()=>{
+      const original=window.fetch.bind(window);window.hydraInvitationIds=[];
+      window.fetch=async(url,options)=>{
+        if(String(url).endsWith('/messages')&&options?.method==='POST'){
+          const body=JSON.parse(options.body);window.hydraInvitationIds.push(body.requestId);
+          const response=await original(url,options);
+          if(response.ok&&window.hydraInvitationIds.length===1)return Response.json({error:'邀请回执未送达'},{status:503});
+          return response;
+        }
+        return original(url,options);
+      };
+    });
+    await tryButton(panel+' button','请此成员公开发言');
+    await tryButton(panel+' button','发送邀请');await wait(s=>document.querySelector(s+' [role=alert]')?.textContent.includes('邀请回执未送达'),panel);
+    await tryButton(panel+' button','发送邀请');await wait(s=>document.querySelector(s+' .cc-material-invitation [role=status]')?.textContent.includes('已邀请'),panel);
+    assert.deepEqual(await page.evaluate(()=>[window.hydraInvitationIds.length,new Set(window.hydraInvitationIds).size]),[2,1]);
+    assert.equal(app.collaborationStore.invocations(room.id).length,1);
     assert.equal(await watched.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-    runs.push({width,linkedReadOnly:true,draftRetained:true,retryIdReused:true,revoke:true});
-  }catch(error){console.error(width,error);throw error;}finally{await page.close();await watched?.close();}
+    runs.push({width,linkedReadOnly:true,draftRetained:true,retryIdReused:true,revoke:true,statementInviteRetriedOnce:true});
+  }catch(error){await page.screenshot({path:join(dir,width+'-failed.png')}).catch(()=>{});console.error(width,dir,error);throw error;}finally{await page.close();await watched?.close();}
  }
  await writeFile(join(dir,'result.json'),JSON.stringify(runs,null,2));console.log(join(dir,'result.json'));
 }finally{await browser.close();await app.close();}

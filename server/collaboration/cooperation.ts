@@ -102,11 +102,11 @@ export class CooperationService {
     if (this.store.obligations.isBoundSource(s.id) || this.store.obligations.isBoundSource(primary.id)) return false;
     if (this.store.workbench.imageReferences(i.conversationId, primary.attachmentIds).length) return false;
     const contract = this.store.contract(i.id);
-    if (requiresFreshMemberContext(contract.memberContext)) return false;
+    if (s.publicStatement || primary.publicStatement || requiresFreshMemberContext(contract.memberContext)) return false;
     // A new personal request must freeze its own authorized record and tool set at admission.
     if (s.memberContextPolicy && i.roomMember && !s.projectWork && !s.projectReview) {
       const scope = s.visibility?.kind === 'private' && !s.visibility.revealedAt ? 'private' : 'public';
-      if (this.store.factors.snapshot(s.conversationId, i.roomMember, scope).length) return false;
+      if (scope === 'private' && this.store.factors.snapshot(s.conversationId, i.roomMember, scope).length) return false;
     }
     if (contract.projectReview || s.projectReview || s.projectRepair || s.projectCiRepair || s.allowCiRepair || s.allowReviewRevision) return false;
     if (contract.projectWork && (primary.projectRepair || primary.projectCiRepair || primary.allowCiRepair || primary.allowReviewRevision)) return false;

@@ -8,10 +8,46 @@ interface Props {
   name: string;
   active: boolean;
   editable: boolean;
+  latestMessage?: string;
   command: WorkbenchCommand;
 }
 
-export function MemberMaterials({cid, memberId, name, active, editable, command}:Props) {
+function StatementInvitation({cid, memberId, name, command}:Pick<Props,'cid'|'memberId'|'name'|'command'>) {
+  const [confirming,setConfirming]=useState(false), [sending,setSending]=useState(false);
+  const [sent,setSent]=useState(false), [error,setError]=useState('');
+  const button=useRef<HTMLButtonElement>(null), submit=useRef<HTMLButtonElement>(null);
+  const requestId=useRef(''), pending=useRef(false);
+  useEffect(()=>{if(confirming)submit.current?.focus();},[confirming]);
+  function close(){
+    setConfirming(false);setError('');
+    requestAnimationFrame(()=>button.current?.focus());
+  }
+  async function invite(){
+    if(pending.current)return;
+    pending.current=true;setSending(true);setError('');
+    requestId.current ||= crypto.randomUUID();
+    try {
+      await command('/api/conversations/'+encodeURIComponent(cid)+'/messages',{
+        requestId:requestId.current,publicStatementFor:memberId,content:'请根据获准资料发表你的观点。',
+      });
+      requestId.current='';setSent(true);close();
+    }catch(e){setError((e as Error).message);}
+    finally{pending.current=false;setSending(false);}
+  }
+  return <div className="cc-material-invitation">
+    {confirming ? <>
+      <p>邀请{name}使用本房间获准公开的观点发言？所有旁观者都能看到邀请和回复。</p>
+      <button ref={submit} type="button" disabled={sending} onClick={()=>void invite()}>{sending?'正在发送…':'发送邀请'}</button>
+      <button type="button" disabled={sending} onClick={close}>取消邀请</button>
+      {error&&<p role="alert">{error}</p>}
+    </> : <>
+      <button ref={button} type="button" className="cc-knowledge-link" onClick={()=>setConfirming(true)}>{sent?'再次邀请公开发言':'请此成员公开发言'}</button>
+      {sent&&<p role="status">已邀请{name}，可在会话中查看回复。</p>}
+    </>}
+  </div>;
+}
+
+export function MemberMaterials({cid, memberId, name, active, editable, latestMessage, command}:Props) {
   const [rows,setRows]=useState<FactorView[]>([]), [open,setOpen]=useState(false);
   const [content,setContent]=useState(''), [expression,setExpression]=useState('');
   const [decide,setDecide]=useState(false), [optionText,setOptionText]=useState('');
@@ -31,7 +67,7 @@ export function MemberMaterials({cid, memberId, name, active, editable, command}
       .then(value=>{if(!ab.signal.aborted)setRows(Array.isArray(value)?value:value.factors);})
       .catch(e=>{if(!ab.signal.aborted)setError(e.message);});
     return ()=>ab.abort();
-  },[base,memberId,active,epoch]);
+  },[base,memberId,active,epoch,latestMessage]);
   useEffect(()=>{if(open && active)first.current?.focus();},[open,active]);
   function close(){
     setOpen(false);setContent('');setExpression('');setDecide(false);setOptionText('');setError('');request.current={payload:'',id:''};
@@ -56,7 +92,7 @@ export function MemberMaterials({cid, memberId, name, active, editable, command}
       <label>公开表达方式<select value={decide?'choice':'direct'} onChange={e=>setDecide(e.target.value==='choice')}><option value="direct">指定允许公开的内容</option><option value="choice">由成员判断</option></select></label>
       {decide ? <label>可选观点（每行一项）<textarea rows={3} value={optionText} maxLength={8100} required onChange={e=>setOptionText(e.target.value)} /><small>提供 2–8 个不同的观点，每项最多 1000 字。成员结合私密原文选择其中一项。</small></label> :
         <label>允许公开表达的内容（可选）<textarea value={expression} maxLength={1000} onChange={e=>setExpression(e.target.value)}/></label>}
-      <p className="cc-note">保存后，{name}可以在本房间的私聊中读取原文。在公开发言时，只有你允许的表达可供使用。</p>
+      <p className="cc-note">保存后，{name}可以在本房间的私聊中读取原文。邀请其公开发言时，成员只会收到获准公开的观点。</p>
       <div><button className="cc-knowledge-primary" disabled={!content.trim()||busy||(decide&&!optionsValid)}>保存资料</button> <button type="button" disabled={busy} onClick={close}>取消</button></div>
     </form>}
     {rows.filter(f=>f.kind==='observation').map(f=><article key={f.id} className="cc-view-message">
@@ -66,6 +102,7 @@ export function MemberMaterials({cid, memberId, name, active, editable, command}
       {editable&&(revoking===f.id?<div>撤回后，这份资料不能用于后续工作。<div><button disabled={busy} onClick={()=>void apply(f.id)}>确认撤回</button> <button disabled={busy} onClick={()=>{setRevoking('');requestAnimationFrame(()=>document.getElementById('revoke-'+f.id)?.focus());}}>保留资料</button></div></div>:
         <button id={'revoke-'+f.id} className="cc-knowledge-link" disabled={busy} onClick={()=>{setStatus('');setError('');setRevoking(f.id);}}>撤回资料</button>)}
     </article>)}
+    {editable&&rows.some(f=>f.kind==='expression')&&<StatementInvitation cid={cid} memberId={memberId} name={name} command={command}/>}
     {status&&<p role="status">{status}</p>}
     {error&&<p role="alert">{error} {!open&&!revoking&&<button onClick={()=>setEpoch(v=>v+1)}>重新读取</button>}</p>}
   </section>;

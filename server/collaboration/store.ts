@@ -25,7 +25,7 @@ import { InteractionService } from './interactions.js';
 import { CooperationService, compareSources } from './cooperation.js';
 import { RoomMemberService } from './room-members.js';
 import { FactorService, migrateFactors } from './factors.js';
-import { freezeMemberContext, requiresFreshMemberContext, validateMemberContext } from './member-context.js';
+import { canRequestPublicStatement, freezeMemberContext, requiresFreshMemberContext, validateMemberContext } from './member-context.js';
 import { migrateObligations } from './obligations.js';
 import { OrdinaryTaskService } from './tasks.js';
 
@@ -208,24 +208,24 @@ export class CollaborationStore {
     // A repair admitted after an upgrade inherits the original author's tool policy.
     const projectNpmChecks = projectWork && (!source.projectRepair ||
       this.contract(source.projectRepair.authorInvocationId).projectNpmChecks === true);
-    const mayProposeProject = snapshotOrigin === 'admission' && source.kind === 'user' && !source.projectConsultation &&
+    const mayProposeProject = snapshotOrigin === 'admission' && !source.publicStatement && source.kind === 'user' && !source.projectConsultation &&
       !source.projectFollowupOf && !source.projectReview && !projectWork && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
       ['claude-cli','codex-app-server'].includes(i.member.carrier);
     const grant = detail.conversation.workspaceGrant;
-    const publicProject = snapshotOrigin === 'admission' && source.kind === 'user' && !source.visibility && !source.projectConsultation &&
+    const publicProject = snapshotOrigin === 'admission' && !source.publicStatement && source.kind === 'user' && !source.visibility && !source.projectConsultation &&
       !source.excerptRefs?.length && !detail.conversation.importedFor && grant?.mode === 'project-work' && grant.memberIds?.includes(i.memberId) &&
       ['codex-app-server','claude-cli'].includes(i.member.carrier);
-    const peerBrowser = snapshotOrigin==='admission' && source.kind==='a2a' && !source.visibility && !source.projectReview &&
+    const peerBrowser = snapshotOrigin==='admission' && !source.publicStatement && source.kind==='a2a' && !source.visibility && !source.projectReview &&
       !source.excerptRefs?.length && !detail.conversation.importedFor && source.parentInvocationId && grant?.mode==='project-work' &&
       ['claude-cli','codex-app-server'].includes(i.member.carrier) && grant.memberIds?.includes(i.memberId) && !!grant.memberBindings?.[i.memberId] &&
       grant.memberBindings[i.memberId]===this.workbench.projectMemberBinding(i.memberId) &&
       this.invocation(source.parentInvocationId).conversationId===i.conversationId &&
       this.contract(source.parentInvocationId).projectBrowser && this.contract(source.parentInvocationId).workspaceGrant?.revision===grant.revision;
     const boundObligation = roomMember && this.obligations.isBoundSource(source.id);
-    const obligationPolicy = roomMember && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
+    const obligationPolicy = roomMember && !source.publicStatement && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
       !source.crossRef && !source.actionRef && (!source.projectReview || boundObligation) &&
       (source.kind === 'user' || boundObligation || !!source.taskRef);
-    return { ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
+    return { ...(roomMember && canRequestPublicStatement(source) && {mayRequestPublicStatement: true as const}), ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
       ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: requiresFreshMemberContext(memberContext) ? [] : this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private verifyProjectWork(source: SourceWork, memberId: string, grant: Conversation['workspaceGrant']) {
@@ -449,9 +449,17 @@ export class CollaborationStore {
         const routingContent = input.content.trim() || '请处理附件内容。';
         let routing: RoutingDecision | undefined;
         if (visibility) routing = { id: id(), targets: visibility.memberIds, reason: input.excerptRefs?.length ? 'explicit_excerpt' : 'explicit_private', policyVersion: 'visible-routing-v2', historyCursor: this.messageCursor(conversationId), configurationRevision: this.configurationRevision() };
-        if (project && !visibility) routing = structuredClone(project.routing);
+        if (input.publicStatementFor !== undefined) {
+          if (c.collaborationMode !== 'continuous' || c.archivedAt || c.importedFor || project || visibility || input.attachmentIds?.length ||
+              input.replyTo || input.excerptRefs || input.excerptTargets || input.deliveryMode || input.resolveWhenIdle) {
+            throw new AppError(400, '公开发言邀请需要在本房间单独发送。');
+          }
+          this.artifacts.target(c.id, input.publicStatementFor);
+          routing = { id: id(), targets: [input.publicStatementFor], reason: 'public_statement', policyVersion: 'member-context-v1',
+            historyCursor: this.messageCursor(c.id), configurationRevision: this.configurationRevision() };
+        } else if (project && !visibility) routing = structuredClone(project.routing);
         else if (!visibility && !input.resolveWhenIdle) { try { routing = this.previewRoute(conversationId, routingContent); } catch (e) { if (!(e instanceof AppError) || e.code !== 'no_routable_member') throw e; } }
-        const source = this.addSource({ conversationId, kind: 'user', content, visibility, excerptRefs: input.excerptRefs, replyTo: input.replyTo, requestedTargets: routing?.targets ?? [], depth: 0, ...(routing ? {} : { bindingState: 'unresolved' as const }) });
+        const source = this.addSource({ conversationId, kind: 'user', ...(input.publicStatementFor && { publicStatement: true }), content, visibility, excerptRefs: input.excerptRefs, replyTo: input.replyTo, requestedTargets: routing?.targets ?? [], depth: 0, ...(routing ? {} : { bindingState: 'unresolved' as const }) });
         if (project?.work && !visibility) {
           source.projectWork = true; source.projectGrantRevision = c.workspaceGrant!.revision;
           if (requestsCiRepair(input.content)) source.allowCiRepair=true;
@@ -480,7 +488,7 @@ export class CollaborationStore {
     this.factors.recordMessage(value);
     const c = this.get<Conversation>('cc_conversations', value.conversationId); c.updatedAt = value.createdAt; this.put('cc_conversations', c);
   }
-  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>>): SourceWork {
+  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'publicStatement' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>>): SourceWork {
     const conversation = this.get<Conversation>('cc_conversations', input.conversationId);
     if ((!input.requestedTargets.length && !(input.bindingState === 'unresolved' && input.kind === 'user')) || input.requestedTargets.some(t => !conversation.memberIds.includes(t))) throw new AppError(400, 'Targets must belong to this conversation.');
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
@@ -778,13 +786,20 @@ export class CollaborationStore {
       this.tasks.onInvocationChanged(i);
     });
   }
-  requestCollaboration(invocationId: string, callId: string, input: { targets: string[]; content: string; projectReview?: unknown; delivery?: ObligationDelegation }, maxDepth = 8): { sourceId: string; targets: string[]; replayed: boolean } {
+  requestCollaboration(invocationId: string, callId: string, input: { targets: string[]; content: string; publicStatement?: boolean; projectReview?: unknown; delivery?: ObligationDelegation }, maxDepth = 8): { sourceId: string; targets: string[]; replayed: boolean } {
     checkText(callId, 'callId', 200); checkText(input.content, 'content'); this.visibility.assertTool(invocationId, 'collaboration_request');
     return this.tx(() => {
       const i = this.invocation(invocationId);
       const result = this.command(`tool:${invocationId}:${callId}`, input, () => {
         if (i.status !== 'running') throw new AppError(409, 'Callback belongs to an inactive invocation.', 'stale_callback');
-        if (!Array.isArray(input.targets) || input.targets.length < 1 || input.targets.length > 2 || new Set(input.targets).size !== input.targets.length || input.targets.includes(i.memberId)) throw new AppError(400, 'Select 1–2 other conversation members.');
+        if (input.publicStatement !== undefined && typeof input.publicStatement !== 'boolean') throw new AppError(400, '发言邀请参数无效。');
+        if (input.publicStatement) {
+          if (!this.contract(i.id).mayRequestPublicStatement || i.acceptance !== 'accepted' || i.cancelRevision || input.delivery !== undefined ||
+              input.projectReview !== undefined || !Array.isArray(input.targets) || input.targets.length !== 1) throw new AppError(403, '当前执行只能从获准的公开协作单独邀请一名房间成员发言。');
+          this.visibility.validateInvocation(i.id);
+          this.artifacts.target(i.conversationId, input.targets[0]!);
+        }
+        if (!Array.isArray(input.targets) || input.targets.length < 1 || input.targets.length > 2 || new Set(input.targets).size !== input.targets.length || (!input.publicStatement && input.targets.includes(i.memberId))) throw new AppError(400, 'Select 1–2 other conversation members.');
         const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
         if (this.rows<SourceWork>('cc_sources', 'WHERE conversation_id=?', [i.conversationId]).filter(s => s.parentInvocationId === i.id && s.kind === 'a2a').length >= 16) throw new AppError(409, 'Invocation collaboration request limit reached.', 'collaboration_limit');
         if (source.projectRepair) throw new AppError(409,'本次修订完成后由平台交回原评审成员。');
@@ -812,7 +827,7 @@ export class CollaborationStore {
             ...(eligible ? {revisionAuthorInvocationId:i.id} : {}),
             ...(contract.workspaceGrant.reviewMode === 'project' ? {mode:'project' as const, ...(contract.mayRunProjectNpmTest ? {npmTest:true as const} : {}), ...(contract.projectNpmChecks ? {projectNpmChecks:true as const} : {})} : {})};
         }
-        const target = this.addSource({ conversationId: i.conversationId, kind: 'a2a', content: input.content, requestedTargets: input.targets, parentInvocationId: i.id, authorMemberId: i.memberId, depth: source.depth + 1, ...(projectReview ? {projectReview} : {}) });
+        const target = this.addSource({ conversationId: i.conversationId, kind: 'a2a', ...(input.publicStatement && { publicStatement: true }), content: input.content, requestedTargets: input.targets, parentInvocationId: i.id, authorMemberId: i.memberId, depth: source.depth + 1, ...(projectReview ? {projectReview} : {}) });
         if (input.delivery!==undefined) this.obligations.bindDelegation(i.id,target,input.delivery);
         this.addMessage({ conversationId: i.conversationId, author: 'member', memberId: i.memberId, sourceId: target.id, content: input.content });
         return { sourceId: target.id, targets: target.requestedTargets };

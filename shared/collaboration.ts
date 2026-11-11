@@ -66,6 +66,7 @@ export interface ProjectReviewCheck {
 export type MemberContextMode = 'private' | 'public';
 export type RuntimeMemberContextMode = MemberContextMode | 'writing';
 export interface MemberContextSnapshot {
+  publicStatement?: true;
   mode: MemberContextMode;
   instanceId: string;
   generation: number;
@@ -74,6 +75,7 @@ export interface MemberContextSnapshot {
   obligations: {id:string; revision:number; goal:string; state:string; wait?:string}[];
 }
 export interface SourceWork {
+  publicStatement?: true;
   memberContextPolicy?: 'member-context-v1';
   continuationPolicy?: 'durable-v1';
   roomPolicy?: 'instance-v1';
@@ -384,6 +386,7 @@ export interface HistorySourceResponsibility {
   }[];
 }
 export interface ExecutionContractSnapshot {
+  mayRequestPublicStatement?: true;
   memberContext?: MemberContextSnapshot;
   roomMember?: RoomMemberInstance;
   obligationPolicy?: boolean;
@@ -458,12 +461,13 @@ export interface CreateConversation {
   collaborationMode?: RoomCollaborationMode;
   title: string; memberIds: string[]; defaultMemberId: string; requestId: string;
 }
-export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean; attachmentIds?: string[]; replyTo?: string; privateTo?: string[]; excerptRefs?: MessageExcerpt[]; excerptTargets?: string[] }
+export interface SendMessage { publicStatementFor?: string; content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean; attachmentIds?: string[]; replyTo?: string; privateTo?: string[]; excerptRefs?: MessageExcerpt[]; excerptTargets?: string[] }
 export interface RuntimeEvent {
   kind: 'prepared' | 'exposed' | 'accepted' | 'not_accepted' | 'session' | 'session_replaced' | 'usage' | 'text' | 'tool' | 'process_exit' | 'transport_settled' | 'diagnostic';
   detail: Record<string, unknown>;
 }
 export interface RuntimeRequest {
+  mayRequestPublicStatement?: true;
   memberContextMode?: RuntimeMemberContextMode;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';

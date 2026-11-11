@@ -161,7 +161,7 @@ try{
   await boot();phase='recover';
   await send(activeRoom,{content:'请从自己的工作记录恢复刚才的笔记，私下只回答其中完整的内部核对词。',privateTo:['seer']});
   await surfaces(activeRoom,true);proof.checks.push('restored member note with no original CLI profile');
-  phase='public';await send(activeRoom,{content:'请读取本轮获准公开使用的个人材料，向大家说出你建议重点听谁解释，只表达你的观点。'});
+  phase='public';await send(activeRoom,{publicStatementFor:'seer',content:'请读取本轮获准公开使用的个人材料，向大家说出你建议重点听谁解释，只表达你的观点。'});
   assert(JSON.stringify(await surfaces(activeRoom,false)).includes(subject),'Public speech missing');proof.checks.push('public speech without restricted proof or note');
   phase='foreign';await send(otherRoom,{content:'请只根据本房间的个人工作记录，说明是否有夜间查验；没有记录就简短说明。'});
   await surfaces(otherRoom,true);proof.checks.push('same template in another room isolated');

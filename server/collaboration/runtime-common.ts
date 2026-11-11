@@ -80,7 +80,7 @@ interface RuntimeToolSpec {
   inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+export function runtimeTools(request: Pick<RuntimeRequest, 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
   if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') return memberContextTools(request.memberContextMode);
   const obligations = obligationTools(request);
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
@@ -96,7 +96,12 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'memberContextMode' |
         },
       };
     }
-    if (!obligations.length || t.name !== 'collaboration_request') return t;
+    if (t.name !== 'collaboration_request') return t;
+    if (request.mayRequestPublicStatement) {
+      t = {...t, description: t.description + ' For a public statement informed by member materials, set publicStatement=true and target one member (yourself is allowed). This queues a separate, isolated speaking turn.',
+        inputSchema:{...t.inputSchema, properties:{...t.inputSchema.properties, publicStatement:{type:'boolean'}}}};
+    }
+    if (!obligations.length) return t;
     return {
       ...t,
       description: t.description + ' For a tracked subtask, choose one target and include delivery with the parent obligation, fixed version and acceptance criteria. Its report returns to the parent owner.',
@@ -161,6 +166,11 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   request.signal.throwIfAborted();
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object.');
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
+  if (name === 'collaboration_request' && args.publicStatement !== undefined &&
+      (!request.mayRequestPublicStatement || typeof args.publicStatement !== 'boolean' ||
+       args.publicStatement && (!Array.isArray(args.targets) || args.targets.length !== 1 || args.delivery !== undefined || args.projectReview !== undefined))) {
+    throw new Error('A public statement needs its own authorized source and one room member.');
+  }
   if (name === 'collaboration_request' && args.delivery !== undefined && !obligationTools(request).length)
     throw new Error('Tracked delegation is outside this invocation frozen policy.');
   if (name === 'multi_mention' && args.obligationId !== undefined && request.projectWork) throw new Error('Tracked consultation is outside this project execution.');

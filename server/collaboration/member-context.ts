@@ -13,7 +13,13 @@ const select = {
 };
 
 export function runtimeMemberContextMode(state?: MemberContextSnapshot): RuntimeMemberContextMode|undefined {
-  return state?.mode === 'public' && state.factors.length > 0 ? 'writing' : state?.mode;
+  return state?.mode === 'public' && (state.publicStatement || state.factors.length > 0) ? 'writing' : state?.mode;
+}
+
+export function canRequestPublicStatement(source: SourceWork): boolean {
+  return source.memberContextPolicy === 'member-context-v1' && !source.publicStatement && !source.visibility &&
+    !source.projectWork && !source.projectConsultation && !source.projectReview && !source.projectRepair &&
+    !source.projectCiRepair && !source.crossRef && !source.actionRef && !source.excerptRefs?.length;
 }
 
 export function requiresFreshMemberContext(state?: MemberContextSnapshot) {
@@ -46,13 +52,15 @@ export function freezeMemberContext(store:CollaborationStore, member:RoomMemberI
   const scope = source.visibility;
   const mode = scope?.kind==='private' && !scope.revealedAt ? 'private' : 'public';
   if (mode==='private' && (scope!.memberIds.length!==1 || scope!.memberIds[0]!==member.memberId)) return;
-  const factors = materials(store,member,mode,cutoff!);
+  const statement = mode === 'public' && source.publicStatement === true && !scope &&
+    source.requestedTargets.length === 1 && source.requestedTargets[0] === member.memberId;
+  const factors = mode === 'private' || statement ? materials(store,member,mode,cutoff!) : [];
   if (mode==='private' && factors.length===0) return;
   const obligations = store.obligations.list(member.conversationId)
     .filter(o => o.owner.instanceId===member.id && o.owner.generation===member.generation && o.state!=='cancelled' && o.state!=='delivered')
     .map(o => ({id:o.id,revision:o.revision,goal:o.goal,state:o.state,...(o.wait && o.state==='waiting' && {wait:o.wait.condition})}));
-  if (factors.length === 0 && obligations.length === 0) return;
-  return {mode,instanceId:member.id,generation:member.generation,cutoff:cutoff!,factors,obligations};
+  if (!statement && factors.length === 0 && obligations.length === 0) return;
+  return {mode,...(statement && {publicStatement:true as const}),instanceId:member.id,generation:member.generation,cutoff:cutoff!,factors,obligations};
 }
 
 /** The public speaker receives approved wording with no handles into the personal record. */
@@ -66,7 +74,7 @@ export function validateMemberContext(store:CollaborationStore, contract:Executi
   if (!snap) return;
   const member=contract.roomMember;
   if (!member || member.id!==snap.instanceId || member.generation!==snap.generation || !store.roomMembers.isCurrent(member) ||
-      canonical(materials(store,member,snap.mode,snap.cutoff)) !== canonical(snap.factors)) {
+      requiresFreshMemberContext(snap) && canonical(materials(store,member,snap.mode,snap.cutoff)) !== canonical(snap.factors)) {
     throw new AppError(409,'成员资料的授权已变化，请从当前会话重新开始。','member_context_changed');
   }
 }

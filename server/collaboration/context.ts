@@ -1,5 +1,5 @@
 import type { MemberContextSnapshot } from '../../shared/collaboration.js';
-import { memberContextTools, runtimeMemberContextMode, visibleMemberRecord } from './member-context.js';
+import { canRequestPublicStatement, memberContextTools, runtimeMemberContextMode, visibleMemberRecord } from './member-context.js';
 import { obligationTools, supportsContinuation } from './obligation-tools.js';
 import { projectReviewTools } from './project-review-tools.js';
 import { createHash } from 'node:crypto';
@@ -151,6 +151,9 @@ export function assembleContext(input: ContextInput): ContextAssembly {
       ? '本次为个人工作。用 member_note_write 保存需要下次恢复的简短笔记，若观察中带 expressionOptions，独立判断后调用 member_expression_select，传 observationId 和从 1 开始的 choice 来选择自己准备公开的说法。本轮回复只在当前私密范围内可用。\n'
       : '公开表达仅使用本次收到的已授权材料。工作记录中的其他待办是背景，请按本轮委托行动。\n';
   }
+  const publicStatementHint = canRequestPublicStatement(source)
+    ? '\n若发言需要依据成员的个人资料，请调用 collaboration_request，指定一名成员（可选自己）并设置 publicStatement=true，另起一次只使用获准观点的公开发言。普通求助、征询、回报和正式交付继续使用各自工具。\n'
+    : '';
   const renderPersonal = (messages: ContextInput['history']) => [
     invocation.member.instructions,
     personalMode === 'private' ? '本次为个人工作，由平台在本房间为你恢复。' : '本次在公开会话发言。你可以用自己的措辞表达下列观点，只可使用已经批准公开的表述和本次公开对话。',
@@ -159,7 +162,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     ...messages.map(m => JSON.stringify({messageId:m.id, sourceId:m.sourceId, author:m.author, memberId:m.memberId, ...backgroundResponsibility(m), content:m.content})),
     '本次准确请求：' + JSON.stringify({sourceId:source.id, revision:source.revision, content:source.content}),
   ].join('\n');
-  const render = (messages: ContextInput['history']) => isolated ? renderPersonal(messages) : (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + waitHint + workRecord + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
+  const render = (messages: ContextInput['history']) => isolated ? renderPersonal(messages) : (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + waitHint + publicStatementHint + workRecord + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
   if (estimate(render([])) > limit) throw new AppError(422, personal ? '本轮请求与必须完整提供的成员资料超出上下文预算。请缩短请求或撤回不再需要的资料后重试。' : '本次完整请求及必要身份超过上下文预算；请缩短请求或调整预算，平台未静默裁剪请求。', 'context_budget_exceeded');
   const candidates: ContextInput['history'] = [];
   const seen = new Set<string>();

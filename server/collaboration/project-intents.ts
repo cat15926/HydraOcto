@@ -167,7 +167,7 @@ export class ProjectIntents {
       !/(?:只读|只讨论|仅讨论|先解释|仅咨询|如何|怎么|为什么|[？?])/u.test(input.content);
     const changesPage = plainGuidance && /(?:再加|再补|改成|换成|禁用|启用|显示|隐藏|校验|修正|change|add|disable|enable)/iu.test(input.content) &&
       !/(?:不要改|不要修改|先别动)/u.test(input.content);
-    const publicWork = !input.privateTo && !input.excerptRefs && !input.excerptTargets && !input.resolveWhenIdle &&
+    const publicWork = !input.publicStatementFor && !input.privateTo && !input.excerptRefs && !input.excerptTargets && !input.resolveWhenIdle &&
       (explicitWork || continuation || (plainGuidance && conversation.workspaceGrant?.mode === 'project-work'));
     if (!publicWork) {
       if (!this.store.db.prepare('SELECT 1 FROM cc_commands WHERE request_id=?').get('message:' + input.requestId) && this.store.db.prepare('SELECT 1 FROM cc_commands WHERE request_id=?').get('project-submit:' + input.requestId)) throw new AppError(409, '此请求标识已用于另一条项目委托。', 'idempotency_conflict');
