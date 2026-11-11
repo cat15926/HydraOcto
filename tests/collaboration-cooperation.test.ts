@@ -11,6 +11,8 @@ import { compareSources } from '../server/collaboration/cooperation.js';
 import { runtimeTools } from '../server/collaboration/runtime-common.js';
 import type { AppendObservation, CollaborationInvocation, InputHandoff, SourceWork } from '../shared/collaboration.js';
 
+import type { Obligation } from '../shared/obligations.js';
+
 const rid = () => randomUUID();
 function setup(persistent = false) {
   const dir = mkdtempSync(join(tmpdir(), 'n6-cooperation-'));
@@ -331,4 +333,140 @@ test('N6D: restart loses collector without dropping pending targets; cancellatio
     assert.equal(h.s.invocation(unrelated.id).cancelRevision, 0);
     assert.equal(h.admit().batch.sourceId, g.sourceId);
   } finally { h.close(); }
+});
+
+
+function collection(h: ReturnType<typeof setup>) {
+  const host = h.run();
+  const {obligation} = h.s.obligations.tool(host.id,'obligation_open',{goal:'收集成员意见，最后交付'},rid()) as {obligation:Obligation};
+  const input = {targets:['reviewer','claude'],question:'分别提交意见',timeoutMs:2000,obligationId:obligation.id,requestId:rid()};
+  const first = h.s.cooperation.createGroup(h.c.id,input,host.id);
+  assert.equal(h.s.cooperation.createGroup(h.c.id,input,host.id).group.id,first.group.id);
+  assert.throws(()=>h.s.cooperation.createGroup(h.c.id,{...input,requestId:rid()}));
+  h.end(host);
+  const runs = h.admit().invocations.map(h.start);
+  const read = () => h.s.cooperation.groups(h.c.id).find(g => g.id === first.group.id)!;
+  const root = () => h.s.obligations.list(h.c.id).find(o => o.id === obligation.id)!;
+  return {host,group:first.group,runs,read,root};
+}
+
+test('durable collection recovers completed receipts at restart and returns failures and opinions exactly once', () => {
+  const h = setup(true);
+  try {
+    const {group,runs,root,read} = collection(h);
+    h.end(runs[0]!,'failed','资料不可用');
+    assert.equal(read().results?.length,1);
+    assert.equal(root().state,'waiting');
+    h.end(runs[1]!,'succeeded','我建议方案二。');
+    assert.equal(read().state,'collecting');
+    assert.equal(read().results?.length,2);
+    h.advance(3000);
+    h.restart();
+    h.s.cooperation.groupTick();
+    assert.equal(read().state,'done');
+    const wake = h.s.detail(h.c.id).sources.find(s => s.id === read().contract?.wakeSourceId)!;
+    assert.equal(wake.id,root().currentSourceId);
+    assert.match(wake.content,/执行失败/);
+    assert.match(wake.content,/方案二/);
+    assert.equal(h.s.detail(h.c.id).sources.filter(s=>s.kind==='job_result' || s.kind==='a2a_failure').length,1);
+    const author = h.start(h.admit().invocations[0]!);
+    const next = h.s.cooperation.createGroup(h.c.id,{requestId:rid(),targets:group.targets,question:'核实第二项资料',obligationId:root().id},author.id).group;
+    h.s.cooperation.observeGroupFinish(h.s.artifacts.get('cc_sources',group.sourceId),h.s.invocation(runs[0]!.id));
+    assert.deepEqual(next.results,[]);
+    assert.equal(root().activeGroupId,next.id);
+    h.s.cooperation.groupTick();
+    assert.equal(h.s.cooperation.groups(h.c.id).find(g => g.id===next.id)?.state,'collecting');
+  } finally {h.close();}
+});
+
+test('timed out durable collection returns partial evidence once and cannot accept a late reply', () => {
+  const h = setup();
+  try {
+    const {runs,root,read} = collection(h);
+    h.end(runs[0]!); h.advance(2000); h.end(runs[1]!);
+    h.s.cooperation.groupTick();
+    assert.equal(read().state,'timeout');
+    assert.deepEqual(read().missing,[runs[1]!.memberId]);
+    assert.equal(read().results?.length,1);
+    h.s.cooperation.groupTick();
+    const wake = h.s.detail(h.c.id).sources.filter(s=>s.kind==='job_result');
+    assert.equal(wake.length,1);
+    assert.match(wake[0]!.content,/已到期/); assert.equal(root().state,'open');
+  } finally {h.close();}
+});
+
+test('cancelling the root closes its active collection; cancelling just the collection exposes the outstanding root',async() => {
+  for (const cancelRoot of [true,false]) {
+    const h=setup();
+    try {
+      const {root,read} = collection(h);
+      if (cancelRoot) await h.s.obligations.decide(h.c.id,root().id,{requestId:rid(),expectedRevision:root().revision,decision:'cancel'});
+      else h.s.cooperation.cancelGroup(read().id,{requestId:rid(),expectedRevision:read().revision});
+      h.s.cooperation.groupTick(); h.s.obligations.reconcile();
+      assert.equal(read().state,'cancelled');
+      assert.equal(root().state,cancelRoot?'cancelled':'blocked');
+      assert.equal(root().activeGroupId,undefined);
+      assert.equal(h.s.detail(h.c.id).sources.filter(s=>s.kind==='job_result').length,0);
+    } finally {h.close();}
+  }
+});
+
+
+test('a retired participant cannot return through a replacement instance or wake the host', () => {
+  const h=setup();
+  try {
+    const {root,read,runs}=collection(h);
+    h.end(runs.find(i=>i.memberId==='claude')!);
+    h.s.updateConversation(h.c.id,{memberIds:['codex','reviewer'],defaultMemberId:'codex'});
+    h.s.updateConversation(h.c.id,{memberIds:['codex','claude','reviewer'],defaultMemberId:'codex'});
+    h.s.cooperation.groupTick();
+    assert.equal(read().state,'lost'); assert.equal(root().state,'blocked');
+    assert.equal(root().activeGroupId,undefined);
+    assert.equal(h.s.detail(h.c.id).sources.filter(s=>s.kind==='job_result').length,0);
+  } finally {h.close();}
+});
+
+test('sustained collection stops at its per-obligation budget until a user explicitly reopens it', async() => {
+  const h=setup();
+  try {
+    let host=h.run();
+    const {obligation} = h.s.obligations.tool(host.id,'obligation_open',{goal:'收集资料后交付'},rid()) as {obligation:Obligation};
+    const input={question:'对照证据',targets:['claude','reviewer'],obligationId:obligation.id};
+    for (let n=0;n<16;n++) {
+      h.s.cooperation.createGroup(h.c.id,{...input,requestId:rid()},host.id);
+      h.end(host);
+      for (const participant of h.admit().invocations) h.end(h.start(participant));
+      h.s.cooperation.groupTick();
+      host=h.start(h.admit().invocations[0]!);
+    }
+    const exhausted={...input,requestId:rid()};
+    for(let replay=0;replay<2;replay++) assert.throws(()=>h.s.cooperation.createGroup(h.c.id,exhausted,host.id),/16 次/);
+    const [root]=h.s.obligations.list(h.c.id);
+    assert.equal(root!.state,'blocked'); assert.match(root!.reason!,/16 次/);
+    assert.equal(h.s.cooperation.groups(h.c.id).length,16);
+    assert.equal(h.s.detail(h.c.id).sources.filter(s=>s.kind==='job_result').length,16);
+    h.end(host);
+    await h.s.obligations.decide(h.c.id,root!.id,{requestId:rid(),decision:'retry',expectedRevision:root!.revision});
+    const next=h.start(h.admit().invocations[0]!);
+    const renewed=h.s.cooperation.createGroup(h.c.id,{...input,requestId:rid()},next.id);
+    assert.equal(h.s.obligations.list(h.c.id)[0]!.groupCount,1);
+    assert.equal(renewed.group.state,'collecting');
+  } finally {h.close();}
+});
+
+
+test('late provider teardown before the deadline seals the result even if the next scheduler tick runs after restart', () => {
+  const h=setup(true);
+  try {
+    const {runs,read} = collection(h);
+    const [first,second]=runs;
+    h.s.finish(first!.id,'succeeded','等待承载退出');
+    assert.equal(read().results!.length,0);
+    h.end(second!);
+    h.s.recordEvidence(first!.id,{kind:'process_exit',detail:{confirmed:true}});
+    assert.equal(read().results!.length,2);
+    h.advance(3000); h.restart();
+    assert.equal(read().state,'done');
+    assert(read().contract?.wakeSourceId);
+  } finally {h.close();}
 });

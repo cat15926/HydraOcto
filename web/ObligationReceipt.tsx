@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { ConversationDetail, Member } from '../shared/collaboration';
+import type { ConversationDetail, Member, MentionGroup } from '../shared/collaboration';
 import type { Obligation } from '../shared/obligations';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 
@@ -7,16 +7,43 @@ const labels:Record<Obligation['state'],string> = {open:'处理中',delegated:'�
   delivery_pending:'正在交付',awaiting_acceptance:'等你验收',delivered:'已交付',blocked:'需要处理',cancelled:'已取消'};
 type Props = {item:Obligation; rows:Obligation[]; detail:ConversationDetail; members:Member[]; command:WorkbenchCommand; refresh:()=>Promise<void>};
 
+function GroupResults({group, name}: {group:MentionGroup; name:(id:string)=>string}) {
+  const results = group.results ?? [];
+  const received = new Set(results.map(result => result.memberId));
+  const missing = group.targets.filter(memberId => !received.has(memberId));
+  const status = { collecting:'征询中', done:'已收齐', timeout:'已到截止时间', cancelled:'已取消', lost:'征询受阻' }[group.state];
+  return <details className="cc-obligation-group" open={group.state === 'collecting' || undefined}>
+    <summary>{group.question} · {status} · {results.length}/{group.targets.length}</summary>
+    {missing.length > 0 && <p>{group.state === 'collecting' ? '等待' : '缺少'}{missing.map(name).join('、')}的答复</p>}
+    {group.reason && <p>{group.reason}</p>}
+    {results.map(result => <p key={result.memberId}><strong>{name(result.memberId)} · {result.status === 'failed' ? '执行失败' : '已答复'}</strong><br/>{result.content}</p>)}
+    {group.state === 'collecting' && group.contract && <small>收齐后由{name(group.contract.returnTo.memberId)}继续 · 截至 {new Date(group.deadline).toLocaleString()}</small>}
+  </details>;
+}
+
 export function ObligationReceipt({item,rows,detail,members,command,refresh}:Props) {
   const [action,setAction]=useState<''|'signal'|'cancel'>(''),[note,setNote]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   const trigger=useRef<HTMLElement>(null), pending=useRef<{signature:string;requestId:string}|null>(null);
+  const observedWaitId = useRef<string | undefined>(undefined);
   const name=(id:string)=>members.find(m=>m.id===id)?.name??id;
   const children=rows.filter(o=>o.parentId===item.id);
   const current=[...children].reverse().find(c=>!['delivered','cancelled'].includes(c.state));
+  const groups = (detail.groups ?? []).filter(group => group.contract?.obligationId === item.id);
+  const active = groups.find(group => group.id === item.activeGroupId && group.state === 'collecting');
+  const timer = item.wait?.kind === 'timer';
+  function progressLabel() {
+    if (active) return `等待成员答复 · ${active.results?.length ?? 0}/${active.targets.length}`;
+    if (item.state === 'waiting' && timer) return '等待约定时间';
+    if (item.state === 'delegated' && current) return '等待 ' + name(current.owner.memberId) + ' 回报';
+    return labels[item.state];
+  }
   const restore=()=>requestAnimationFrame(()=>trigger.current?.focus({preventScroll:true}));
-  const reset=()=>{setAction('');setError('');setNote('');pending.current=null;restore();};
+  const reset=()=>{observedWaitId.current=undefined;setAction('');setError('');setNote('');pending.current=null;restore();};
   async function submit(op:'signal'|'accept'|'cancel'|'retry'){
     if(busy)return;
+    if (op === 'signal' && (item.state !== 'waiting' || !item.wait || item.wait.id !== observedWaitId.current)) {
+      setError('这项等待已结束。请返回查看最新进度。'); return;
+    }
     const fields=op==='signal'?{condition:item.wait?.condition,waitId:item.wait?.id,summary:note.trim()}:op==='cancel'&&note.trim()?{reason:note.trim()}:{};
     const signature=JSON.stringify([op,item.id,item.revision,fields]); if(pending.current?.signature!==signature)pending.current={signature,requestId:crypto.randomUUID()};
     setBusy(true);setError('');
@@ -24,19 +51,22 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh}:Pro
     catch(e){setError((e as Error).message);await refresh().catch(()=>{});} finally{setBusy(false);}
   }
   const editable=!detail.conversation.archivedAt&&!detail.conversation.deletedAt;
-  return <details className="cc-obligation"><summary ref={trigger}><strong>{name(item.owner.memberId)} 负责</strong><span> · {item.state==='delegated'&&current?'等待 '+name(current.owner.memberId)+' 回报':labels[item.state]}</span></summary>
+  return <details className="cc-obligation"><summary ref={trigger}><strong>{name(item.owner.memberId)} 负责</strong><span> · {progressLabel()}</span></summary>
     <div className="cc-obligation-body"><p>{item.goal}</p><small>交付条件：{item.acceptance}</small>
       {item.userAcceptance&&<small>你在原消息中要求：「{item.userAcceptance.quote}」</small>}
+      {groups.map(group => <GroupResults key={group.id} group={group} name={name} />)}
       {children.map(child=><div className="cc-obligation-child" key={child.id}><strong>{name(child.owner.memberId)} · {child.report?{passed:'验证通过',failed:'验证未通过',blocked:'验证受阻'}[child.report.outcome]:labels[child.state]}</strong>
         <p>{child.report?.summary??child.acceptance}</p>{child.version&&<small title={child.version}>验证版本：{child.version}</small>}
         {child.report && <small>{child.report.authority==='project_test'?'项目测试回执':'成员回报'}{child.report.evidenceIds.length?' · '+child.report.evidenceIds.length+' 条证据':''}</small>}
         {child.report?.invocationId && <a href={'#message-'+(detail.messages.find(m=>m.responseId===detail.invocations.find(i=>i.id===child.report?.invocationId)?.responseId)?.id??'')}
           hidden={!detail.messages.some(m=>m.responseId&&m.responseId===detail.invocations.find(i=>i.id===child.report?.invocationId)?.responseId)}>查看验证回复</a>}</div>)}
-      {item.wait&&<small>等待：{item.wait.condition} · 截至 {new Date(item.wait.deadline).toLocaleString()}</small>}
+      {item.wait && <small>{item.wait.condition} · {timer
+        ? `${new Date(item.wait.deadline).toLocaleString()} ${item.wait.firedAt ? '已安排' : '提醒'} ${name(item.owner.memberId)} 接回`
+        : `截至 ${new Date(item.wait.deadline).toLocaleString()}`}</small>}
       {item.reason&&<p>{item.reason}</p>}{item.delivery?.messageId&&<a href={'#message-'+item.delivery.messageId}>查看最终答复</a>}
       {editable&&!['delivered','cancelled'].includes(item.state)&&<div className="cc-obligation-actions">
         {!action&&<>{item.state==='blocked'&&<button disabled={busy} onClick={()=>void submit('retry')}>请负责人复核</button>}{item.state==='awaiting_acceptance'&&<button disabled={busy} onClick={()=>void submit('accept')}>确认验收</button>}
-          {item.state==='waiting'&&!item.wait?.condition.startsWith('ci:')&&<button onClick={()=>setAction('signal')}>补充实际结果</button>}
+          {item.state==='waiting'&&item.wait&&!timer&&!item.wait.condition.startsWith('ci:')&&<button onClick={()=>{observedWaitId.current=item.wait?.id;setAction('signal');}}>补充实际结果</button>}
           <button onClick={()=>setAction('cancel')}>取消跟进…</button></>}
         {action&&<form onSubmit={e=>{e.preventDefault();void submit(action);}}><label>{action==='signal'?'你观察到了什么结果？':'取消后将停止跟进，可填写原因'}
           <textarea autoFocus value={note} maxLength={action==='signal'?2000:1000} onChange={e=>setNote(e.target.value)} required={action==='signal'}/></label>

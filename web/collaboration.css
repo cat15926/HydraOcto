@@ -116,3 +116,6 @@
 .cc-obligation-actions form,.cc-obligation-actions label {width:100%}
 .cc-obligation-actions textarea {display:block;width:100%;min-height:3em;box-sizing:border-box}
 .cc-obligation-actions button {margin:.25rem .4rem .25rem 0}
+
+.cc-obligation-group {min-width:0;border-bottom:1px solid var(--border, #d8e1d4);padding-bottom:.35rem}
+.cc-obligation-group p {white-space:pre-wrap}

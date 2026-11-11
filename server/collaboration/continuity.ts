@@ -8,6 +8,7 @@ export function sessionFingerprint(contract: ExecutionContractSnapshot, identity
   return digest({ carrier: m.carrier, account: a, model: m.model, effort: m.effort, instructions: m.instructions,
     ...(contract.roomMember && {roomMemberId:contract.roomMember.id}),
     ...(contract.obligationPolicy && {obligationPolicy:true}),
+    ...(contract.continuationPolicy && {continuationPolicy:contract.continuationPolicy}),
     ...(imageInvocationId ? { imageInvocationId } : {}),
     ...(contract.visibilityEpoch !== undefined ? { visibility: contract.visibility, visibilityEpoch: contract.visibilityEpoch } : {}),
     ...(contract.workspaceGrant?.mode === 'project-work' ? {

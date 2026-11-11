@@ -47,14 +47,28 @@ const ordinary = [
 
 interface ObligationToolScope {
   obligationPolicy?: boolean;
+  continuationPolicy?: 'durable-v1';
   toolPolicyVersion?: string;
   visibility?: MessageVisibility;
   projectWork?: boolean;
   projectReview?: ProjectReviewScope;
 }
 
+export function supportsContinuation(scope: ObligationToolScope) {
+  return scope.obligationPolicy === true && scope.continuationPolicy === 'durable-v1' &&
+    scope.toolPolicyVersion === 'cross-action-v1' && !scope.visibility && !scope.projectReview;
+}
+
 export function obligationTools(scope: ObligationToolScope) {
   if (scope.obligationPolicy !== true || scope.toolPolicyVersion !== 'cross-action-v1' || scope.visibility) return [];
   if (scope.projectReview) return scope.projectWork ? [] : [list, report];
-  return ordinary;
+  if (!supportsContinuation(scope)) return ordinary;
+  return ordinary.map(tool => tool.name !== 'obligation_wait' ? tool : {
+    ...tool,
+    description: 'Wait on your current commitment. For a named event use kind=event with the exact condition and an ISO deadline. For a timer use kind=timer with the wake time as the deadline and a reminder in condition. End this turn after registration.',
+    inputSchema: object({
+      obligationId: text, condition: text, deadline: text,
+      kind: { type: 'string', enum: ['event', 'timer'] },
+    }, ['obligationId', 'condition', 'deadline']),
+  });
 }

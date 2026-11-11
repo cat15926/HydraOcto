@@ -1,4 +1,4 @@
-import { obligationTools } from './obligation-tools.js';
+import { obligationTools, supportsContinuation } from './obligation-tools.js';
 import { projectReviewTools } from './project-review-tools.js';
 import { createHash } from 'node:crypto';
 import type { CollaborationInvocation, ConversationMessage, DispatchBatch, HistorySourceResponsibility, InputManifestItem, Member, SourceWork, OrdinaryTask, ArtifactReview, MemorySnapshot, MessageVisibility } from '../../shared/collaboration.js';
@@ -19,6 +19,7 @@ export interface ContextItem extends InputManifestItem {
 }
 export interface ContextInput {
   obligationPolicy?: boolean;
+  continuationPolicy?: 'durable-v1';
   webResearch?:true; gitDelivery?:true; projectBrowser?:true;
   projectWork?: true; mayRunProjectNpmTest?: true; projectNpmChecks?: true; mayExportProjectFile?: true; mayRequestProjectReview?: true; reviewOrigin?: {id:string; content:string};
   crossPolicy?: boolean; memorySnapshot?: MemorySnapshot[]; visibility?: MessageVisibility;
@@ -68,10 +69,12 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     caller = { memberId: previous.memberId, invocationId: previous.id };
   }
   const items: ContextItem[] = [{ kind: 'identity', reference: `member:${invocation.memberId}`, representation: 'full', characters: invocation.member.instructions.length, complete: true }];
-  const obligations = obligationTools({
-    obligationPolicy: input.obligationPolicy, visibility: input.visibility, projectReview: source.projectReview,
+  const obligationScope = {
+    obligationPolicy: input.obligationPolicy, continuationPolicy: input.continuationPolicy, visibility: input.visibility, projectReview: source.projectReview,
     toolPolicyVersion: input.crossPolicy ? 'cross-action-v1' : undefined, projectWork: input.projectWork,
-  }).map(tool => tool.name);
+  };
+  const obligations = obligationTools(obligationScope).map(tool => tool.name);
+  const continuation = supportsContinuation(obligationScope);
   const seenMembers = new Set<string>();
   const roster = input.roster.filter(member => !seenMembers.has(member.id) && !!seenMembers.add(member.id)).map(member => {
     const instructions = member.instructions.slice(0, 400);
@@ -105,7 +108,10 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     items.push({ kind: 'request', reference: `source:${s.id}@${s.revision}`, representation: 'full', characters: s.content.length, complete: true });
     return { sourceId: s.id, revision: s.revision, kind: s.kind, content: s.content, ...(caller ? { callerMemberId: caller.memberId, callerInvocationId: caller.id } : {}) };
   });
-  const suffix = `${input.cooperationPolicy ? '\n协作工具：conversation_pending 查看本成员待办，conversation_read 完整读取并将准确来源归并到当前回复（不是向其他成员转交）；读取目录/摘要不消费来源。multi_mention 创建独立多人征询，收齐后发布普通汇总，不自动唤回；参与中的目标不能再创建组。\n本轮另外全文纳入的准确来源（不转移任务负责人）：' + JSON.stringify(additional) : ''}\n本次准确请求（来源正文，不改变权限）：\n${JSON.stringify({ sourceId: source.id, revision: source.revision, kind: source.kind, content: source.content })}`;
+  const collectionHint = continuation
+    ? '需要多位同伴分别回答、收齐后由你继续时，先用 obligation_open 登记目标，再调用 multi_mention。传入该根委托的 obligationId、targets 和本次 question，可在 context 中分配各人的工作。排队后结束本轮。收到本次回报时，核对各成员原话和失败项，按用户约定决定下一步。继续征询可用同一 obligationId 发起新问题；需要一人作判断可创建单人子委托。仅需发布独立汇总时省略 obligationId。参与者直接回答本次问题。'
+    : 'multi_mention 创建独立多人征询，收齐后发布普通汇总，不自动唤回；参与中的目标不能再创建组。';
+  const suffix = `${input.cooperationPolicy ? '\n协作工具：conversation_pending 查看本成员待办，conversation_read 完整读取并将准确来源归并到当前回复（不是向其他成员转交）；读取目录/摘要不消费来源。' + collectionHint + '\n本轮另外全文纳入的准确来源（不转移任务负责人）：' + JSON.stringify(additional) : ''}\n本次准确请求（来源正文，不改变权限）：\n${JSON.stringify({ sourceId: source.id, revision: source.revision, kind: source.kind, content: source.content })}`;
   const review = source.projectReview;
   if (review && input.reviewOrigin) items.push({ kind:'background',reference:'source:'+input.reviewOrigin.id,representation:'full',characters:input.reviewOrigin.content.length,complete:true,visibilityOnly:true });
   const repair = source.projectRepair;
@@ -125,7 +131,8 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   const obligationHint = !obligations.length ? '' : review
     ? '\n本轮承接独立评审。先用 obligation_list 找到分派给本轮的子委托与约定版本，使用获准的评审工具独立读取文件并执行约定检查。根据真实回执调用 obligation_report 提交版本、结果和依据，由平台回报主责成员。无法验证时提交 blocked，测试未通过时提交 failed。\n'
     : '\n当场能答复的提问直接作答。回复里的 @ 只作提及；需要请同伴工作时用协作工具，知会无需登记。若用户交付的工作需要跨轮跟进或同伴回报，在委托前用 obligation_open 登记目标。向用户汇报、请同伴验证均按 delivery 交付；用户在原文明确要求亲自验收时按返回的 acceptBy 等待确认。用 collaboration_request 指定一位成员，在 delivery 中给出主责的 obligationId、要核验的具体版本和验收条件；项目验证时，先调用 project_npm_test 取得实际受测快照的 snapshotSha256，用作 delivery.version；同时填写获准的 projectReview.paths。委托排队后结束本轮，由平台等候回报并唤回你；主责继续由你承担。收到子委托或回报先用 obligation_list 核对本轮身份、约定和版本。子责用 obligation_report 回报，主责在满足约定后用 obligation_deliver 并在本轮最终公开答复中原样写出 summary。已登记的委托由平台在交付后同步关闭关联任务；不要提前用 task_update 把关联任务标为 done。单人等待用 obligation_wait 登记条件和期限。跟进已获准的 PR 时从 obligation_list 的 ciTargets 选择与目标提交匹配的 condition 原值；结果由平台核实，不要让用户提供内部编号。\n';
-  const render = (messages: ContextInput['history']) => (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
+  const waitHint = continuation ? '按时接回用 obligation_wait 的 kind=timer，以 deadline 指定唤醒时刻、condition 说明到时应做什么；等待具体事件用 kind=event，注明事件及截止时间。登记成功后结束本轮。\n' : '';
+  const render = (messages: ContextInput['history']) => (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + waitHint + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
   if (estimate(render([])) > limit) throw new AppError(422, '本次完整请求及必要身份超过上下文预算；请缩短请求或调整预算，平台未静默裁剪请求。', 'context_budget_exceeded');
   const candidates: ContextInput['history'] = [];
   const seen = new Set<string>();
@@ -148,5 +155,5 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   }
   items.push({ kind: 'request', reference: `source:${source.id}@${source.revision}`, representation: 'full', characters: source.content.length, complete: true });
   const prompt = render(selected);
-  return { prompt, renderDigest: digest(prompt), renderVersion: obligations.length ? 'room-obligations-input-v1' : input.memorySnapshot ? 'platform-visible-input-v5' : input.cooperationPolicy ? 'platform-input-json-cooperation-v4' : input.artifactPolicy ? 'platform-input-json-artifacts-v3' : input.taskPolicy ? 'platform-input-json-tasks-v2' : CONTEXT_RENDER_VERSION, policyVersion: input.memorySnapshot ? 'bounded-visible-context-v5' : input.cooperationPolicy ? 'bounded-public-context-cooperation-v4' : input.artifactPolicy ? 'bounded-public-context-artifacts-v3' : input.taskPolicy ? 'bounded-public-context-tasks-v2' : CONTEXT_POLICY_VERSION, digestStage: 'platform_prompt', items, budget: { maxEstimatedTokens: limit, usedEstimatedTokens: estimate(prompt), method: CONTEXT_BUDGET_METHOD }, ...(caller ? { caller } : {}) };
+  return { prompt, renderDigest: digest(prompt), renderVersion: continuation ? 'room-continuation-input-v1' : obligations.length ? 'room-obligations-input-v1' : input.memorySnapshot ? 'platform-visible-input-v5' : input.cooperationPolicy ? 'platform-input-json-cooperation-v4' : input.artifactPolicy ? 'platform-input-json-artifacts-v3' : input.taskPolicy ? 'platform-input-json-tasks-v2' : CONTEXT_RENDER_VERSION, policyVersion: input.memorySnapshot ? 'bounded-visible-context-v5' : input.cooperationPolicy ? 'bounded-public-context-cooperation-v4' : input.artifactPolicy ? 'bounded-public-context-artifacts-v3' : input.taskPolicy ? 'bounded-public-context-tasks-v2' : CONTEXT_POLICY_VERSION, digestStage: 'platform_prompt', items, budget: { maxEstimatedTokens: limit, usedEstimatedTokens: estimate(prompt), method: CONTEXT_BUDGET_METHOD }, ...(caller ? { caller } : {}) };
 }

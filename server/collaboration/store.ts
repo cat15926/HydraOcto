@@ -143,12 +143,15 @@ export class CollaborationStore {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id),
         state TEXT NOT NULL, value TEXT NOT NULL
       ); CREATE INDEX IF NOT EXISTS cc_project_intents_pending ON cc_project_intents(conversation_id,state)`);
-      if (version > 14) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 15) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
       this.roomMembers.migrate(version < 14);
       migrateObligations(this.db);
-      if (version === 14) return;
-      if (version >= 2 && version < 14) { this.db.exec('UPDATE cc_schema SET version=14'); return; }
+      this.db.exec(`CREATE TABLE IF NOT EXISTS cc_obligation_wait_wakes(
+        wait_id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES cc_obligations(id),
+        source_id TEXT NOT NULL UNIQUE REFERENCES cc_sources(id), event_key TEXT NOT NULL, value TEXT NOT NULL)`);
+      if (version === 15) return;
+      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=15'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -165,7 +168,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(14)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(15)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }
@@ -215,7 +218,7 @@ export class CollaborationStore {
     const obligationPolicy = roomMember && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
       !source.crossRef && !source.actionRef && (!source.projectReview || boundObligation) &&
       (source.kind === 'user' || boundObligation || !!source.taskRef);
-    return { ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
+    return { ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
       ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private verifyProjectWork(source: SourceWork, memberId: string, grant: Conversation['workspaceGrant']) {
@@ -475,7 +478,8 @@ export class CollaborationStore {
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
     const parent = input.parentInvocationId ? this.invocation(input.parentInvocationId) : undefined;
     const instanceBound = parent?.conversationId === conversation.id ? !!parent.roomMember : conversation.collaborationMode === 'continuous';
-    const source: SourceWork = { ...input, ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
+    const continuation = instanceBound && (!parent || this.contract(parent.id).continuationPolicy === 'durable-v1');
+    const source: SourceWork = { ...input, ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
     this.db.prepare('INSERT INTO cc_sources VALUES(?,?,?,?)').run(source.id, source.conversationId, sequence, JSON.stringify(source));
     for (const memberId of source.requestedTargets) {
       const enabled = this.get<Member>('cc_members', memberId).enabled;
@@ -759,6 +763,7 @@ export class CollaborationStore {
       if (event.kind === 'usage') i.usage = nativeUsage(event.detail) ?? i.usage;
       this.applySessionEvent(i, evidence);
       this.saveInvocation(i); this.event(i.conversationId, 'invocation.evidence', { invocationId, evidenceId: evidence.id, kind: event.kind });
+      if (terminal.has(i.status) && i.teardown === 'confirmed' && i.acceptance === 'accepted') this.cooperation.observeTerminalEvidence(i);
       this.tasks.onInvocationChanged(i);
     });
   }
@@ -822,7 +827,7 @@ export class CollaborationStore {
         const receipt = this.rows<Consumption>('cc_consumptions', 'WHERE source_id=? AND response_id=?', [source.id, response.id])[0];
         const delivery = receipt && this.get<Delivery>('cc_deliveries', receipt.deliveryId);
         if (proof.invocationId !== i.id || proof.responseId !== response.id || proof.identity !== 'strict' || source.conversationId !== i.conversationId || caller.conversationId !== i.conversationId || caller.memberId !== proof.callerMemberId || source.authorMemberId !== caller.memberId || source.parentInvocationId !== caller.id || !response.inputSourceIds.includes(source.id) || receipt?.memberId !== i.memberId || delivery?.responseId !== response.id || delivery?.status !== 'consumed') throw new AppError(409, 'Failure return proof is inconsistent.', 'failure_proof_conflict');
-        if (!privateScope(this.contract(i.id).visibility) && source.kind !== 'a2a_failure' && !this.obligations.isBoundSource(source.id) && !source.withdrawnAt && caller.memberId !== i.memberId && (!caller.roomMember || this.roomMembers.isCurrent(caller.roomMember))) callers.add(caller.memberId);
+        if (!privateScope(this.contract(i.id).visibility) && source.kind !== 'a2a_failure' && !this.cooperation.isDurableGroupSource(source) && !this.obligations.isBoundSource(source.id) && !source.withdrawnAt && caller.memberId !== i.memberId && (!caller.roomMember || this.roomMembers.isCurrent(caller.roomMember))) callers.add(caller.memberId);
       }
       i.status = status; i.finishedAt = now(); if (status !== 'succeeded') i.error = content; else delete i.error;
       if (status === 'interrupted') { i.interruptionCause ??= (i.cancelRevision ?? 0) > 0 ? 'user_cancel' : interruptionCause ?? 'service_stop'; i.recoveryState = 'pending'; }
@@ -850,6 +855,7 @@ export class CollaborationStore {
         else if (mentions.length && (batch.mode === 'parallel' || source.groupId)) this.event(i.conversationId, 'routing.text_suppressed', { invocationId, reason: 'parallel_batch' });
         else if (mentions.length && source.depth < maxDepth) this.addSource({ conversationId: i.conversationId, kind: 'mention', content, requestedTargets: mentions, parentInvocationId: i.id, authorMemberId: i.memberId, depth: source.depth + 1 });
       }
+      this.cooperation.observeGroupFinish(source,i);
       this.obligations.onFinish(i);
       if (!recoveryId) this.projectRevisions.onFinished(i,source);
       this.tasks.onInvocationChanged(i);
@@ -926,6 +932,7 @@ export class CollaborationStore {
               check.resolution = 'closed_result_unknown'; check.reason = '准确执行已退出，结果仍待核查，不自动重发。';
             }
           } else if (terminal.has(i.status) && i.status !== 'interrupted') {
+            if (i.teardown === 'confirmed' && i.acceptance === 'accepted') this.cooperation.observeTerminalEvidence(i);
             check.resolution = 'already_settled'; check.reason = '已补齐准确退出证据，保留原有终态。';
           } else if (i.status === 'interrupted' && i.recoveryState === 'pending' && ['service_restart', 'service_stop'].includes(i.interruptionCause ?? '') && (i.cancelRevision ?? 0) === 0 && observation.result && observation.state === 'settled' && observation.teardown === 'confirmed') {
             this.finishTransition(i.id, observation.result.status, observation.result.content, input.expectedInputRevision, 8, check.id);
@@ -1017,7 +1024,7 @@ export class CollaborationStore {
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (source.revision !== c.sourceRevision || hash(source.content) !== c.sourceDigest) throw new AppError(409, '来源已变化，不能使用旧执行的输入。', 'inputs_changed');
       const response = this.response(i.responseId); const legacy = c.contextPolicyVersion === 'legacy-history-40-v1';
-      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, obligationPolicy:c.obligationPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
+      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
         history: (c.historySnapshot ?? []).map(m => ({ ...m, sequence: m.sequence! })), historySourceSnapshots: c.historySourceSnapshots,
         ...(source.parentInvocationId ? { caller: this.invocation(source.parentInvocationId) } : {}) });
       let assembly = legacy ? undefined : build([]);

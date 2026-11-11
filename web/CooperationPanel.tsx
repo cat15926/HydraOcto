@@ -66,10 +66,10 @@ export function CooperationPanel({ detail, members, command, refresh }: Props) {
     </details>
     {!!detail.groups?.length && <section aria-label="多人征询进度">
       <div className="cc-section-title"><h3>多人征询 · {detail.groups.length}</h3></div>
-      {detail.groups.map(g => <details className="cc-cooperation-card" key={g.id} data-mention-group={g.id}><summary>{g.question} · {groupNames[g.state]}{g.results && ` · 已收集 ${g.results.length}/${g.targets.length}`}</summary>
-        {g.context && <p>{g.context}</p>}<small>参与成员：{g.targets.map(name).join('、')} · 截止 {new Date(g.deadline).toLocaleTimeString()}</small>
+      {detail.groups.map(g => <details className="cc-cooperation-card" key={g.id} data-mention-group={g.id}><summary>{g.question} · {g.contract && g.state === 'lost' ? '征询受阻' : groupNames[g.state]}{g.results && ` · 已收集 ${g.results.length}/${g.targets.length}`}</summary>
+        {g.context && <p>{g.context}</p>}{g.reason && <p>{g.reason}</p>}<small>参与成员：{g.targets.map(name).join('、')} · 截止 {new Date(g.deadline).toLocaleTimeString()}</small>
         {g.missing?.length ? <p>{g.state === 'collecting' ? '等待' : '未收集'}：{g.missing.map(name).join('、')}</p> : null}
-        {g.state === 'collecting' && <p className="cc-note">收齐后将在对话中汇集各成员的结果。</p>}
+        {g.state === 'collecting' && <p className="cc-note">{g.contract ? '收齐后由' + name(g.contract.returnTo.memberId) + '继续。' : '收齐后将在对话中汇集各成员的结果。'}</p>}
         {g.state === 'timeout' && <p className="cc-note">已到等待时限，未生成完整结果汇集。</p>}
         {g.state === 'done' && <p className="cc-note">以下为各成员的原始结果。</p>}
         {g.results?.map(r => <p key={r.memberId}><strong>{name(r.memberId)} · {r.status === 'failed' ? '失败' : '已返回'}</strong><br />{r.content}</p>)}

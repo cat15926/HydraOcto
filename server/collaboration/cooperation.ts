@@ -145,7 +145,8 @@ export class CooperationService {
   }
   groups(cid?: string) { return this.data.rows<MentionGroup>('cc_mention_groups', cid).map(g => ({ ...g, ...(g.state === 'collecting' && this.collectors.has(g.id) ? { results: [...this.collectors.get(g.id)!.values()], missing: g.targets.filter(t => !this.collectors.get(g.id)!.has(t)) } : {}) })); }
   createGroup(cid: string, input: Record<string, unknown>, invocationId?: string) {
-    return this.port.tx(() => {
+    const outcome = this.port.tx(() => {
+      if (input.obligationId !== undefined && !invocationId) conflict('持续征询须由当前责任成员发起。');
       if (invocationId) { this.store.visibility.assertTool(invocationId, 'multi_mention'); this.actor(this.store.invocation(invocationId)); }
       const out = this.port.command(`multi-mention:${cid}:${stringField(input.requestId, '请求标识')}`, { input, invocationId }, () => {
         const i = invocationId ? this.store.invocation(invocationId) : undefined;
@@ -157,15 +158,106 @@ export class CooperationService {
         if (context.length > 10000) throw new AppError(400, '上下文过长。');
         const ttl = input.timeoutMs ?? 120000; if (!Number.isSafeInteger(ttl) || Number(ttl) < 1000 || Number(ttl) > 600000) throw new AppError(400, '征询期限须为 1–600 秒。');
         const g: MentionGroup = { id: randomUUID(), conversationId: cid, sourceId: '', targets, question, context, state: 'collecting', createdAt: now(), deadline: new Date(this.clock() + Number(ttl)).toISOString(), revision: 1, ...(i ? { callerInvocationId: i.id, callbackTo: i.memberId } : {}) };
-        const source = this.store.admitSource({ conversationId: cid, kind: 'multi_mention', content: `多人征询 ${g.id}\n${question}\n${context}\n请直接回答当前问题。汇总不会唤回发起者；不得嵌套创建 multi_mention。`, requestedTargets: targets, depth: i ? this.source(this.store.response(i.responseId).inputSourceIds[0]!).depth + 1 : 0, groupId: g.id, ...(i ? { parentInvocationId: i.id, authorMemberId: i.memberId } : {}) });
+        if (input.obligationId !== undefined) {
+          const contract = this.store.obligations.beginGroup(invocationId!, input.obligationId, g);
+          if (typeof contract === 'string') return {blocked: contract};
+          g.contract = contract; g.results = []; g.missing = [...targets];
+        }
+        const instructions = g.contract ? '请直接回答当前问题。平台收集本次答复后会交回发起成员。' : '请直接回答当前问题。汇总不会唤回发起者；不得嵌套创建 multi_mention。';
+        const source = this.store.admitSource({ conversationId: cid, kind: 'multi_mention', content: `多人征询 ${g.id}\n${question}\n${context}\n${instructions}`, requestedTargets: targets, depth: i ? this.source(this.store.response(i.responseId).inputSourceIds[0]!).depth + 1 : 0, groupId: g.id, ...(i ? { parentInvocationId: i.id, authorMemberId: i.memberId } : {}) });
         if (source.depth > 8) conflict('征询达到协作深度上限。');
         g.sourceId = source.id; this.data.save('cc_mention_groups', g, 'group.created'); return { group: g };
-      }); if (!out.replayed) this.collectors.set(out.result.group.id, new Map()); return { ...out.result, replayed: out.replayed };
+      });
+      if (out.result.group && !out.result.group.contract && !out.replayed) this.collectors.set(out.result.group.id, new Map());
+      return { ...out.result, replayed: out.replayed };
     });
+    if (!outcome.group) throw new AppError(409, outcome.blocked!, 'collection_budget_exhausted');
+    return {group: outcome.group, replayed: outcome.replayed};
   }
+
+  isDurableGroupSource(source: SourceWork) {
+    return source.kind === 'multi_mention' && !!source.groupId &&
+      !!this.data.get<MentionGroup>('cc_mention_groups', source.groupId).contract;
+  }
+
+  observeTerminalEvidence(run: CollaborationInvocation) {
+    if (run.teardown !== 'confirmed' || run.acceptance !== 'accepted' || !['succeeded','failed'].includes(run.status)) return;
+    const sourceId = this.store.contract(run.id).primarySourceId;
+    if (sourceId) this.observeGroupFinish(this.source(sourceId), run);
+  }
+
+  /** Commit a receipt against its exact consumed delivery. The next scheduler tick joins the sealed receipts. */
+  observeGroupFinish(source: SourceWork, run: CollaborationInvocation) {
+    if (source.kind !== 'multi_mention' || !source.groupId || source.withdrawnAt) return;
+    const g = this.data.get<MentionGroup>('cc_mention_groups', source.groupId);
+    if (!g.contract || g.state !== 'collecting' || this.clock() >= Date.parse(g.deadline) ||
+        g.sourceId !== source.id || g.conversationId !== run.conversationId ||
+        !['succeeded','failed'].includes(run.status) || run.teardown !== 'confirmed' ||
+        run.acceptance !== 'accepted' || (run.cancelRevision ?? 0) !== 0 ||
+        g.results?.some(r => r.memberId === run.memberId)) return;
+    const bound = g.contract.participants.find(p => p.memberId === run.memberId);
+    const contract = this.store.contract(run.id);
+    if (contract.primarySourceId !== source.id || contract.visibility || !bound || !run.roomMember ||
+        run.roomMember.id !== bound.instanceId || run.roomMember.generation !== bound.generation ||
+        contract.roomMember?.id !== bound.instanceId || contract.roomMember.generation !== bound.generation ||
+        !this.store.roomMembers.isCurrent(run.roomMember)) return;
+    const receipt = this.store.db.prepare(
+      'SELECT 1 FROM cc_consumptions c JOIN cc_deliveries d ON d.source_id=c.source_id AND d.response_id=c.response_id ' +
+      "WHERE c.source_id=? AND c.response_id=? AND d.id=c.delivery_id AND d.member_id=? AND d.status='consumed'"
+    ).get(source.id, run.responseId, run.memberId);
+    const response = this.store.response(run.responseId);
+    if (!receipt || response.invocationId !== run.id || response.memberId !== run.memberId ||
+        response.status !== run.status || !response.content.trim()) return;
+    g.results ??= [];
+    g.results.push({memberId:run.memberId, responseId:run.responseId, invocationId:run.id, status:run.status as 'succeeded'|'failed', content:response.content});
+    g.missing = g.targets.filter(member => !g.results!.some(r => r.memberId === member));
+    g.revision++;
+    this.data.save('cc_mention_groups', g, 'group.receipt');
+  }
+
+  private tickDurable(g: MentionGroup) {
+    const source = this.source(g.sourceId);
+    const issue = this.store.obligations.groupIssue(g) ?? (source.withdrawnAt ? '征询投递已撤回。' : undefined);
+    if (issue) { g.state = 'lost'; g.reason = issue; }
+    else {
+      // Some carriers report teardown after the terminal response. Pick up that persisted evidence too.
+      if (g.missing?.length && this.clock() < Date.parse(g.deadline)) {
+        for (const member of g.missing) {
+          const row = this.store.db.prepare('SELECT i.value FROM cc_deliveries d JOIN cc_invocations i ON i.response_id=d.response_id WHERE d.source_id=? AND d.member_id=?').get(source.id,member) as {value:string}|undefined;
+          if (row) this.observeGroupFinish(source, JSON.parse(row.value));
+        }
+        g = this.data.get<MentionGroup>('cc_mention_groups', g.id);
+      }
+      if (!g.missing?.length) g.state = 'done';
+      else if (this.clock() >= Date.parse(g.deadline)) g.state = 'timeout';
+      else return;
+    }
+    if (g.state !== 'done' && !source.withdrawnAt) {
+      // Fence queued targets only. Already running late replies remain in their original execution history.
+      this.withdraw(source.id, {requestId:'settled:'+g.id, expectedRevision:source.revision});
+      for (const run of this.store.invocations(g.conversationId)) {
+        if (run.status === 'prepared' && !run.dispatchStarted && this.store.contract(run.id).primarySourceId === source.id) {
+          this.store.cancel(run.id);
+        }
+      }
+    }
+    g.finishedAt = now(); g.revision++;
+    this.store.obligations.settleGroup(g);
+    this.data.save('cc_mention_groups', g, 'group.' + g.state);
+  }
+
+  stopRootGroup(id: string) {
+    const g = this.data.get<MentionGroup>('cc_mention_groups', id);
+    if (g.state !== 'collecting' || !g.contract) return;
+    this.store.cross.withdraw(this.source(g.sourceId));
+    g.state = 'cancelled'; g.finishedAt = now(); g.revision++;
+    this.data.save('cc_mention_groups', g, 'group.cancelled');
+  }
+
   groupTick() {
     this.port.tx(() => { for (const g of this.data.rows<MentionGroup>('cc_mention_groups')) {
       if (g.state !== 'collecting') continue;
+      if (g.contract) { this.tickDurable(g); continue; }
       const collector = this.collectors.get(g.id);
       if (!collector) { g.state = 'lost'; g.missing = g.targets; }
       else if (Date.parse(g.deadline) <= this.clock()) { g.state = 'timeout'; g.results = [...collector.values()]; g.missing = g.targets.filter(t => !collector.has(t)); }
@@ -185,7 +277,9 @@ export class CooperationService {
     return this.port.tx(() => {
       const out = this.port.command(`group-cancel:${id}:${stringField(input.requestId, '请求标识')}`, input, () => {
         const g = this.data.get<MentionGroup>('cc_mention_groups', id); if (g.state !== 'collecting' || g.revision !== input.expectedRevision) conflict('征询组状态已变化。');
-        g.state = 'cancelled'; g.finishedAt = now(); g.revision++; this.data.save('cc_mention_groups', g, 'group.cancelled');
+        g.state = 'cancelled'; g.finishedAt = now(); g.revision++;
+        if (g.contract) this.store.obligations.settleGroup(g);
+        this.data.save('cc_mention_groups', g, 'group.cancelled');
         this.withdraw(g.sourceId, { requestId: `group:${g.id}`, expectedRevision: this.source(g.sourceId).revision });
         const ids = this.store.invocations(g.conversationId).filter(i => this.store.response(i.responseId).inputSourceIds.includes(g.sourceId) && ['prepared', 'running'].includes(i.status)).map(i => i.id); for (const id of ids) this.store.cancel(id);
         return { group: g, invocationIds: ids };

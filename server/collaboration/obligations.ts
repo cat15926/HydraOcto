@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
-import type { AcceptanceEvidence, CollaborationInvocation, ConversationMessage, Delivery, OrdinaryTask, ProjectReviewCheck, SourceWork } from '../../shared/collaboration.js';
+import type { AcceptanceEvidence, CollaborationInvocation, ConversationMessage, Delivery, MentionGroup, OrdinaryTask, ProjectReviewCheck, SourceWork } from '../../shared/collaboration.js';
 import type { Obligation, ObligationDelegation, ObligationEndpoint, ObligationReport } from '../../shared/obligations.js';
 import { AppError, now } from '../store.js';
 import type { CollaborationStore } from './store.js';
@@ -244,13 +244,21 @@ export class ObligationService {
     const {o} = this.authorize(id,args.obligationId);
     if (o.parentId || o.state !== 'open') conflict('请在开放的主责任上登记等待。');
     const deadline = value(args.deadline,'截止时间',64), condition = value(args.condition,'等待条件');
+    const kind = args.kind;
+    if (kind !== undefined && (this.store.contract(id).continuationPolicy !== 'durable-v1' || (kind !== 'event' && kind !== 'timer'))) conflict('本轮不支持这种等待方式。');
+    if (kind === 'timer' && condition.startsWith('ci:')) conflict('CI 结果必须来自真实的运行记录。');
     if (condition.startsWith('ci:') && !ciTargets(this.store,id).some(target => target.condition === condition)) conflict('请选择本实例已经获准交付的 PR 和准确提交。');
     if (!Number.isFinite(Date.parse(deadline)) || Date.parse(deadline) <= this.clock()) conflict('请指定未来的有效截止时间。');
-    o.wait = {id:randomUUID(),condition,deadline:new Date(deadline).toISOString()}; o.state = 'waiting'; return this.save(o,'waiting');
+    if (kind && (o.waitCount ?? 0) >= 16) return this.block(o,'已连续登记 16 次等待，请负责人核对进展。');
+    if (kind) o.waitCount = (o.waitCount ?? 0) + 1;
+    o.wait = {id:randomUUID(), condition, deadline:new Date(deadline).toISOString(),
+      ...(kind && {kind, returnTo:{...o.owner}, ownerRevision:o.ownerRevision})};
+    o.state = 'waiting';
+    return this.save(o,'waiting');
   }
   tool(id: string, name: string, args: Record<string,unknown>, callId: string) {
     this.actor(id);
-    const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary'],obligation_wait:['obligationId','condition','deadline']};
+    const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary'],obligation_wait:['obligationId','condition','deadline','kind']};
     if (!keys[name] || Object.keys(args).some(k => !keys[name]!.includes(k))) throw new AppError(400,'责任工具参数无效；身份与执行只能由平台提供。');
     if (name === 'obligation_list') {
       const obligations = this.context(id);
@@ -283,6 +291,60 @@ export class ObligationService {
     const source = this.store.admitSource({conversationId:o.conversationId,kind:'job_result',requestedTargets:[owner.memberId],
       content:'责任 ' + o.id + ' · ' + o.goal + '\n' + content + '\n请先查询本轮委托，再决定下一步。',depth:0});
     o.currentSourceId = source.id; o.wakeSourceId = source.id; this.link(source.id,o.id);
+  }
+  beginGroup(id: string, key: unknown, group: MentionGroup): NonNullable<MentionGroup['contract']> | string {
+    if (this.store.contract(id).continuationPolicy !== 'durable-v1') conflict('此次执行尚未启用持续征询。');
+    const {o} = this.authorize(id, key);
+    if (o.parentId || o.activeGroupId || !['open', 'blocked'].includes(o.state)) {
+      conflict('仅当前负责的开放或待复核主委托可登记持续征询。');
+    }
+    const participants = group.targets.map(memberId => this.endpoint(o.conversationId, memberId));
+    if ((o.groupCount ?? 0) >= 16) {
+      const reason = '此委托的 16 次持续征询额度已用尽；请依据已有结果交付或由用户复核。';
+      this.block(o, reason);
+      return reason;
+    }
+    o.activeGroupId = group.id;
+    o.groupCount = (o.groupCount ?? 0) + 1;
+    o.state = 'waiting';
+    delete o.reason; delete o.wait; delete o.blockedReturnSourceId;
+    this.save(o, 'collecting');
+    return {version:2, obligationId:o.id, ownerRevision:o.ownerRevision!, returnTo:{...o.owner}, participants};
+  }
+
+  groupIssue(g: MentionGroup): string | undefined {
+    const contract = g.contract!;
+    const o = this.row(g.conversationId, contract.obligationId);
+    if (o.activeGroupId !== g.id || o.state !== 'waiting') return '主委托已不再等待本次征询。';
+    const task = o.taskId && this.store.tasks.getTask(o.taskId);
+    if (task && (task.pendingHandoffId || task.ownerRevision !== contract.ownerRevision || task.ownerMemberId !== contract.returnTo.memberId || task.disposition || ['done','blocked'].includes(task.status))) return '主任务的交付权已变化。';
+    try {
+      if (!same(o.owner, contract.returnTo) || !same(contract.returnTo, this.endpoint(g.conversationId, o.owner.memberId))) return '接回成员已变化。';
+      for (const participant of contract.participants) {
+        if (!same(participant, this.endpoint(g.conversationId, participant.memberId))) return '参与成员已退房或重新加入。';
+      }
+    } catch (e) { if (!(e instanceof AppError)) throw e; return '会话或约定的成员已不可用。'; }
+  }
+
+  settleGroup(g: MentionGroup) {
+    const contract = g.contract!;
+    const o = this.row(g.conversationId, contract.obligationId);
+    if (o.activeGroupId !== g.id || ended(o)) return;
+    delete o.activeGroupId;
+    if (g.state === 'cancelled' || g.state === 'lost') {
+      const reason = g.reason ?? '持续征询已取消，等待负责人复核。';
+      o.state = 'blocked'; o.reason = reason; delete o.blockedReturnSourceId;
+      this.save(o, 'collection_blocked'); return;
+    }
+    const collected = (g.results ?? []).map(r =>
+      '[' + r.memberId + ' · ' + (r.status === 'failed' ? '执行失败' : '已答复') + '] ' + r.content);
+    const status = g.state === 'timeout'
+      ? '本次征询已到期。缺少答复：' + g.missing!.join('、')
+      : '参与成员均已回报。请结合各份答复判断下一步。';
+    this.wake(o, ['持续征询 ' + g.id + ' · ' + g.question, status, ...collected].join('\n'));
+    contract.wakeSourceId = o.currentSourceId;
+    o.state = 'open'; o.reminderCount = 0;
+    this.save(o, 'collection_returned');
   }
   private returnReport(child: Obligation) {
     const parent = this.row(child.conversationId,child.parentId!);
@@ -458,14 +520,23 @@ export class ObligationService {
     if (input.condition?.startsWith('ci:')) conflict('CI 条件仅接受平台核对的真实运行结果。');
     return this.applySignal(cid,id,input,false);
   }
+  private recordWaitWake(o: Obligation, eventKey: string) {
+    const wait = o.wait!;
+    wait.firedAt = new Date(this.clock()).toISOString();
+    this.store.db.prepare('INSERT INTO cc_obligation_wait_wakes(wait_id,obligation_id,source_id,event_key,value) VALUES(?,?,?,?,?)')
+      .run(wait.id,o.id,o.wakeSourceId!,eventKey,JSON.stringify(wait));
+  }
   private applySignal(cid: string, id: string, input: WaitSignal, fromCi: boolean) {
     this.room(cid);
     return this.port.tx(() => this.port.command('obligation-signal:' + cid + ':' + value(input.requestId,'请求编号',160),{id,input},() => {
       const o = this.owner(this.row(cid,id)); this.version(o,input.expectedRevision);
       const summary = value(input.summary,'条件结果');
+      if (o.wait?.kind === 'timer') conflict('定时等待只在约定时刻由平台唤醒。');
+      if (o.wait?.returnTo && (!same(o.wait.returnTo,o.owner) || o.wait.ownerRevision !== o.ownerRevision)) conflict('等待的接回人已变更。');
       if (o.state !== 'waiting' || !o.wait || o.wait.id !== input.waitId || o.wait.condition !== input.condition || Date.parse(o.wait.deadline) <= this.clock()) conflict('这项等待已变化、过期或取消。');
       o.wait.signal = {requestId:input.requestId,summary,receivedAt:now()}; o.state = 'open';
       this.wake(o,(fromCi ? '平台已核对 CI 条件「' : '用户已明确确认条件「') + o.wait.condition + '」：' + summary);
+      if (o.wait.kind) this.recordWaitWake(o, input.requestId);
       return {obligation:this.save(o,'wait_signalled')};
     }).result);
   }
@@ -509,8 +580,12 @@ export class ObligationService {
           return !terminal.has(run.status) || run.teardown !== 'confirmed';
         })) conflict('仍有待领取或未释放的执行，请先等待。');
         this.wake(o,'用户要求复核先前的阻塞：' + (o.reason ?? '待核对') + '。请核对现有证据，需要新的项目操作时重新申请授权。');
-        o.state = 'open'; o.reminderCount = 0; delete o.reason; delete o.delivery;
+        o.state = 'open'; o.reminderCount = 0; o.waitCount = 0; o.groupCount = 0; delete o.reason; delete o.delivery;
       } else if (input.decision === 'cancel') {
+        if (o.activeGroupId) {
+          this.store.cooperation.stopRootGroup(o.activeGroupId);
+          delete o.activeGroupId;
+        }
         for (const linked of [o,...this.raw(cid).filter(child => child.parentId === o.id && !ended(child))]) {
           const source = this.store.artifacts.get<SourceWork>('cc_sources',linked.currentSourceId);
           if (!source.withdrawnAt && (source.kind === 'job_result' || (linked.parentId && source.kind === 'a2a'))) {
@@ -543,6 +618,24 @@ export class ObligationService {
             if (t.disposition || t.status === 'done' || t.status === 'blocked') conflict('关联任务已终结或阻塞，责任尚未交付。');
             if (t.pendingHandoffId) continue;
           }
+          if (o.state === 'waiting' && !o.wait && !o.activeGroupId) conflict('没有找到已登记的等待对象，请负责人复核。');
+          if (o.state === 'waiting' && o.wait?.returnTo && (!same(o.owner,o.wait.returnTo) || o.ownerRevision !== o.wait.ownerRevision)) conflict('原等待的接回人已变化，需要重新约定。');
+          if (o.state === 'waiting' && o.wait?.kind === 'timer' && Date.parse(o.wait.deadline) <= this.clock()) {
+            this.wake(o, '已到约定时间 ' + o.wait.deadline + '。请按约定处理「' + o.wait.condition + '」。');
+            this.recordWaitWake(o,'timer:' + o.wait.id);
+            o.state = 'open';
+            this.save(o,'timer_elapsed');
+            continue;
+          }
+          if (o.state === 'waiting' && o.activeGroupId) {
+            const row = this.store.db.prepare('SELECT value FROM cc_mention_groups WHERE id=? AND conversation_id=?').get(o.activeGroupId, o.conversationId) as {value:string}|undefined;
+            const group: MentionGroup|undefined = row && JSON.parse(row.value);
+            if (!group || group.contract?.obligationId !== o.id || group.state !== 'collecting') {
+              delete o.activeGroupId;
+              conflict('找不到此责任有效的征询等待，请负责人复核。');
+            }
+            continue;
+          }
           if (o.state === 'waiting' && o.wait && Date.parse(o.wait.deadline) > this.clock() && o.wait.condition.startsWith('ci:')) {
             const observation = observedCi(this.store,o);
             if (observation) this.applySignal(o.conversationId,o.id,{...observation,condition:o.wait.condition,expectedRevision:o.revision,waitId:o.wait.id},true);
@@ -551,7 +644,8 @@ export class ObligationService {
           if (o.state === 'waiting' && o.wait && Date.parse(o.wait.deadline) <= this.clock()) conflict('等待已到期，请核对结果。');
           if (o.state === 'delegated') {
             const child = this.latestChild(o);
-            if (child && (ended(child) || child.state === 'blocked')) this.returnReport(child);
+            if (!child) conflict('子委托记录缺失，需由负责人核对后继续。');
+            if (ended(child) || child.state === 'blocked') this.returnReport(child);
             continue;
           }
           if (!['open','delivery_pending'].includes(o.state)) continue;
@@ -559,7 +653,8 @@ export class ObligationService {
           const delivery = (this.store.db.prepare('SELECT value FROM cc_deliveries WHERE source_id=? AND member_id=?').get(source.id,o.owner.memberId) as {value:string}|undefined);
           const d: Delivery|undefined = delivery && JSON.parse(delivery.value);
           if (source.withdrawnAt || !d || d.status === 'withdrawn') conflict('原责任投递已失效。');
-          if (d?.responseId) {
+          if (d.status === 'consumed' && !d.responseId) conflict('投递已领取，但缺少对应的执行记录。');
+          if (d.responseId) {
             const run = this.store.invocation(this.store.response(d.responseId).invocationId);
             if (terminal.has(run.status)) this.settle(o,run);
           }

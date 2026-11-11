@@ -64,6 +64,7 @@ export interface ProjectReviewCheck {
   files: { path: string; status: 'unchanged' | 'changed' | 'unavailable' | 'unread'; sha256?: string; currentSha256?: string }[];
 }
 export interface SourceWork {
+  continuationPolicy?: 'durable-v1';
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
@@ -211,7 +212,16 @@ export interface MentionGroup {
   id: string; conversationId: string; sourceId: string; targets: string[]; question: string; context: string;
   callerInvocationId?: string; callbackTo?: string; state: 'collecting' | 'done' | 'timeout' | 'cancelled' | 'lost';
   createdAt: string; deadline: string; finishedAt?: string; revision: number;
-  results?: { memberId: string; responseId: string; status: 'succeeded' | 'failed'; content: string }[]; missing?: string[];
+  contract?: {
+    version: 2;
+    obligationId: string;
+    ownerRevision: number;
+    returnTo: import('./obligations.js').ObligationEndpoint;
+    participants: import('./obligations.js').ObligationEndpoint[];
+    wakeSourceId?: string;
+  };
+  reason?: string;
+  results?: { memberId: string; responseId: string; invocationId?: string; status: 'succeeded' | 'failed'; content: string }[]; missing?: string[];
 }
 export interface InputHandoff {
   id: string; conversationId: string; sourceId: string; sourceRevision: number; sourceDigest: string;
@@ -364,6 +374,7 @@ export interface HistorySourceResponsibility {
 export interface ExecutionContractSnapshot {
   roomMember?: RoomMemberInstance;
   obligationPolicy?: boolean;
+  continuationPolicy?: 'durable-v1';
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -441,6 +452,7 @@ export interface RuntimeEvent {
 }
 export interface RuntimeRequest {
   obligationPolicy?: boolean;
+  continuationPolicy?: 'durable-v1';
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;

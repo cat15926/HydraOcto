@@ -419,3 +419,28 @@ test('tracked review offers read and report only; old or private invocations rej
   }
   assert.equal(calls.length, 2);
 });
+
+test('a durable public invocation can request a return from peers or wait for an event or timer; stale and private scopes reject these arguments', async () => {
+  const calls: unknown[] = [];
+  const basic = request('claude-cli', tmpdir(), [], calls, {toolPolicyVersion: 'cross-action-v1', obligationPolicy: true});
+  const enabled = {...basic, continuationPolicy: 'durable-v1' as const};
+  const group = {targets: ['peer-a','peer-b'], question: 'Compare the two drafts.', obligationId: 'commitment'};
+  const timer = {obligationId:'commitment', condition:'Publish the decision', deadline:'2030-01-01T12:05:00Z', kind:'timer'};
+  for (const input of [enabled, {...enabled, member: {...enabled.member, carrier:'codex-app-server' as const}}]) {
+    const specs = runtimeTools(input);
+    assert.ok('obligationId' in specs.find(tool => tool.name === 'multi_mention')!.inputSchema.properties);
+    assert.ok('kind' in specs.find(tool => tool.name === 'obligation_wait')!.inputSchema.properties);
+    await executeTool(input, 'multi_mention', group, 'collect');
+    await executeTool(input, 'obligation_wait', timer, 'wait');
+  }
+  const privateScope = {...enabled, visibility:{kind:'private' as const,memberIds:[basic.member.id]}};
+  const reviewer = {...enabled, projectReview:{paths:['orders.ts'], grantRevision:1, originalSourceId:'origin'}};
+  for (const other of [basic, privateScope, reviewer, {...enabled, obligationPolicy: undefined}]) {
+    const specs = runtimeTools(other);
+    assert.ok(!('obligationId' in (specs.find(tool => tool.name === 'multi_mention')?.inputSchema.properties ?? {})));
+    assert.ok(!('kind' in (specs.find(tool => tool.name === 'obligation_wait')?.inputSchema.properties ?? {})));
+    await assert.rejects(executeTool(other, 'multi_mention', group, 'stale-group'), /outside/);
+    await assert.rejects(executeTool(other, 'obligation_wait', timer, 'stale-wait'), /outside/);
+  }
+  assert.equal(calls.length,4);
+});

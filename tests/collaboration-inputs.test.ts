@@ -161,3 +161,14 @@ test('only a public enabled obligation run gets the tracked return instructions 
   assert.notEqual(prompt.renderDigest, assembleContext({...active, obligationPolicy:false}).renderDigest);
   assert.ok(!assembleContext({...active, visibility:{kind:'private',memberIds:['claude']}}).prompt.includes('obligation_list'));
 });
+
+test('a public durable host receives instructions for returning consultations using the same root, distinct from standalone summaries', () => {
+  const input = {...fixture(), crossPolicy:true, obligationPolicy:true, cooperationPolicy:true};
+  const durable = {...input, continuationPolicy:'durable-v1' as const};
+  const prompt = assembleContext(durable);
+  assert.equal(prompt.renderVersion, 'room-continuation-input-v1');
+  assert.match(prompt.prompt, /multi_mention。传入该根委托的 obligationId/);
+  assert.match(prompt.prompt, /kind=timer/);
+  assert.match(assembleContext(input).prompt, /multi_mention 创建独立多人征询/);
+  assert.doesNotMatch(assembleContext({...durable, visibility:{kind:'private',memberIds:['claude']}}).prompt, /kind=timer/);
+});

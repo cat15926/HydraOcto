@@ -1,4 +1,4 @@
-import { obligationDeliverySchema, obligationTools } from './obligation-tools.js';
+import { obligationDeliverySchema, obligationTools, supportsContinuation } from './obligation-tools.js';
 import { projectBrowserTool } from './project-browser.js';
 import { webResearchTools } from './project-research.js';
 import { gitDeliveryTool } from './project-git.js';
@@ -73,11 +73,27 @@ function authorNpmTool(extended: boolean) {
   };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'obligationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}) {
+interface RuntimeToolSpec {
+  name: string;
+  description: string;
+  inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
+}
+
+export function runtimeTools(request: Pick<RuntimeRequest, 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
   const obligations = obligationTools(request);
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
     ? [...projectReviewTools(request.projectReview), ...obligations] : [];
-  const tools = [...policyTools(request).map(t => {
+  const tools = [...policyTools(request).map((t): RuntimeToolSpec => {
+    if (t.name === 'multi_mention' && supportsContinuation(request)) {
+      return {
+        ...t,
+        description: 'Collect replies to a question from 2–8 other room members. To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
+        inputSchema: {
+          ...t.inputSchema,
+          properties: { ...t.inputSchema.properties, obligationId: { type: 'string', minLength: 1 } },
+        },
+      };
+    }
     if (!obligations.length || t.name !== 'collaboration_request') return t;
     return {
       ...t,
@@ -113,7 +129,7 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'obligationPolicy' | 
       inputSchema:{...t.inputSchema,properties:{...t.inputSchema.properties,projectReview:{type:'object',properties:{paths:{type:'array',items:{type:'string'},minItems:1,maxItems:8,uniqueItems:true}},required:['paths'],additionalProperties:false}}}};
   });
 }
-function policyTools(request: Pick<RuntimeRequest, 'toolPolicyVersion' | 'visibility'>) {
+function policyTools(request: Pick<RuntimeRequest, 'toolPolicyVersion' | 'visibility'>): RuntimeToolSpec[] {
   if (['visibility-memory-v1','cross-action-v1'].includes(request.toolPolicyVersion ?? '')) {
     const tools = [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...ARTIFACT_TOOL_SPECS, ...COOPERATION_TOOL_SPECS, ...MEMORY_TOOL_SPECS, ...(request.toolPolicyVersion === 'cross-action-v1' ? ACTION_TOOL_SPECS : [])];
     return request.visibility?.kind === 'private' && !request.visibility.revealedAt ? tools.filter(t => ['workspace_list', 'workspace_read', 'user_question', 'conversation_pending', 'conversation_read', 'memory_read', 'memory_propose', 'material_search'].includes(t.name)) : tools;
@@ -145,6 +161,8 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
   if (name === 'collaboration_request' && args.delivery !== undefined && !obligationTools(request).length)
     throw new Error('Tracked delegation is outside this invocation frozen policy.');
+  if (((name === 'multi_mention' && args.obligationId !== undefined) || (name === 'obligation_wait' && args.kind !== undefined)) && !supportsContinuation(request))
+    throw new Error('This continuation is outside the frozen invocation policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
   if (name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);

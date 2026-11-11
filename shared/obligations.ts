@@ -18,6 +18,11 @@ export interface ObligationReport {
   authority: 'member' | 'project_test';
 }
 export interface ObligationWait {
+  kind?: 'event' | 'timer';
+  /** The member who must receive the result, even after a restart. */
+  returnTo?: ObligationEndpoint;
+  ownerRevision?: number;
+  firedAt?: string;
   id: string;
   condition: string;
   deadline: string;
@@ -48,6 +53,9 @@ export interface Obligation {
   testArgv?: string[];
   report?: ObligationReport;
   wait?: ObligationWait;
+  waitCount?: number;
+  activeGroupId?: string;
+  groupCount?: number;
   delivery?: { invocationId: string; summary: string; messageId?: string };
   /** A failed report may still have one intentional return to the owner. */
   blockedReturnSourceId?: string;
