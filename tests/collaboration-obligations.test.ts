@@ -105,12 +105,16 @@ test('a formal task handoff changes only the authority of the root and the new o
   try {
     const old = h.ask(), root = h.tool(old,'obligation_open',{goal:'交班'});
     const task = h.store.tasks.getTask(root.taskId!);
-    h.store.tasks.handoff(task.id,{requestId:'takeover',expectedRevision:task.revision,expectedOwnerRevision:task.ownerRevision,targetMemberId:'claude',reason:'请晚班完成'},old);
+    const offer = h.store.tasks.handoff(task.id,{requestId:'takeover',expectedRevision:task.revision,expectedOwnerRevision:task.ownerRevision,targetMemberId:'claude',reason:'请晚班完成'},old);
     assert.throws(()=>h.tool(old,'obligation_deliver',{obligationId:root.id,summary:'旧人交付'}));
-    h.finish(old,'办理交班。'); const next = h.run();
+    h.finish(old,'办理交班。');
+    const candidate = h.run();
+    assert.equal(h.store.tasks.getTask(task.id).ownerMemberId,'codex');
+    h.store.tasks.tool(candidate,'task_handoff_decide',{handoffId:offer.handoff.id,decision:'accept',reason:'我接手。'},'accept');
+    h.finish(candidate,'已接手。'); const next = h.run();
     assert.deepEqual(h.store.obligations.context(next).map(o=>o.owner.memberId),['claude']);
     h.tool(next,'obligation_deliver',{obligationId:root.id,summary:'晚班已完成。'}); h.finish(next,'晚班已完成。');
-    assert.equal(h.read(root).state,'delivered'); assert.equal(h.store.detail(h.cid).sources.filter(s=>s.kind==='job_result').length,0);
+    assert.equal(h.read(root).state,'delivered'); assert.deepEqual(h.store.detail(h.cid).sources.filter(s=>s.kind==='job_result').map(s=>s.id),[offer.handoff.offer!.sourceId]);
   } finally { h.owner.close(); }
 });
 
@@ -173,7 +177,12 @@ test('after restart a committed returned result is consumed once, and the owner 
     store.startInvocation(follow.id); store.recordEvidence(follow.id,{kind:'accepted',detail:{}});
     const t=store.tasks.getTask(root.taskId!); assert.equal(t.executionRef?.invocationId,follow.id);
     const handoff=store.tasks.handoff(t.id,{requestId:'new-shift',expectedRevision:t.revision,expectedOwnerRevision:t.ownerRevision,targetMemberId:'claude',reason:'接班交付'},follow.id);
-    assert.equal(handoff.handoff.state,'waiting'); assert.equal(store.admitNext(),undefined);
+    assert.equal(handoff.handoff.state,'waiting');
+    const candidate = store.admitNext()!.invocations[0]!;
+    store.startInvocation(candidate.id); store.recordEvidence(candidate.id,{kind:'accepted',detail:{}});
+    store.tasks.tool(candidate.id,'task_handoff_decide',{handoffId:handoff.handoff.id,decision:'accept',reason:'我接手。'},'yes');
+    store.recordEvidence(candidate.id,{kind:'process_exit',detail:{confirmed:true}}); store.finish(candidate.id,'succeeded','已签收。');
+    assert.equal(store.admitNext(),undefined);
     store.recordEvidence(follow.id,{kind:'process_exit',detail:{confirmed:true}}); store.finish(follow.id,'succeeded','交班。');
     const last=store.admitNext()!.invocations[0]!; store.startInvocation(last.id); store.recordEvidence(last.id,{kind:'accepted',detail:{}});
     store.obligations.tool(last.id,'obligation_deliver',{obligationId:root.id,summary:'验收成功'},'result');
@@ -292,4 +301,80 @@ test('a human task form can reserve approval, but later handoff instructions can
     const recipient=h.run(),automatic=h.tool(recipient,'obligation_open',{goal:'核对票据',acceptance:'user'});
     assert.equal(automatic.taskId,plain.id);assert.equal(automatic.acceptBy,'delivery');assert.equal(automatic.userAcceptance,undefined);
   } finally {h.owner.close();}
+});
+
+test('a user can attach a public observation to a blocked receipt, replay the exact command and let its owner decide', async () => {
+  const h = setup();
+  try {
+    const owner = h.ask(), root = h.tool(owner,'obligation_open',{goal:'核对两份资料'});
+    h.finish(owner,'正在核对'); h.finish(h.run(),'还缺一份资料');
+    const blocked = h.store.obligations.operatorList(h.cid)[0]!;
+    assert.equal(blocked.state,'blocked'); assert.equal(blocked.recovery?.retryUnavailable,undefined);
+    const input = {requestId:'public-observation',expectedRevision:blocked.revision,decision:'retry' as const,reason:'第二份材料见本房间的会议记录'};
+    await assert.rejects(h.store.obligations.decide(h.cid,root.id,{...input,reason:'x'.repeat(1001)}));
+    await h.store.obligations.decide(h.cid,root.id,input);
+    await h.store.obligations.decide(h.cid,root.id,input);
+    await assert.rejects(h.store.obligations.decide(h.cid,root.id,{...input,reason:'修改同一次操作'}));
+    await assert.rejects(h.store.obligations.decide(h.cid,root.id,{...input,requestId:'stale'}));
+    const sources = h.store.detail(h.cid).sources.filter(s=>s.content.includes(input.reason));
+    assert.equal(sources.length,1); assert.deepEqual(sources[0]!.requestedTargets,['codex']);
+    assert.match(sources[0]!.content,/用户补充的公开材料/);
+    assert.equal(h.read(root).state,'open'); assert.equal(h.read(root).delivery,undefined);
+  } finally { h.owner.close(); }
+});
+
+test('reassignment checks the target incarnation and task revision and releases exactly one formal handoff after owner leaves', async () => {
+  const h = setup();
+  try {
+    const writer = h.ask(), root = h.tool(writer,'obligation_open',{goal:'补齐资料并交付'});
+    h.finish(writer,'稍后交付'); h.finish(h.run(),'仍在处理');
+    const previous = h.store.obligations.operatorList(h.cid)[0]!.recovery!.handoffTargets[0]!;
+    h.store.updateConversation(h.cid,{memberIds:['codex'],defaultMemberId:'codex'});
+    h.store.updateConversation(h.cid,{memberIds:['claude'],defaultMemberId:'claude'});
+    h.store.obligations.reconcile();
+    const blocked = h.store.obligations.operatorList(h.cid)[0]!, recovery = blocked.recovery!;
+    assert.ok(recovery.retryUnavailable); assert.equal(recovery.handoffTargets.length,1);
+    assert.notEqual(previous.instanceId,recovery.handoffTargets[0]!.instanceId);
+    const input = {requestId:'replacement',expectedRevision:blocked.revision,taskRevision:recovery.taskRevision!,target:recovery.handoffTargets[0]!,reason:'请核对缺少的会议记录'};
+    assert.throws(()=>h.store.obligations.reassign(h.cid,root.id,{...input,target:previous}));
+    assert.throws(()=>h.store.obligations.reassign(h.cid,root.id,{...input,taskRevision:input.taskRevision-1}));
+    h.store.obligations.reassign(h.cid,root.id,input); h.store.obligations.reassign(h.cid,root.id,input);
+    await assert.rejects(h.store.obligations.decide(h.cid,root.id,{requestId:'late-cancel',expectedRevision:blocked.revision,decision:'cancel'}));
+    const handoffs = h.store.tasks.handoffs(h.cid);
+    assert.equal(handoffs.length,1); assert.equal(handoffs[0]!.state,'applied'); assert.equal(handoffs[0]!.reason,input.reason);
+    assert.deepEqual(h.read(root).owner,input.target);
+    assert.equal(h.read(root).currentSourceId,handoffs[0]!.sourceId); assert.equal(h.read(root).originSourceId,root.originSourceId);
+    const next = h.run();
+    assert.deepEqual(h.store.obligations.context(next).map(o=>o.id),[root.id]);
+    h.finish(next,'正在重新核对'); h.finish(h.run(),'需要补一份原记录');
+    const replacement = h.store.obligations.operatorList(h.cid)[0]!;
+    assert.equal(replacement.state,'blocked'); assert.equal(replacement.recovery?.retryUnavailable,undefined);
+    await h.store.obligations.decide(h.cid,root.id,{requestId:'verify-again',expectedRevision:replacement.revision,decision:'retry',reason:'已补交原记录'});
+    const finishing = h.run(); assert.equal(h.store.invocation(finishing).memberId,'claude');
+    h.tool(finishing,'obligation_deliver',{obligationId:root.id,summary:'已核对并补齐记录。'}); h.finish(finishing,'已核对并补齐记录。');
+    assert.equal(h.read(root).state,'delivered'); assert.equal(h.store.tasks.getTask(root.taskId!).status,'done');
+  } finally { h.owner.close(); }
+});
+
+test('reassignment retires only the old unclaimed wake when its owner is disabled before receiving it', () => {
+  const h = setup();
+  try {
+    const writer = h.ask(), root = h.tool(writer,'obligation_open',{goal:'复核资料'});
+    h.finish(writer,'稍后再核验');
+    const wake = h.read(root).wakeSourceId!;
+    assert.ok(wake);
+    h.store.saveMember({...h.store.members().find(m=>m.id==='codex')!,enabled:false});
+    h.store.obligations.reconcile();
+    const blocked = h.store.obligations.operatorList(h.cid)[0]!;
+    assert.equal(blocked.state,'blocked');
+    const recovery = blocked.recovery!;
+    h.store.obligations.reassign(h.cid,root.id,{requestId:'retire-unclaimed',expectedRevision:blocked.revision,
+      taskRevision:recovery.taskRevision!,target:recovery.handoffTargets[0]!,reason:'原负责人已停用，请核验并回复。'});
+    const detail = h.store.detail(h.cid);
+    assert.ok(detail.sources.find(s=>s.id===wake)?.withdrawnAt);
+    assert.equal(detail.sources.find(s=>s.id===root.originSourceId)?.withdrawnAt,undefined);
+    const next = h.run(); assert.equal(h.store.invocation(next).memberId,'claude');
+    assert.deepEqual(h.store.obligations.context(next).map(o=>o.id),[root.id]);
+    assert.equal(h.store.admitNext(),undefined);
+  } finally { h.owner.close(); }
 });

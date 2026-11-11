@@ -142,7 +142,7 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'GET' && conversation) {
         const cid = conversation[1]!, viewer = url.searchParams.get('viewer');
         if (viewer) json(response, 200, store.visibility.view(cid, viewer));
-        else { const detail = store.detail(cid); detail.messages = detail.messages.filter(m => !m.deletedAt).map(m => store.visibility.projectedMessage(m)); json(response, 200, detail); } return true;
+        else { const detail = store.detail(cid); detail.obligations = store.obligations.operatorList(cid); detail.messages = detail.messages.filter(m => !m.deletedAt).map(m => store.visibility.projectedMessage(m)); json(response, 200, detail); } return true;
       }
       const exportConversation = /^\/api\/conversations\/([^/]+)\/export$/.exec(path);
       if (request.method === 'GET' && exportConversation) { const value = store.visibility.export(exportConversation[1]!, url.searchParams.get('viewer') ?? undefined, url.searchParams.get('messageIds')?.split(',')); response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename=conversation.json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value, null, 2)); return true; }
@@ -224,10 +224,10 @@ export function collaborationHttp(deps: HttpDependencies) {
           }));
           json(response,200,result.result); return true;
         }
-        const obligationRoute = /^\/api\/conversations\/([^/]+)\/obligations\/([^/]+)\/(signal|accept|cancel|retry)$/.exec(path);
+        const obligationRoute = /^\/api\/conversations\/([^/]+)\/obligations\/([^/]+)\/(signal|accept|cancel|retry|reassign)$/.exec(path);
         if (obligationRoute) {
           const [,cid,oid,operation]=obligationRoute;
-          const keys=operation==='signal'?['requestId','condition','summary','waitId','expectedRevision']:['requestId','reason','expectedRevision'];
+          const keys=operation==='signal'?['requestId','condition','summary','waitId','expectedRevision']:operation==='reassign'?['requestId','reason','expectedRevision','taskRevision','memberId','instanceId','generation']:['requestId','reason','expectedRevision'];
           if (Object.keys(body).some(k=>!keys.includes(k))) throw new AppError(400,'操作包含未知字段。');
           const requestId=id(body.requestId), rowId=id(oid);
           const expectedRevision=revision(body.expectedRevision,'委托版本',1);
@@ -235,6 +235,7 @@ export function collaborationHttp(deps: HttpDependencies) {
           if(room.archivedAt||room.deletedAt) throw new AppError(409,'请先恢复会话。');
           const result=operation==='signal'
             ? store.obligations.signal(cid!,rowId,{requestId,expectedRevision,condition:field(body.condition,'等待条件',1000),summary:field(body.summary,'观察结果',2000),waitId:id(body.waitId)})
+            : operation==='reassign' ? store.obligations.reassign(cid!,rowId,{requestId,expectedRevision,taskRevision:revision(body.taskRevision,'任务版本',1),target:{memberId:id(body.memberId),instanceId:id(body.instanceId),generation:revision(body.generation,'成员代次',1)},reason:field(body.reason,'交接说明',1000)})
             : await store.obligations.decide(cid!,rowId,{requestId,expectedRevision,decision:operation==='accept'?'accept':operation==='retry'?'retry':'cancel',...(body.reason!==undefined?{reason:field(body.reason,'原因',1000)}:{})});
           engine.kick(); json(response,200,result); return true;
         }
@@ -263,8 +264,8 @@ export function collaborationHttp(deps: HttpDependencies) {
         }
         const pullRefresh = /^\/api\/runtime-interactions\/([^/]+)\/refresh-pull$/.exec(path);
         if (pullRefresh) { json(response,200,{interaction:await engine.pulls.refresh(pullRefresh[1]!)}); return true; }
-        const crossCommand = /^\/api\/conversations\/([^/]+)\/(cross-grants|cross-send|actions)$/.exec(path);
-        if (crossCommand) { const cid=crossCommand[1]!,op=crossCommand[2];const result=op==='cross-grants'?store.cross.createGrant(cid,body):op==='cross-send'?store.cross.send(cid,body):store.actions.create(cid,body);engine.kick();json(response,200,result);return true; }
+        const crossCommand = /^\/api\/conversations\/([^/]+)\/(cross-grants|cross-send|share-excerpts|actions)$/.exec(path);
+        if (crossCommand) { const cid=crossCommand[1]!,op=crossCommand[2];const result=op==='cross-grants'?store.cross.createGrant(cid,body):op==='share-excerpts'?store.cross.shareExcerpts(cid,body):op==='cross-send'?store.cross.send(cid,body):store.actions.create(cid,body);engine.kick();json(response,200,result);return true; }
         const grantRevoke = /^\/api\/cross-grants\/([^/]+)\/revoke$/.exec(path);
         if(grantRevoke){const result=store.cross.revoke(grantRevoke[1]!,body);engine.kick();json(response,200,result);return true;}
         const actionCommand = /^\/api\/actions\/([^/]+)\/(command|wait)$/.exec(path);

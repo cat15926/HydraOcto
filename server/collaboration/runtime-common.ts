@@ -80,7 +80,7 @@ interface RuntimeToolSpec {
   inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+export function runtimeTools(request: Pick<RuntimeRequest, 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
   if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') return memberContextTools(request.memberContextMode);
   const obligations = obligationTools(request);
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
@@ -96,6 +96,8 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'mayRequestPublicStat
         },
       };
     }
+    if (t.name === 'task_handoff' && request.handoffPolicy === 'consent-v1') return {...t,
+      description:t.description+' For an open ongoing commitment, this offers the whole task. Remain responsible until the candidate accepts and your execution exits. A decline returns to you.'};
     if (t.name !== 'collaboration_request') return t;
     if (request.mayRequestPublicStatement) {
       t = {...t, description: t.description + ' For a public statement informed by member materials, set publicStatement=true and target one member (yourself is allowed). This queues a separate, isolated speaking turn.',
@@ -108,6 +110,10 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'mayRequestPublicStat
       inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, delivery: obligationDeliverySchema } },
     };
   }), ...obligations, ...memberContextTools(request.memberContextMode)];
+  if (request.handoffPolicy === 'candidate-v1' && !request.visibility && !request.projectWork && !request.projectReview) {
+    tools.push({name:'task_handoff_decide',description:'Reply to the whole-task handoff offered in this exact turn. Accept responsibility for the whole result or decline with a reason. The platform records your decision and contacts the responsible member.',
+      inputSchema:{type:'object',properties:{handoffId:{type:'string'},decision:{type:'string',enum:['accept','decline']},reason:{type:'string',minLength:1,maxLength:2000}},required:['handoffId','decision','reason'],additionalProperties:false}});
+  }
   if(request.projectBrowser && !request.visibility && request.toolPolicyVersion==='cross-action-v1') tools.push(projectBrowserTool);
   if (request.projectPreview && !request.visibility && request.toolPolicyVersion==='cross-action-v1')
     tools.push({name:'project_service_start',description:'When asked to start or preview the current development project, call this tool. It runs npm run dev in a managed Linux project snapshot and provides a service card. A starting receipt is not readiness. Do not start a background shell yourself.',inputSchema:{type:'object',properties:{},additionalProperties:false}});

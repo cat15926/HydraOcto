@@ -37,6 +37,7 @@ export class CrossConversationService {
   }
   valid(g: CrossGrant, revision = g.revision) {
     if (g.state !== 'active' || g.revision !== revision || Date.parse(g.expiresAt) <= this.clock()) conflict('跨会话授权已撤销、过期或变化。');
+    if (g.endpointInstances && (this.store.roomMembers.resolve(g.home.conversationId,g.home.memberId).id!==g.endpointInstances.home || this.store.roomMembers.resolve(g.target.conversationId,g.target.memberId).id!==g.endpointInstances.target)) conflict('成员已离开并重新加入，需要重新授权。');
     if (this.workspace(this.endpoint(g.home)) !== g.homeWorkspace || this.workspace(this.endpoint(g.target)) !== g.targetWorkspace) conflict('工作区身份变化，需要重新批准两端授权。');
   }
   actor(invocationId: string): TaskActor & { kind: 'agent' } {
@@ -63,15 +64,27 @@ export class CrossConversationService {
     return refs as MessageExcerpt[];
   }
   createGrant(cid: string, input: Record<string, unknown>) {
-    fields(input, ['requestId','homeMemberId','targetConversationId','targetMemberId','expiresAt']);
+    fields(input, ['requestId','homeMemberId','targetConversationId','targetMemberId','expiresAt','approvedExcerpts']);
     return this.port.tx(() => this.port.command(`cross-grant:${cid}:${field(input.requestId,'请求标识')}`, input, () => {
       const home = { conversationId: cid, memberId: field(input.homeMemberId,'本会话成员') }, target = { conversationId: field(input.targetConversationId,'目标会话'), memberId: field(input.targetMemberId,'目标成员') };
       if (home.conversationId === target.conversationId) throw new AppError(400, '跨会话授权需要不同会话。');
       const hc = this.endpoint(home), tc = this.endpoint(target), expiresAt = field(input.expiresAt,'有效期');
       if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= this.clock() || Date.parse(expiresAt) > this.clock() + 30 * 86400000) throw new AppError(400, '授权有效期须在未来 30 天内。');
       if (this.grants().filter(g => g.state === 'active' && g.conversationId === cid).length >= 50) conflict('请先整理现有授权。');
-      const g: CrossGrant = { id: randomUUID(), conversationId: cid, home, target, homeWorkspace: this.workspace(hc), targetWorkspace: this.workspace(tc), revision: 1, state: 'active', expiresAt, createdAt: now() };
+      const approvedExcerpts = input.approvedExcerpts === undefined ? undefined : this.refs(cid,input.approvedExcerpts);
+      if (approvedExcerpts && !approvedExcerpts.length) throw new AppError(400,'请选择要分享的原文选段。');
+      const g: CrossGrant = { ...(approvedExcerpts && {approvedExcerpts,endpointInstances:{home:this.store.roomMembers.resolve(home.conversationId,home.memberId).id,target:this.store.roomMembers.resolve(target.conversationId,target.memberId).id}}), id: randomUUID(), conversationId: cid, home, target, homeWorkspace: this.workspace(hc), targetWorkspace: this.workspace(tc), revision: 1, state: 'active', expiresAt, createdAt: now() };
       this.data.save('cc_cross_grants', g, 'cross.grant_created'); this.port.event(target.conversationId,'cross.grant_received',{ grantId: g.id }); return g;
+    }));
+  }
+  shareExcerpts(cid:string,input:Record<string,unknown>) {
+    fields(input,['requestId','targetConversationId','targetMemberId','homeMemberId','refs']);
+    const key=field(input.requestId,'请求标识');
+    return this.port.tx(()=>this.port.command(`share-excerpts:${cid}:${key}`,input,()=>{
+      const {result:g}=this.createGrant(cid,{requestId:key,homeMemberId:input.homeMemberId,targetMemberId:input.targetMemberId,targetConversationId:input.targetConversationId,
+        approvedExcerpts:this.refs(cid,input.refs),expiresAt:new Date(this.clock()+86400000).toISOString()});
+      const {result:t}=this.send(cid,{requestId:key,grantId:g.id});
+      return {grantId:g.id,transferId:t.id};
     }));
   }
   revoke(id: string, input: Record<string, unknown>) {
@@ -89,19 +102,23 @@ export class CrossConversationService {
       const from = g.home.conversationId === cid ? g.home : g.target.conversationId === cid ? g.target : conflict('当前会话不属于此授权。');
       if (origin && (this.store.invocation(origin.invocationId).conversationId !== cid || origin.memberId !== from.memberId)) throw new AppError(403, '当前成员不是此授权的发送端。');
       this.checkOrigin(origin);
-      const to = endpointEqual(from,g.home) ? g.target : g.home, refs = this.refs(cid,input.refs), content = field(input.content,'跨会话消息',12000);
+      if (g.approvedExcerpts && (!endpointEqual(from,g.home) || input.content !== undefined || input.refs !== undefined))
+        throw new AppError(403,'这份授权只允许从原会话发送已经审核的选段，不可追加内容或反向转交。');
+      if (g.approvedExcerpts && this.transfers().some(t=>t.grantId===g.id)) conflict('该选段已投递，不会再次发送。');
+      const to = endpointEqual(from,g.home) ? g.target : g.home, refs = this.refs(cid,g.approvedExcerpts ?? input.refs);
+      const content = g.approvedExcerpts ? '请使用以下已审核资料。' : field(input.content,'跨会话消息',12000);
       const transfer: CrossTransfer = { id: randomUUID(), conversationId: cid, grantId:g.id, grantRevision:g.revision, from, to, sourceId:'', origin, refs, content, createdAt:now() };
       const depth = origin ? this.data.get<SourceWork>('cc_sources',origin.sourceId).depth + 1 : 0; if (depth > 8) conflict('跨会话链达到深度限制。');
-      const s = this.store.admitSource({ conversationId:to.conversationId, kind:'cross_message', content:`跨会话消息 ${transfer.id}，来自 ${from.memberId}。\n${content}`, requestedTargets:[to.memberId], depth, crossRef:{transferId:transfer.id} });
+      const s = this.store.admitSource({ conversationId:to.conversationId, kind:'cross_message', ...(g.approvedExcerpts && {visibility:this.store.visibility.audience(to.conversationId,[to.memberId])}), content:`跨会话消息 ${transfer.id}，来自 ${from.memberId}。\n${content}`, requestedTargets:[to.memberId], depth, crossRef:{transferId:transfer.id} });
       transfer.sourceId=s.id; this.data.save('cc_cross_transfers',transfer,'cross.sent'); this.store.publishSource(s); this.port.event(to.conversationId,'cross.received',{ transferId:transfer.id,sourceId:s.id }); return transfer;
     }));
   }
-  material(s: SourceWork, includeOrigin = true) {
+  material(s: SourceWork) {
     if (!s.crossRef) return s.content;
     const t=this.data.get<CrossTransfer>('cc_cross_transfers',s.crossRef.transferId); this.valid(this.grant(t.grantId),t.grantRevision); this.checkOrigin(t.origin);
     if (t.invalidatedAt || s.id!==t.sourceId || s.conversationId!==t.to.conversationId || s.withdrawnAt) conflict('跨会话来源已失效。');
     this.refs(t.conversationId,t.refs);
-    return s.content+(t.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(t.conversationId,t.refs,includeOrigin):'');
+    return s.content+(t.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(t.conversationId,t.refs,false):'');
   }
   routes(cid: string, memberId: string) { return this.grants().filter(g => { try { this.valid(g); return [g.home,g.target].some(e=>e.conversationId===cid&&e.memberId===memberId); } catch {return false;} }); }
   detail(cid:string) { return {crossGrants:this.grants().filter(g=>[g.home,g.target].some(e=>e.conversationId===cid)),crossTransfers:this.transfers().filter(t=>[t.from,t.to].some(e=>e.conversationId===cid))}; }
@@ -125,8 +142,11 @@ export class CrossConversationService {
   }); }
   tool(id:string,name:string,input:Record<string,unknown>,callId:string) {
     const actor=this.actor(id),i=this.store.invocation(id);
-    if(name==='cross_routes') {fields(input,[]);return {routes:this.routes(i.conversationId,actor.memberId)};}
-    if(name==='cross_send') return this.send(i.conversationId,{...input,requestId:`${id}:${callId}`},id);
+    if(name==='cross_routes') {fields(input,[]);return {routes:this.routes(i.conversationId,actor.memberId).filter(g=>!g.approvedExcerpts || g.home.conversationId===i.conversationId).map(g=>({id:g.id,home:g.home,target:g.target,expiresAt:g.expiresAt,mode:g.approvedExcerpts?'approved_excerpts':'message'}))};}
+    if(name==='cross_send') {
+      const {result:t,replayed}=this.send(i.conversationId,{...input,requestId:`${id}:${callId}`},id);
+      return {result:{id:t.id,grantId:t.grantId,to:t.to,createdAt:t.createdAt},replayed};
+    }
     throw new AppError(400,'跨会话工具不存在。');
   }
 }

@@ -1,20 +1,20 @@
 import type { OpenWorkspaceTarget } from './WorkspacePanel';
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import type { Conversation, ConversationDetail, ConversationMessage, Member, MessageExcerpt, SearchResult } from '../shared/collaboration';
+import type { Conversation, ConversationDetail, ConversationMessage, Member, SearchResult } from '../shared/collaboration';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 import { Choices, KnowledgeIcon, KnowledgeEmpty } from './KnowledgeUI';
+import { CrossExcerptShare, refFor } from './CrossExcerptShare';
 import { MemberMaterials } from './MemberMaterials';
 import { MemorySection } from './MemoryPanel';
 import './knowledge.css';
 const rid = () => crypto.randomUUID();
 const privateMessage = (m: ConversationMessage) => m.visibility?.kind === 'private' && !m.visibility.revealedAt;
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> { const r = await fetch(path, { signal, cache: 'no-store' }), b = await r.json(); if (!r.ok) throw new Error(b.error ?? '读取失败'); return b; }
-async function refFor(m: ConversationMessage, start: number, end: number): Promise<MessageExcerpt> { const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(m.content)); return { messageId: m.id, revision: m.revision ?? 1, start, end, digest: Array.from(new Uint8Array(bytes)).map(x => x.toString(16).padStart(2, '0')).join('') }; }
 export function PrivateComposer({ members, selected, set, disabled }: { members: Member[]; selected: string[]; set: (ids: string[]) => void; disabled: boolean }) {
   const [open, setOpen] = useState(false);
   return <div className="cc-private-composer"><button type="button" disabled={disabled} onClick={() => setOpen(v => !v)}>{selected.length ? `私聊 · ${members.filter(m => selected.includes(m.id)).map(m => m.name).join('、')}` : '私聊'}</button>{selected.length > 0 && <button type="button" disabled={disabled} onClick={() => { set([]); setOpen(false); }}>返回公开会话</button>}{open && <div><p className="cc-note">仅你和选定成员可见；公开消息仍可直接发送。</p><Choices members={members} selected={selected} set={set} /></div>}</div>;
 }
-export function MessageActions({ message: m, detail, members, command, refresh, choose }: { message: ConversationMessage; detail: ConversationDetail; members: Member[]; command: WorkbenchCommand; refresh: () => Promise<void>; choose: (id: string) => void }) {
+export function MessageActions({ message: m, detail, members, conversations = [], command, refresh, choose }: { conversations?: Conversation[]; message: ConversationMessage; detail: ConversationDetail; members: Member[]; command: WorkbenchCommand; refresh: () => Promise<void>; choose: (id: string) => void }) {
   const [mode, setMode] = useState<'share' | 'branch' | 'memory'>(), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const [start, setStart] = useState(0), [end, setEnd] = useState(m.content.length), [targets, setTargets] = useState<string[]>([]), [title, setTitle] = useState('');
   const selection = useRef<HTMLTextAreaElement>(null);
@@ -23,7 +23,7 @@ export function MessageActions({ message: m, detail, members, command, refresh, 
   const open = (next: typeof mode) => { setMode(mode === next ? undefined : next); setTitle(next === 'branch' ? `${detail.conversation.title} · 分支` : ''); setStart(0); setEnd(m.content.length); setTargets(next === 'branch' ? detail.conversation.memberIds : []); setError(''); };
   return <div className="cc-message-actions">
     {privateMessage(m) && <span className="cc-private-badge">私聊 · {m.visibility!.memberIds.map(id => members.find(x => x.id === id)?.name ?? id).join('、')}</span>}
-    <details><summary>更多操作</summary><div className="cc-knowledge-choices"><a href={`/api/conversations/${m.conversationId}/export?messageIds=${m.id}`} download>导出此消息</a><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('share')}>选段分享</button><button disabled={busy} onClick={() => open('branch')}>从此处分支</button><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('memory')}>存为记忆候选</button>{privateMessage(m) && !m.excerptRefs?.length && <button disabled={busy} onClick={() => void policy('reveal')}>公开此消息</button>}<button disabled={busy} onClick={() => void policy('delete')}>删除此消息</button></div></details>
+    <details><summary>更多操作</summary><div className="cc-knowledge-choices"><a href={`/api/conversations/${m.conversationId}/export?messageIds=${m.id}`} download>导出此消息</a><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('share')}>选段分享</button>{!privateMessage(m) && !m.excerptRefs?.length && m.content && <CrossExcerptShare message={m} room={detail.conversation} rooms={conversations} members={members} command={command} />}<button disabled={busy} onClick={() => open('branch')}>从此处分支</button><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('memory')}>存为记忆候选</button>{privateMessage(m) && !m.excerptRefs?.length && <button disabled={busy} onClick={() => void policy('reveal')}>公开此消息</button>}<button disabled={busy} onClick={() => void policy('delete')}>删除此消息</button></div></details>
     {mode && <form className="cc-knowledge-form" onSubmit={e => { e.preventDefault(); void run(async () => {
       if (mode === 'branch') { const r = await command<{ result: Conversation }>(`/api/conversations/${m.conversationId}/branch`, { requestId: rid(), messageId: m.id, expectedRevision: m.revision ?? 1, title, memberIds: targets }); choose(r.result.id); }
       else { const ref = await refFor(m, start, end); if (mode === 'share') await command(`/api/conversations/${m.conversationId}/messages`, { requestId: rid(), content: '请查看我分享的选段。', excerptRefs: [ref], excerptTargets: targets });

@@ -27,7 +27,7 @@ export class ActionService {
   }
   saveTask(t:OrdinaryTask,type:string){t.revision++;t.updatedAt=now();this.store.visibility.put('cc_ordinary_tasks',t);this.port.event(t.conversationId,type,{taskId:t.id,delegationId:t.delegationId,ownerRevision:t.ownerRevision});}
   authorized(a:ActionRecord){this.cross.valid(this.cross.grant(a.grantId),a.grantRevision);this.cross.checkOrigin(a.origin);this.cross.refs(a.conversationId,a.refs);this.cross.endpoint(a.holder);if(!ended.has(a.state))this.task(a);}
-  material(s:SourceWork, includeOrigin = true){if(!s.actionRef)return s.content;const a=this.get(s.actionRef.actionId);this.authorized(a);if(s.withdrawnAt)conflict('Action 来源已撤回。');return s.content+(a.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(a.conversationId,a.refs,includeOrigin):'');}
+  material(s:SourceWork, includeOrigin = true){if(!s.actionRef)return s.content;const a=this.get(s.actionRef.actionId);this.authorized(a);if(s.withdrawnAt)conflict('Action 来源已撤回。');return s.content+(a.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(a.conversationId,a.refs,includeOrigin && s.conversationId===a.conversationId):'');}
   admissionReason(s:SourceWork):string|undefined{
     if(!s.actionRef)return;
     try{const a=this.get(s.actionRef.actionId);this.authorized(a);if(a.generation!==s.actionRef.generation||a.currentSourceId!==s.id||a.state!=='queued'||a.executionId||s.requestedTargets.length!==1||s.requestedTargets[0]!==a.holder.memberId||s.conversationId!==a.holder.conversationId)conflict('Action 来源代次或执行位置已变化。');}
@@ -53,7 +53,7 @@ export class ActionService {
     fields(input,['requestId','grantId','title','content','completion','refs','taskId','expectedTaskRevision','expectedOwnerRevision']);
     const origin=invocationId?this.cross.actor(invocationId):undefined;
     return this.port.tx(()=>this.port.command(`action-create:${cid}:${field(input.requestId,'请求标识')}`,{input,origin},()=>{
-      const g=this.cross.grant(field(input.grantId,'授权'));this.cross.valid(g);if(g.home.conversationId!==cid)throw new AppError(403,'新责任只能从授权主会话创建。');
+      const g=this.cross.grant(field(input.grantId,'授权'));this.cross.valid(g);if(g.approvedExcerpts)throw new AppError(403,'选段授权不能创建自由文本委托。');if(g.home.conversationId!==cid)throw new AppError(403,'新责任只能从授权主会话创建。');
       if(origin&&(this.store.invocation(origin.invocationId).conversationId!==cid||origin.memberId!==g.home.memberId))throw new AppError(403,'当前成员不是授权负责人。');
       if(!['human_acceptance','artifact_published'].includes(String(input.completion)))throw new AppError(400,'完成规则无效。');
       if(this.list().filter(a=>a.conversationId===cid&&!ended.has(a.state)).length>=50)conflict('本会话未结束 Action 达到上限。');
@@ -170,14 +170,18 @@ export class ActionService {
     }
   });}
   detail(cid:string){const actions=this.list().filter(a=>a.conversationId===cid||a.holder.conversationId===cid||this.cross.grant(a.grantId).target.conversationId===cid),ids=new Set(actions.map(a=>a.id));return {actions,actionCandidates:this.candidates().filter(c=>ids.has(c.actionId)),actionVerdicts:this.data.rows<ActionVerdict>('cc_action_verdicts').filter(v=>ids.has(v.actionId)),actionWaits:this.waits().filter(w=>ids.has(w.actionId)),conditionEvidence:this.data.rows<ConditionEvidence>('cc_condition_evidence').filter(e=>actions.some(a=>a.id===this.data.get<ActionWait>('cc_action_waits',e.waitId).actionId))};}
+  private forMember(a:ActionRecord,cid:string) {
+    const {id,title,content,completion,state,generation,revision,holder,updatedAt}=a;
+    return {id,title,content,completion,state,generation,revision,holder,updatedAt,...(cid===holder.conversationId && {executionId:a.executionId})};
+  }
   tool(id:string,name:string,input:Record<string,unknown>,callId:string){
     this.cross.actor(id);const i=this.store.invocation(id),requestId=`${id}:${callId}`;
-    if(name==='action_list'){fields(input,[]);return {actions:this.list().filter(a=>{try{this.authorized(a);return endpointEqual(a.home,{conversationId:i.conversationId,memberId:i.memberId})||endpointEqual(a.holder,{conversationId:i.conversationId,memberId:i.memberId});}catch{return false;}})};}
-    if(name==='action_create')return this.create(i.conversationId,{...input,requestId},id);
+    if(name==='action_list'){fields(input,[]);return {actions:this.list().filter(a=>{try{this.authorized(a);return endpointEqual(a.home,{conversationId:i.conversationId,memberId:i.memberId})||endpointEqual(a.holder,{conversationId:i.conversationId,memberId:i.memberId});}catch{return false;}}).map(a=>this.forMember(a,i.conversationId))};}
+    if(name==='action_create'){const {result,replayed}=this.create(i.conversationId,{...input,requestId},id);return {result:this.forMember(result,i.conversationId),replayed};}
     const {actionId,...args}=input;const key=field(actionId,'Action');
-    if(name==='action_candidate')return this.candidate(key,{...args,requestId},id);
-    if(name==='action_return')return this.command(key,{...args,requestId,operation:'return'},id);
-    if(name==='action_wait')return this.wait(key,{...args,requestId},id);
+    if(name==='action_candidate'){const {result:{action,candidate},replayed}=this.candidate(key,{...args,requestId},id);return {result:{action:this.forMember(action,i.conversationId),candidate:{id:candidate.id,summary:candidate.summary}},replayed};}
+    if(name==='action_return'){const {result:{action},replayed}=this.command(key,{...args,requestId,operation:'return'},id);return {result:{action:this.forMember(action,i.conversationId)},replayed};}
+    if(name==='action_wait'){const {result:{action,wait},replayed}=this.wait(key,{...args,requestId},id);return {result:{action:this.forMember(action,i.conversationId),wait:{id:wait.id,episode:wait.episode,state:wait.state,deadline:wait.deadline}},replayed};}
     throw new AppError(400,'Action 工具不存在。');
   }
 }

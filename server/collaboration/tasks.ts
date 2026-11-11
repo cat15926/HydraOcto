@@ -1,7 +1,7 @@
 import type { Obligation } from '../../shared/obligations.js';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { CollaborationInvocation, CollaborationResponse, Consumption, Conversation, ConversationMessage, CreateOrdinaryTask, Delivery, ExecutionContractSnapshot, HandoffOrdinaryTask, Member, OrdinaryTask, ResponsibilityItem, SourceWork, TaskActor, TaskCommandVersion, TaskExecutionRef, TaskHandoff, UpdateOrdinaryTask } from '../../shared/collaboration.js';
+import type { CollaborationInvocation, CollaborationResponse, Consumption, Conversation, ConversationMessage, CreateOrdinaryTask, Delivery, ExecutionContractSnapshot, HandoffOrdinaryTask, Member, OrdinaryTask, ResponsibilityItem, RoomMemberInstance, SourceWork, TaskActor, TaskCommandVersion, TaskExecutionRef, TaskHandoff, UpdateOrdinaryTask } from '../../shared/collaboration.js';
 import { AppError, now } from '../store.js';
 import { digest } from './continuity.js';
 
@@ -19,8 +19,11 @@ interface TaskPort {
   command<T>(id: string, input: unknown, fn: () => T): { result: T; replayed: boolean };
   invocation(id: string): CollaborationInvocation;
   saveInvocation(i: CollaborationInvocation): void;
+  memberInstance(cid: string, id: string): RoomMemberInstance;
+  isCurrent(member: RoomMemberInstance): boolean;
+  settleOffer(handoff: TaskHandoff): void;
   contract(id: string): ExecutionContractSnapshot;
-  addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'parentInvocationId' | 'authorMemberId' | 'taskRef'>>): SourceWork;
+  addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'handoffPolicy'>>): SourceWork;
   message(conversationId: string, content: string, sourceId?: string): void;
   event(conversationId: string, type: string, data: Record<string, unknown>): void;
 }
@@ -91,7 +94,7 @@ export class OrdinaryTaskService {
     const parent = actor.kind === 'agent' ? this.get<SourceWork>('cc_sources', actor.sourceId) : undefined;
     if ((parent?.depth ?? -1) >= 8) fail('任务交接已达本轮深度限制，请等待用户继续。', 'collaboration_limit');
     const source = this.port.addSource({ conversationId: t.conversationId, kind: handoff ? 'task_handoff' : 'task',
-      content: `普通任务 ${t.id}：${t.title}\n${t.description}${handoff ? `\n正式交接说明：${handoff.reason}` : ''}\n请按任务工具读取最新状态。完成需显式 task_update done；普通 A2A 协助不改变负责人。`, requestedTargets: [target], depth: parent ? parent.depth + 1 : 0,
+      content: `普通任务 ${t.id}：${t.title}\n${t.description}${handoff ? `\n正式交接说明：${handoff.reason}` : ''}\n${handoff?.offer ? '你已接受整项交班并获得交付权。请用 obligation_list 核对原委托，完成工作后用 obligation_deliver 向用户交付。' : '请按任务工具读取最新状态。完成需显式 task_update done；普通 A2A 协助不改变负责人。'}`, requestedTargets: [target], depth: parent ? parent.depth + 1 : 0,
       ...(actor.kind === 'agent' ? { parentInvocationId: actor.invocationId, authorMemberId: actor.memberId } : {}),
       taskRef: { taskId: t.id, ownerRevision: handoff ? t.ownerRevision + 1 : t.ownerRevision, ...(handoff ? { handoffId: handoff.id } : {}) } });
     this.port.message(t.conversationId, `${handoff ? '请求正式转交' : '任务待办'}：${t.title} → ${target}`, source.id); return source;
@@ -202,6 +205,21 @@ export class OrdinaryTaskService {
         if (t.status === 'done' || t.disposition || t.pendingHandoffId || t.ownerMemberId === input.targetMemberId) fail('任务已结束、正在交接或目标仍是原负责人。');
         const h: TaskHandoff = { id: randomUUID(), taskId, conversationId: t.conversationId, expectedOwnerRevision: t.ownerRevision, fromMemberId: t.ownerMemberId, toMemberId: input.targetMemberId, actor,
           executionRef: structuredClone(t.executionRef), sourceId: '', sourceRevision: 1, sourceDigest: '', state: 'waiting', reason: text(input.reason, '交接说明', 2000), revision: 1, stopRequested: actor.kind === 'user' && input.stopCurrent === true, createdAt: now(), updatedAt: now() };
+        if (actor.kind === 'agent' && this.port.contract(actor.invocationId).handoffPolicy === 'consent-v1') {
+          const root = this.rows<Obligation>('cc_obligations','WHERE conversation_id=?',[t.conversationId]).find(o => o.taskId === t.id && !o.parentId && !['delivered','cancelled'].includes(o.state));
+          if (root) {
+            if (root.state !== 'open' || root.currentSourceId !== actor.sourceId || root.ownerRevision !== t.ownerRevision ||
+                root.owner.memberId !== actor.memberId || !this.port.isCurrent(this.port.invocation(actor.invocationId).roomMember!))
+              fail('只有当前开放的主委托可申请整项交班。');
+            const previous = this.handoffs(t.conversationId).filter(old => old.offer?.obligationId === root.id && old.expectedOwnerRevision === t.ownerRevision);
+            if (previous.length >= 16) fail('本代负责人已尝试十六次交班，请保留责任并联系用户。');
+            const invite = this.port.addSource({conversationId:t.conversationId,kind:'job_result',requestedTargets:[h.toMemberId],
+              depth:this.get<SourceWork>('cc_sources',actor.sourceId).depth + 1,parentInvocationId:actor.invocationId,authorMemberId:actor.memberId,
+              handoffPolicy:'candidate-v1',content:'整项交班邀请 '+h.id+'。工作目标：'+root.goal+'。交班说明：'+h.reason+
+                '。在本轮用 task_handoff_decide 明确接受或拒绝，并说明理由。接受生效后将另行收到执行任务。'});
+            h.offer = {obligationId:root.id,sourceId:invite.id,candidate:this.port.memberInstance(t.conversationId,h.toMemberId),issuer:this.port.memberInstance(t.conversationId,actor.memberId)};
+          }
+        }
         const source = this.source(t, h.toMemberId, actor, h); h.sourceId = source.id; h.sourceRevision = source.revision; h.sourceDigest = digest(source.content);
         this.port.db.prepare('INSERT INTO cc_task_handoffs VALUES(?,?,?,?)').run(h.id, taskId, t.conversationId, JSON.stringify(h));
         this.delivery(source.id, 'held', '等待正式交接应用与旧执行释放。'); t.pendingHandoffId = h.id; this.save(t, 'task.handoff_prepared', { handoffId: h.id });
@@ -212,6 +230,7 @@ export class OrdinaryTaskService {
   private cancelPending(t: OrdinaryTask, reason: string) {
     if (!t.pendingHandoffId) return;
     const h = this.get<TaskHandoff>('cc_task_handoffs', t.pendingHandoffId);
+    if (h.offer) this.delivery(h.offer.sourceId, 'withdrawn', reason);
     if (h.state === 'waiting') { h.state = 'cancelled'; h.reason = reason; this.saveHandoff(h); this.delivery(h.sourceId, 'withdrawn', reason); }
     delete t.pendingHandoffId;
   }
@@ -222,6 +241,18 @@ export class OrdinaryTaskService {
         this.cancelPending(t, '用户撤销本次交接；停止意图和已有执行事实不撤销。'); this.save(t, 'task.handoff_cancelled'); return { task: t };
       }); return { ...result.result, replayed: result.replayed };
     });
+  }
+  private decideOffer(i: CollaborationInvocation, args: Record<string,unknown>) {
+    const h = this.get<TaskHandoff>('cc_task_handoffs',text(args.handoffId,'交班编号',100)), offer = h.offer;
+    if (!offer || h.state !== 'waiting' || offer.decision || this.port.contract(i.id).handoffPolicy !== 'candidate-v1' ||
+        i.acceptance !== 'accepted' || i.conversationId !== h.conversationId || i.roomMember?.id !== offer.candidate.id ||
+        !this.port.isCurrent(offer.candidate) || !this.port.isCurrent(offer.issuer) || this.sourceFor(i).id !== offer.sourceId)
+      fail('只有本次邀请对应的有效候选人执行可以签收。');
+    const choice = args.decision;
+    if (choice !== 'accept' && choice !== 'decline') throw new AppError(400,'请明确接受或拒绝。');
+    offer!.decision = {choice,reason:text(args.reason,'决定理由',2000),invocationId:i.id,recordedAt:now()};
+    this.saveHandoff(h); this.apply(h.id);
+    return {handoff:this.get<TaskHandoff>('cc_task_handoffs',h.id)};
   }
   private released(ref: TaskExecutionRef, taskId: string, ownerRevision: number): boolean {
     const i = this.port.invocation(ref.invocationId), binding = i.taskBindings?.find(b => b.fence === ref.fence);
@@ -240,9 +271,34 @@ export class OrdinaryTaskService {
     }
     try { this.target(t.conversationId, h.toMemberId); } catch { refused = '目标已禁用或离开会话。'; }
     if (h.executionRef && t.executionRef && (t.executionRef.invocationId !== h.executionRef.invocationId || t.executionRef.fence !== h.executionRef.fence)) refused = '任务执行已变化，旧交接不得释放新执行。';
+    if (h.offer) {
+      const offer = h.offer;
+      if (!this.port.isCurrent(offer.candidate) || !this.port.isCurrent(offer.issuer)) refused = '邀请的房间成员代次已变化。';
+      const delivery = this.rows<Delivery>('cc_deliveries','WHERE source_id=?',[offer.sourceId])[0];
+      if (!delivery || ['withdrawn','held'].includes(delivery.status)) refused = '候选人邀请无法有效送达。';
+      if (delivery?.responseId && !offer.decision) {
+        const r = this.get<CollaborationResponse>('cc_responses',delivery.responseId), run = this.port.invocation(r.invocationId);
+        if (terminal.has(run.status)) refused = '候选人执行已结束，未收到明确的接手决定。';
+      }
+      if (offer.decision) {
+        const signer = this.port.invocation(offer.decision.invocationId);
+        if (signer.cancelRevision || signer.acceptance !== 'accepted' || signer.roomMember?.id !== offer.candidate.id) refused = '候选人签收证据已失效。';
+        try { if (this.sourceFor(signer).id !== offer.sourceId) refused = '候选人邀请来源已变化。'; }
+        catch { refused = '候选人邀请来源已失效。'; }
+        if (offer.decision.choice === 'decline') refused = offer.decision.reason;
+      }
+      if (!refused && !offer.decision) return;
+      // Keep the original execution fence while returning a declined offer to its owner.
+      if (refused && t.pendingHandoffId === h.id && h.executionRef && !this.released(h.executionRef,t.id,h.expectedOwnerRevision)) return;
+    }
     if (refused) {
+      if (h.offer) this.delivery(h.offer.sourceId,'withdrawn',refused);
       h.state = 'refused'; h.reason = refused; this.saveHandoff(h); this.delivery(h.sourceId, 'withdrawn', refused);
-      if (t.pendingHandoffId === h.id) { delete t.pendingHandoffId; this.save(t, 'task.handoff_refused'); } return;
+      if (t.pendingHandoffId === h.id) {
+        delete t.pendingHandoffId; this.save(t, 'task.handoff_refused');
+        if (h.offer) this.port.settleOffer(h);
+      }
+      return;
     }
     if (h.executionRef && !this.released(h.executionRef, t.id, h.expectedOwnerRevision)) return;
     if (t.currentSourceId) this.delivery(t.currentSourceId, 'withdrawn', '负责人已正式转交。');
@@ -250,6 +306,7 @@ export class OrdinaryTaskService {
     t.ownerMemberId = h.toMemberId; t.ownerRevision++; t.currentSourceId = h.sourceId; delete t.pendingHandoffId;
     if (t.status === 'blocked') { t.status = 'todo'; delete t.statusReason; }
     h.state = 'applied'; this.saveHandoff(h); this.save(t, 'task.owner_changed', { handoffId: h.id, ownerMemberId: h.toMemberId }); this.delivery(h.sourceId, 'pending');
+    if (h.offer) this.port.settleOffer(h);
   }
   onInvocationChanged(i: CollaborationInvocation): void {
     for (const t of this.list(i.conversationId).filter(t => t.executionRef?.invocationId === i.id)) {
@@ -268,12 +325,13 @@ export class OrdinaryTaskService {
   }
   tool(invocationId: string, name: string, args: Record<string, unknown>, callId: string) {
     this.actor(invocationId); const i = this.port.invocation(invocationId);
-    const allowed: Record<string, string[]> = { task_list: [], task_create: ['title', 'description', 'ownerMemberId'], task_update: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'status', 'reason'], task_handoff: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'targetMemberId', 'reason'] };
+    const allowed: Record<string, string[]> = { task_list: [], task_handoff_decide:['handoffId','decision','reason'], task_create: ['title', 'description', 'ownerMemberId'], task_update: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'status', 'reason'], task_handoff: ['taskId', 'expectedRevision', 'expectedOwnerRevision', 'targetMemberId', 'reason'] };
     if (!allowed[name] || Object.keys(args).some(key => !allowed[name]!.includes(key))) throw new AppError(400, '任务工具参数无效；身份与执行绑定只能由服务端生成。');
     if (name === 'task_list') return { tasks: this.list(i.conversationId), handoffs: this.handoffs(i.conversationId) };
     const requestId = `agent:${invocationId}:${text(callId, '工具调用标识', 100)}`;
     return this.port.tx(() => {
       const receipt = this.port.command(`task-tool:${invocationId}:${callId}`, { name, args }, () => {
+    if (name === 'task_handoff_decide') return this.decideOffer(i,args);
     if (name === 'task_create') return this.create(i.conversationId, { requestId, title: args.title as string, description: args.description as string, ownerMemberId: args.ownerMemberId as string | null }, invocationId);
     const taskId = text(args.taskId, '任务 ID', 100), version = { requestId, expectedRevision: args.expectedRevision as number, expectedOwnerRevision: args.expectedOwnerRevision as number };
     if (name === 'task_update') return this.update(taskId, { ...version, status: args.status as UpdateOrdinaryTask['status'], reason: args.reason as string, disposition: args.disposition as UpdateOrdinaryTask['disposition'] }, invocationId);

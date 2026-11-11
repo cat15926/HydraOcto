@@ -20,6 +20,8 @@ HydraOcto 是一个本地多 Agent 持续协作平台。「多头」指各有专
 
 ## 当前能力
 
+阶段 E 正在开发；矩阵各项的证据及未验证范围见[阶段进度](docs/implementation-progress.md#hydraocto-collaboration-progress)。
+
 当前产品为 **0.31.0**，本地服务版本为 `0.31.0-hydra-d`，数据库 schema 为 16。已交付 N0–N9 的协作能力、N10-A 本机 CLI 会话导入和 N10-B Hermes 成员接入，涵盖持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户、私聊与历史分支、记忆治理及词法检索，以及跨会话授权、专用责任和条件等待。[正式规则](docs/implementation-guide.md) · [实施进度](docs/implementation-progress.md)
 
 **在聊天里确认成员的操作。** 在已授权项目会话中打开「工作台 → 项目与成员 → 项目权限」，勾选「在聊天里确认文件和命令」，点击「确认项目工作授权」。从下一次公开项目委托起，可在成员消息旁核对单个文件的完整写入内容或补丁，或查看命令和工作目录。选择「允许一次」「拒绝」或「取消并停止本轮」后，可在原消息中查看执行结果。Claude Code 可申请运行受支持的原生 Bash 命令。Codex 的环境查询由平台在项目副本中执行，卡片会标明执行位置和实际退出码。[验收与上线记录](docs/implementation-progress.md#native-project-progress)

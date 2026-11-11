@@ -27,7 +27,7 @@ async function exercise(width){
   }};
   const app=await createApplication({port:0,workspace:join(base,'work'),dataDir:join(base,'db'),staticDir:bundled,collaborationRuntime:runtime});
   store=app.collaborationStore;
-  const c=store.create({title:'资料校对',memberIds:['claude'],defaultMemberId:'claude',requestId:randomUUID()}).conversation;
+  const c=store.create({title:'资料校对',memberIds:['claude','codex'],defaultMemberId:'claude',requestId:randomUUID()}).conversation;
   const {url}=await app.start(),page=await browser.newPage();
   assert.notEqual(new URL(url).port,'4310');
   const errors=[];
@@ -60,28 +60,46 @@ async function exercise(width){
     await button('取消跟进…');await button('返回');
     await wait(sel=>document.activeElement===document.querySelector(sel+' summary'),card);
     assert.equal(store.obligations.list(c.id)[0].state,'blocked');
+    await button('改派负责人…');
+    await wait(sel=>document.activeElement===document.querySelector(sel+' select'),card);
+    await page.keyboard.press('Escape');
+    await wait(sel=>document.activeElement===document.querySelector(sel+' summary'),card);
+    const note='请对照今天补充的会议记录。';
+    await button('补充材料并复核…'); await page.type(card+' textarea',note);
     await page.evaluate(()=>{
       const original=window.fetch.bind(window);
-      window.retryIds=[];
-      window.fetch=(resource,options={})=>{
+      window.retryBodies=[];
+      window.fetch=async(resource,options={})=>{
         const path=new URL(resource,location.href).pathname;
         if(path.endsWith('/retry') && options.method==='POST'){
-          window.retryIds.push(JSON.parse(options.body).requestId);
-          if(window.retryIds.length===1) return Promise.resolve(Response.json({error:'网络暂时中断，请重试'},{status:503}));
+          window.retryBodies.push(JSON.parse(options.body));
+          if(window.retryBodies.length===1) {
+            const committed=await original(resource,options);
+            if(!committed.ok) return committed;
+            return Response.json({error:'回执丢失，请重试'},{status:503});
+          }
         }
         return original(resource,options);
       };
     });
-    await button('请负责人复核');
-    await wait(sel=>document.querySelector(sel+' [role=alert]')?.textContent.includes('网络暂时中断'),card);
+    await button('提交材料并复核');
+    await wait(sel=>document.querySelector(sel+' [role=alert]')?.textContent.includes('回执丢失'),card);
     assert.equal(await page.$eval(input,e=>e.value),draft);
-    const epoch=store.detail(c.id).sources.length;
-    await button('请负责人复核');
+    assert.equal(await page.$eval(card+' textarea',e=>e.value),note);
+    await wait(()=>document.activeElement?.textContent==='重试上次操作');
+    await page.keyboard.press('Enter');
     await wait(sel=>document.activeElement===document.querySelector(sel+' summary'),card);
-    const ids=await page.evaluate(()=>window.retryIds);
-    assert.equal(ids.length,2);assert.equal(ids[0],ids[1]);
-    assert(store.detail(c.id).sources.length>epoch);
+    const bodies=await page.evaluate(()=>window.retryBodies);
+    assert.equal(bodies.length,2);assert.deepEqual(bodies[0],bodies[1]);
+    assert.equal(store.detail(c.id).sources.filter(s=>s.content.includes(note)).length,1);
     await wait(sel=>document.querySelector(sel+' summary')?.textContent.includes('需要处理'),card);
+    await button('改派负责人…');
+    const target=await page.$eval(card+' select',e=>e.options[1].value);
+    await page.select(card+' select',target);
+    await page.type(card+' textarea','请接手并核验材料'); await button('确认改派');
+    await wait(sel=>document.querySelector(sel+' summary')?.textContent.includes('Codex 负责') &&
+      document.querySelector(sel+' summary')?.textContent.includes('需要处理'),card);
+    assert.equal(store.tasks.handoffs(c.id).filter(h=>h.state==='applied').length,1);
     await button('取消跟进…');
     await page.type(card+' form input, '+card+' form textarea','任务已结束');
     await button('确认取消');
@@ -95,7 +113,7 @@ async function exercise(width){
     assert(geometry.left>=-1 && geometry.right<=width+1 && geometry.width>0 && geometry.body<=width+1,JSON.stringify(geometry));
     assert.deepEqual(errors,[]);
     await page.screenshot({path:join(base,'cancelled.png')});
-    Object.assign(support,{passed:true,geometry,focus:'summary',retryIdReused:true,draftPreserved:true,ordinaryCards:0,finalState:'cancelled'});
+    Object.assign(support,{passed:true,geometry,focus:'summary',lostCommittedReceiptReplayed:true,handoffAppliedOnce:true,draftPreserved:true,ordinaryCards:0,finalState:'cancelled'});
   }finally{
     runs.push(support);
     if(!support.passed) await page.screenshot({path:join(base,'failure.png')}).catch(()=>{});

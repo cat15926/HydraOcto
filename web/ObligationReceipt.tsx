@@ -1,11 +1,14 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ConversationDetail, Member, MentionGroup } from '../shared/collaboration';
-import type { Obligation } from '../shared/obligations';
+import type { Obligation, OperatorObligation } from '../shared/obligations';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 
 const labels:Record<Obligation['state'],string> = {open:'处理中',delegated:'等待同伴回报',waiting:'等待外部结果',
   delivery_pending:'正在交付',awaiting_acceptance:'等你验收',delivered:'已交付',blocked:'需要处理',cancelled:'已取消'};
-type Props = {item:Obligation; rows:Obligation[]; detail:ConversationDetail; members:Member[]; command:WorkbenchCommand; refresh:()=>Promise<void>};
+type Operation = 'signal'|'cancel'|'retry'|'reassign'|'accept';
+type Form = Exclude<Operation,'accept'>;
+type Request = {op:Operation; fields:Record<string,unknown>};
+type Props = {item:OperatorObligation; rows:Obligation[]; detail:ConversationDetail; members:Member[]; command:WorkbenchCommand; refresh:()=>Promise<void>};
 
 function GroupResults({group, name}: {group:MentionGroup; name:(id:string)=>string}) {
   const results = group.results ?? [];
@@ -22,9 +25,11 @@ function GroupResults({group, name}: {group:MentionGroup; name:(id:string)=>stri
 }
 
 export function ObligationReceipt({item,rows,detail,members,command,refresh}:Props) {
-  const [action,setAction]=useState<''|'signal'|'cancel'>(''),[note,setNote]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-  const trigger=useRef<HTMLElement>(null), pending=useRef<{signature:string;requestId:string}|null>(null);
-  const observedWaitId = useRef<string | undefined>(undefined);
+  const [action,setAction] = useState<Form>(), [note,setNote] = useState(''), [target,setTarget] = useState('');
+  const [error,setError] = useState(''), [busy,setBusy] = useState(false), [pending,setPending] = useState<Request>();
+  const trigger = useRef<HTMLElement>(null), formRevision = useRef(item.revision), sending = useRef(false);
+  const retryButton = useRef<HTMLButtonElement>(null);
+  useEffect(()=>{ if (pending && !busy) retryButton.current?.focus({preventScroll:true}); },[pending,busy]);
   const name=(id:string)=>members.find(m=>m.id===id)?.name??id;
   const children=rows.filter(o=>o.parentId===item.id);
   const current=[...children].reverse().find(c=>!['delivered','cancelled'].includes(c.state));
@@ -38,19 +43,38 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh}:Pro
     return labels[item.state];
   }
   const restore=()=>requestAnimationFrame(()=>trigger.current?.focus({preventScroll:true}));
-  const reset=()=>{observedWaitId.current=undefined;setAction('');setError('');setNote('');pending.current=null;restore();};
-  async function submit(op:'signal'|'accept'|'cancel'|'retry'){
-    if(busy)return;
-    if (op === 'signal' && (item.state !== 'waiting' || !item.wait || item.wait.id !== observedWaitId.current)) {
-      setError('这项等待已结束。请返回查看最新进度。'); return;
-    }
-    const fields=op==='signal'?{condition:item.wait?.condition,waitId:item.wait?.id,summary:note.trim()}:op==='cancel'&&note.trim()?{reason:note.trim()}:{};
-    const signature=JSON.stringify([op,item.id,item.revision,fields]); if(pending.current?.signature!==signature)pending.current={signature,requestId:crypto.randomUUID()};
-    setBusy(true);setError('');
-    try { await command('/api/conversations/'+item.conversationId+'/obligations/'+item.id+'/'+op,{...fields,expectedRevision:item.revision,requestId:pending.current.requestId}); await refresh();reset();}
-    catch(e){setError((e as Error).message);await refresh().catch(()=>{});} finally{setBusy(false);}
+  function reset() {
+    setAction(undefined); setNote(''); setTarget(''); setError(''); setPending(undefined); restore();
   }
-  const editable=!detail.conversation.archivedAt&&!detail.conversation.deletedAt;
+  function begin(form:Form) {
+    formRevision.current = item.revision;
+    setError(''); setNote(''); setTarget(''); setAction(form);
+  }
+  const recovery = item.recovery;
+  const selectedTarget = recovery?.handoffTargets.find(e => e.instanceId === target);
+  const changed = !!action && item.revision !== formRevision.current;
+  const editable = !detail.conversation.archivedAt && !detail.conversation.deletedAt && !detail.conversation.importedFor;
+  const activeItem = !['delivered','cancelled'].includes(item.state);
+  const prompt = action === 'signal' ? '你观察到了什么结果？' : action === 'retry' ? '要请负责人核对哪些材料？'
+    : action === 'reassign' ? '告诉接手成员需要继续处理什么' : '取消后将停止跟进，可填写原因';
+  async function submit(op:Operation) {
+    if (sending.current || (changed && !pending)) return;
+    const fields:Record<string,unknown> = {requestId:crypto.randomUUID(),expectedRevision:action ? formRevision.current : item.revision};
+    if (op === 'signal') Object.assign(fields,{condition:item.wait?.condition,waitId:item.wait?.id,summary:note.trim()});
+    else if (note.trim()) fields.reason = note.trim();
+    if (op === 'reassign' && selectedTarget) Object.assign(fields,selectedTarget,{taskRevision:recovery?.taskRevision});
+    const request = pending ?? {op,fields};
+    sending.current = true; setBusy(true); setError('');
+    try {
+      await command('/api/conversations/'+item.conversationId+'/obligations/'+item.id+'/'+request.op,request.fields);
+      await refresh(); reset();
+    } catch(e) {
+      const status = (e as {status?:number}).status;
+      // A missing receipt may follow an actual commit. Replay the exact original command.
+      setPending(status && status >= 400 && status < 500 && status !== 408 ? undefined : request);
+      setError((e as Error).message); await refresh().catch(()=>{});
+    } finally { sending.current = false; setBusy(false); }
+  }
   return <details className="cc-obligation"><summary ref={trigger}><strong>{name(item.owner.memberId)} 负责</strong><span> · {progressLabel()}</span></summary>
     <div className="cc-obligation-body"><p>{item.goal}</p><small>交付条件：{item.acceptance}</small>
       {item.userAcceptance&&<small>你在原消息中要求：「{item.userAcceptance.quote}」</small>}
@@ -64,14 +88,33 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh}:Pro
         ? `${new Date(item.wait.deadline).toLocaleString()} ${item.wait.firedAt ? '已安排' : '提醒'} ${name(item.owner.memberId)} 接回`
         : `截至 ${new Date(item.wait.deadline).toLocaleString()}`}</small>}
       {item.reason&&<p>{item.reason}</p>}{item.delivery?.messageId&&<a href={'#message-'+item.delivery.messageId}>查看最终答复</a>}
-      {editable&&!['delivered','cancelled'].includes(item.state)&&<div className="cc-obligation-actions">
-        {!action&&<>{item.state==='blocked'&&<button disabled={busy} onClick={()=>void submit('retry')}>请负责人复核</button>}{item.state==='awaiting_acceptance'&&<button disabled={busy} onClick={()=>void submit('accept')}>确认验收</button>}
-          {item.state==='waiting'&&item.wait&&!timer&&!item.wait.condition.startsWith('ci:')&&<button onClick={()=>{observedWaitId.current=item.wait?.id;setAction('signal');}}>补充实际结果</button>}
-          <button onClick={()=>setAction('cancel')}>取消跟进…</button></>}
-        {action&&<form onSubmit={e=>{e.preventDefault();void submit(action);}}><label>{action==='signal'?'你观察到了什么结果？':'取消后将停止跟进，可填写原因'}
-          <textarea autoFocus value={note} maxLength={action==='signal'?2000:1000} onChange={e=>setNote(e.target.value)} required={action==='signal'}/></label>
-          <button disabled={busy||(action==='signal'&&!note.trim())}>{action==='signal'?'提交观察结果':'确认取消'}</button>
-          <button type="button" disabled={busy} onClick={reset}>返回</button></form>}</div>}
+      {editable && (activeItem || pending || action) && <div className="cc-obligation-actions">
+        {pending ? <><p>尚未收到操作回执。重试将核对同一次操作。</p>
+          <button ref={retryButton} disabled={busy} onClick={()=>void submit(pending.op)}>重试上次操作</button></> :
+          !action ? <>
+            {item.state==='blocked' && recovery?.retryUnavailable && <small>{recovery.retryUnavailable}</small>}
+            {item.state==='blocked' && recovery && !recovery.retryUnavailable && <>
+              <button disabled={busy} onClick={()=>void submit('retry')}>请负责人复核</button>
+              <button disabled={busy} onClick={()=>begin('retry')}>补充材料并复核…</button></>}
+            {!!recovery?.handoffTargets.length && <button disabled={busy} onClick={()=>begin('reassign')}>改派负责人…</button>}
+            {item.state==='awaiting_acceptance' && <button disabled={busy} onClick={()=>void submit('accept')}>确认验收</button>}
+            {item.state==='waiting'&&item.wait&&!timer&&!item.wait.condition.startsWith('ci:')&&<button disabled={busy} onClick={()=>begin('signal')}>补充实际结果</button>}
+            {activeItem && <button disabled={busy} onClick={()=>begin('cancel')}>取消跟进…</button>}</> : null}
+        {action && <form onSubmit={e=>{e.preventDefault();if (!pending) void submit(action);}} onKeyDown={e=>{
+          if (e.key==='Escape' && !busy && !pending) {e.preventDefault();reset();}
+        }}>
+          {action==='reassign' && <label>接手成员<select autoFocus disabled={busy||!!pending} value={target} onChange={e=>setTarget(e.target.value)} required>
+            <option value="">选择一位房间成员</option>
+            {recovery?.handoffTargets.map(m=><option key={m.instanceId} value={m.instanceId}>{name(m.memberId)}</option>)}</select></label>}
+          <label>{prompt}<textarea autoFocus={action!=='reassign'} readOnly={busy||!!pending} value={note} maxLength={action==='signal'?2000:1000}
+            onChange={e=>setNote(e.target.value)} required={action!=='cancel'}/></label>
+          {(action==='retry'||action==='reassign') && <small>说明将提供给接手的成员，并保存在本次公开委托中。</small>}
+          {changed && !pending && <p role="status">委托已更新，请返回核对最新进度。</p>}
+          {!pending && <><button disabled={busy||changed||(action!=='cancel'&&!note.trim())||(action==='reassign'&&!selectedTarget)}>
+            {{signal:'提交观察结果',cancel:'确认取消',retry:'提交材料并复核',reassign:'确认改派'}[action]}</button>
+            <button type="button" disabled={busy} onClick={reset}>返回</button></>}
+        </form>}
+      </div>}
       {error&&<p role="alert">{error}</p>}
     </div></details>;
 }

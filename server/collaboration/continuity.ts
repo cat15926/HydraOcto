@@ -7,6 +7,7 @@ export const digest = (value: unknown) => createHash('sha256').update(canonical(
 export function sessionFingerprint(contract: ExecutionContractSnapshot, identity: NativeSessionIdentity, imageInvocationId?: string): string {
   const m = contract.memberSnapshot, a = contract.accountMetadataSnapshot;
   return digest({ carrier: m.carrier, account: a, model: m.model, effort: m.effort, instructions: m.instructions,
+    ...(contract.crossDisclosure && {crossDisclosure:contract.crossDisclosure}),
     ...(contract.roomMember && {roomMemberId:contract.roomMember.id}),
     ...(contract.memberContext && requiresFreshMemberContext(contract.memberContext) && {memberContext:{
       policy:'member-context-v1', mode:contract.memberContext.mode, instance:contract.memberContext.instanceId,
@@ -24,6 +25,7 @@ export function sessionFingerprint(contract: ExecutionContractSnapshot, identity
     ...(contract.projectReview ? {reviewSource:contract.primarySourceId} : {}),
     ...(contract.mayRunProjectNpmTest ? {projectNpmTest:contract.projectNpmChecks ? 2 : 1} : {}),
     ...(contract.webResearch ? {webResearch:true} : {}),
+    ...(contract.handoffPolicy ? {handoffPolicy:contract.handoffPolicy} : {}),
     ...(contract.gitDelivery ? {gitDelivery:true} : {}),
     ...(contract.mayExportProjectFile ? {projectExportTool:true} : {}),
     ...(contract.mayRequestProjectReview ? {projectReviewTool:true} : {}),

@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { Store } from '../server/store.js';
 import { CollaborationStore } from '../server/collaboration/store.js';
 import { textDigest } from '../server/collaboration/visibility.js';
+import { sessionFingerprint } from '../server/collaboration/continuity.js';
 import { runtimeTools } from '../server/collaboration/runtime-common.js';
 import type { ActionRecord, ConversationMessage, CrossGrant } from '../shared/collaboration.js';
 const rid=()=>randomUUID();
@@ -168,3 +169,62 @@ test('N9 condition: wake source and evidence transaction roll back, explicit re-
 test('N9 migration: schema 8 rows and accepted contracts survive, no historical cross authorization is invented',()=>{const h=fixture();try{
  h.store.send(h.home.id,{requestId:rid(),content:'preserved'});end(h,start(h).id);const tables=['cc_accounts','cc_members','cc_sources','cc_messages','cc_contracts','cc_conversations'],before=tables.map(t=>h.owner.db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());h.owner.db.exec('UPDATE cc_schema SET version=8');h.owner.close();const owner=new Store(h.db);try{const s=new CollaborationStore(owner,{workspace:h.workspace,artifactDir:join(h.root,'private','artifacts')});tables.forEach((t,n)=>assert.deepEqual(owner.db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all(),before[n]));assert.equal((owner.db.prepare('SELECT version FROM cc_schema').get() as any).version,16);assert.equal(s.cross.grants().length,0);assert.equal(s.actions.list().length,0);}finally{owner.close();}
 }finally{rmSync(h.root,{recursive:true,force:true});}});
+
+test('Hydra E: reviewed excerpts bind exact text, recipient instance and one delivery; tools cannot expand the grant', async () => {
+ const h=fixture();try {
+   const content='customer: secret@example.test; order-438; public: reset sorting; end';
+   h.store.send(h.home.id,{requestId:rid(),content});end(h,start(h).id);
+   const m=h.store.detail(h.home.id).messages.find(m=>m.content===content)!;
+   const selected='reset sorting',offset=content.indexOf(selected);
+   const command={requestId:rid(),homeMemberId:'codex',targetConversationId:h.target.id,targetMemberId:'claude',refs:[{...excerpt(m),start:offset,end:offset+selected.length}]};
+   const {result}=h.store.cross.shareExcerpts(h.home.id,command);
+   assert.deepEqual(h.store.cross.shareExcerpts(h.home.id,command),{result,replayed:true});
+   assert.equal(h.store.cross.transfers().length,1);
+   const g=h.store.cross.grant(result.grantId);
+   for(const input of [{content:'more'},{refs:[excerpt(m)]},{}])assert.throws(()=>h.store.cross.send(h.home.id,{requestId:rid(),grantId:g.id,...input}));
+   assert.throws(()=>h.store.cross.send(h.target.id,{requestId:rid(),grantId:g.id}));
+   assert.throws(()=>create(h,g));
+   const i=start(h);assert.equal(i.memberId,'claude');
+   const actual=h.store.prompt(i.id);assert.ok(actual.includes(selected));
+   for(const value of ['secret@example.test','order-438',m.id,textDigest(content),'sourceMessageId'])assert.ok(!actual.includes(value),value);
+   const found=await h.store.memory.search({invocationId:i.id,query:'secret@example.test',kinds:['threads','sessions']});
+   assert.equal(found.hits.length,0);
+   assert.ok(!JSON.stringify(h.store.visibility.view(h.target.id,'claude')).includes(m.id));
+   assert.ok(!JSON.stringify(h.store.visibility.view(h.target.id,'codex')).includes('请使用以下已审核资料'));
+   assert.ok(!JSON.stringify(h.store.visibility.observer(h.target.id)).includes('请使用以下已审核资料'));
+   const scopedExport=h.store.visibility.export(h.target.id,'claude');
+   assert.ok(!JSON.stringify(scopedExport).includes(m.id));assert.ok(JSON.stringify(scopedExport).includes(selected));end(h,i.id);
+   const targetSource=h.store.cross.transfers()[0]!.sourceId;
+   const localMessage=h.store.detail(h.target.id).messages.find(m=>m.sourceId===targetSource)!;
+   assert.throws(()=>h.store.visibility.messageCommand(h.target.id,localMessage.id,{requestId:rid(),expectedRevision:1,action:'reveal'}));
+   const pending=h.store.cross.shareExcerpts(h.home.id,{...command,requestId:rid()}).result;
+   h.store.cross.revoke(pending.grantId,{requestId:rid(),expectedRevision:1});assert.equal(h.store.admitNext(),undefined);
+ } finally {h.close();}
+});
+
+test('Hydra E: ordinary cross-room action callbacks return safe views without home anchors or excerpt coordinates',()=>{
+ const h=fixture();try {
+   h.store.send(h.home.id,{requestId:rid(),content:'action excerpt'});end(h,start(h).id);
+   const m=h.store.detail(h.home.id).messages[0]!,g=h.grant(),a=create(h,g,{refs:[excerpt(m)]}),i=start(h);
+   const list=h.store.actions.tool(i.id,'action_list',{},rid());
+   const candidate=h.store.actions.tool(i.id,'action_candidate',{actionId:a.id,...version(h.store.actions.get(a.id)),summary:'OK'},rid());
+   for(const v of [h.store.prompt(i.id),JSON.stringify(list),JSON.stringify(candidate)]) {
+     assert.ok(!v.includes(m.id));assert.ok(!v.includes(textDigest(m.content)));assert.ok(!v.includes('sourceMessageId'));
+   }
+   assert.ok(JSON.stringify(list).includes(i.id));assert.equal(h.store.actions.get(a.id).refs[0]?.messageId,m.id);
+ } finally {h.close();}
+});
+
+test('Hydra E: an old frozen cross-room input stays auditable but cannot be resumed or sent again',()=>{
+ const h=fixture();try {
+   const g=h.grant();h.store.cross.send(h.home.id,{requestId:rid(),grantId:g.id,content:'approved instruction'});
+   const i=h.store.admitNext()!.invocations[0]!, c=h.store.contract(i.id);
+   const payload=h.store.prepareInput(i.id);
+   const identity={supported:true,fingerprint:'same-native-account',reason:'test'};
+   const before=sessionFingerprint(c,identity);delete c.crossDisclosure;
+   assert.notEqual(sessionFingerprint(c,identity),before);
+   h.store.visibility.put('cc_contracts',c);
+   assert.throws(()=>h.store.prepareInput(i.id),/披露规则/);
+   assert.equal(h.store.input(i.id)?.manifest.payloadRef,payload.manifest.payloadRef);
+ }finally{h.close();}
+});

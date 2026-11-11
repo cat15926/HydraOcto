@@ -78,6 +78,7 @@ export interface SourceWork {
   publicStatement?: true;
   memberContextPolicy?: 'member-context-v1';
   continuationPolicy?: 'durable-v1';
+  handoffPolicy?: 'consent-v1' | 'candidate-v1';
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
@@ -99,7 +100,7 @@ export interface SourceWork {
   crossRef?: { transferId: string }; actionRef?: { actionId: string; generation: number };
 }
 export interface CollaborationEndpoint { conversationId: string; memberId: string }
-export interface CrossGrant { id: string; conversationId: string; home: CollaborationEndpoint; target: CollaborationEndpoint; revision: number; state: 'active' | 'revoked' | 'expired'; homeWorkspace: string; targetWorkspace: string; expiresAt: string; reason?: string; createdAt: string }
+export interface CrossGrant { id: string; conversationId: string; home: CollaborationEndpoint; target: CollaborationEndpoint; revision: number; state: 'active' | 'revoked' | 'expired'; homeWorkspace: string; targetWorkspace: string; approvedExcerpts?: MessageExcerpt[]; endpointInstances?: {home:string; target:string}; expiresAt: string; reason?: string; createdAt: string }
 export interface CrossTransfer { id: string; conversationId: string; grantId: string; grantRevision: number; from: CollaborationEndpoint; to: CollaborationEndpoint; sourceId: string; origin?: TaskActor; refs: MessageExcerpt[]; content: string; invalidatedAt?: string; createdAt: string }
 export interface ActionRecord { id: string; conversationId: string; title: string; content: string; grantId: string; grantRevision: number; home: CollaborationEndpoint; holder: CollaborationEndpoint; predecessor: CollaborationEndpoint; generation: number; revision: number; state: 'preparing' | 'queued' | 'active' | 'candidate' | 'waiting' | 'returning' | 'replaceable' | 'completed' | 'cancelled' | 'blocked'; completion: 'human_acceptance' | 'artifact_published'; refs: MessageExcerpt[]; origin?: TaskActor; taskId?: string; taskOwnerRevision?: number; taskRevision?: number; priorInvocationId?: string; executionId?: string; lastExecutionId?: string; currentSourceId?: string; candidateId?: string; waitId?: string; reason?: string; createdAt: string; updatedAt: string }
 export interface ActionCandidate { id: string; conversationId: string; actionId: string; generation: number; revision: number; invocationId: string; responseId: string; inputRevision: number; sourceId: string; sourceRevision: number; sourceDigest: string; summary: string; artifactVersionId?: string; artifactDigest?: string; digest: string; createdAt: string }
@@ -196,7 +197,7 @@ export interface ProjectFileExport {
   reason?: string;
 }
 export interface ConversationDetail {
-  obligations?: import('./obligations.js').Obligation[];
+  obligations?: import('./obligations.js').OperatorObligation[];
   projectExports?: ProjectFileExport[];
   projectIntents?: ProjectIntent[];
   conversation: Conversation; messages: ConversationMessage[]; sources: SourceWork[]; deliveries: Delivery[];
@@ -334,6 +335,10 @@ export interface TaskHandoff {
   fromMemberId: string | null; toMemberId: string; actor: TaskActor; executionRef?: TaskExecutionRef;
   sourceId: string; sourceRevision: number; sourceDigest: string; state: 'waiting' | 'applied' | 'cancelled' | 'refused';
   reason: string; revision: number; stopRequested: boolean; createdAt: string; updatedAt: string;
+  offer?: {
+    obligationId: string; sourceId: string; candidate: RoomMemberInstance; issuer: RoomMemberInstance;
+    decision?: { choice: 'accept' | 'decline'; reason: string; invocationId: string; recordedAt: string };
+  };
 }
 export interface TaskCommandVersion { requestId: string; expectedRevision: number; expectedOwnerRevision: number }
 export interface CreateOrdinaryTask { requestId: string; title: string; description: string; ownerMemberId?: string | null }
@@ -391,6 +396,7 @@ export interface ExecutionContractSnapshot {
   roomMember?: RoomMemberInstance;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
+  handoffPolicy?: 'consent-v1' | 'candidate-v1';
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -405,7 +411,7 @@ export interface ExecutionContractSnapshot {
   projectWork?: true; projectContinuity?: true; mayProposeProject?: true;
   webResearch?: true; gitDelivery?: true; projectPreview?: true; projectBrowser?: true;
   projectReview?: ProjectReviewScope; mayRequestProjectReview?: true; mayExportProjectFile?: true; mayRunProjectNpmTest?: true; projectNpmChecks?: true;
-  visibility?: MessageVisibility; visibilityEpoch?: number; materialDigest?: string; memorySnapshot?: MemorySnapshot[];
+  visibility?: MessageVisibility; visibilityEpoch?: number; crossDisclosure?: 'excerpt-only-v1'; materialDigest?: string; memorySnapshot?: MemorySnapshot[];
 }
 export interface InputManifestItem {
   kind: string; reference: string; representation: string; reason?: string; characters: number; complete: boolean;
@@ -471,6 +477,7 @@ export interface RuntimeRequest {
   memberContextMode?: RuntimeMemberContextMode;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
+  handoffPolicy?: 'consent-v1' | 'candidate-v1';
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;

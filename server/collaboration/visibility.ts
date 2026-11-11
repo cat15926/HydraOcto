@@ -1,3 +1,4 @@
+import type { PublicRoomView } from '../../shared/observer.js';
 import { obligationTools } from './obligation-tools.js';
 import { projectReviewTools } from './project-review-tools.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -144,7 +145,7 @@ export class VisibilityService {
   }
   sourceContent(s: SourceWork, visibility = s.visibility, includeOrigin = !s.memberContextPolicy): string {
     if (s.replyTo) this.replyContent(s.conversationId, s.replyTo, visibility);
-    if (s.crossRef) return this.store.cross.material(s, includeOrigin);
+    if (s.crossRef) return this.store.cross.material(s);
     if (s.actionRef) return this.store.actions.material(s, includeOrigin);
     return s.excerptRefs?.length ? `${s.content}\n用户明确分享的准确选段（仅这些片段获授权）：\n${this.resolveRefs(s.conversationId, s.excerptRefs, includeOrigin)}` : s.content;
   }
@@ -159,15 +160,44 @@ export class VisibilityService {
   }
   scopedMessage(m: ConversationMessage): ConversationMessage {
     const { id, conversationId, memberId, author, content, createdAt, attachmentIds } = this.projectedMessage(m, false);
-    return { id, conversationId, memberId, author, content, createdAt, ...(attachmentIds?.length && { attachmentIds }) };
+    const source = m.sourceId ? this.data.get<SourceWork>('cc_sources',m.sourceId) : undefined;
+    const body = source?.crossRef || source?.actionRef ? this.sourceContent(source, undefined, false) : content;
+    return { id, conversationId, memberId, author, content:body, createdAt, ...(attachmentIds?.length && { attachmentIds }) };
   }
-  observer(cid: string) {
+  observer(cid: string): PublicRoomView {
     const { id, title } = this.assertConversation(cid);
-    const messages = this.readable(cid).filter(m => !privateScope(this.messageScope(m))).map(m => {
-      const { id, memberId, author, content, createdAt } = this.scopedMessage(m);
-      return { id, memberId, author, content, createdAt };
+    const publicMessages = this.readable(cid).filter(message => {
+      // System dispatches can contain private route, task or transfer identifiers.
+      // Failed carrier output may include diagnostics rather than public speech.
+      if (message.author === 'system' || privateScope(this.messageScope(message))) return false;
+      if (message.responseId && this.store.response(message.responseId).status !== 'succeeded') return false;
+      const source = message.sourceId ? this.data.get<SourceWork>('cc_sources', message.sourceId)
+        : message.responseId ? this.primary(this.store.response(message.responseId).invocationId) : undefined;
+      if (source?.withdrawnAt) return false;
+      return message.author !== 'member' || !message.sourceId || source?.publicStatement === true;
     });
-    return { conversation: { id, title }, messages, factors: this.store.factors.list(cid) };
+    const names = new Map(this.store.members().map(member => [member.id, member.name]));
+    const messages = publicMessages.map(message => {
+      const { id, memberId, author, content, createdAt } = this.scopedMessage(message);
+      return { id, memberId, author, content, createdAt, ...(memberId && { authorName: names.get(memberId) }) };
+    });
+    const messageIds = new Set(messages.map(message => message.id));
+    const requestBySource = new Map(publicMessages.filter(message => message.sourceId && message.author === 'user')
+      .map(message => [message.sourceId!, message.id]));
+    const progress: PublicRoomView['progress'] = [];
+    for (const obligation of this.store.obligations.list(cid)) {
+      const requestMessageId = requestBySource.get(obligation.originSourceId);
+      if (obligation.parentId || !requestMessageId) continue;
+      const receipt = obligation.delivery?.messageId;
+      if ((obligation.state === 'delivered' || obligation.state === 'awaiting_acceptance') && (!receipt || !messageIds.has(receipt))) continue;
+      progress.push({ requestMessageId, state: obligation.state, ...(receipt && messageIds.has(receipt) && { deliveryMessageId: receipt }) });
+    }
+    // Only include graph records backed by a published message. A room-level tool
+    // receipt or dispatch can refer to a participant who has never spoken publicly.
+    const factors: PublicRoomView['factors'] = this.store.factors.list(cid)
+      .filter(factor => factor.sourceRef.kind === 'message' && messageIds.has(factor.sourceRef.id))
+      .map(factor => ({ id: factor.id, kind: 'message', messageId: factor.sourceRef.id }));
+    return { conversation: { id, title }, messages, progress, factors };
   }
   history(cid: string, memberId: string, scope: string, includeOrigin = true) {
     return this.readable(cid, memberId, scope).map(m => {
@@ -190,6 +220,13 @@ export class VisibilityService {
     const s = this.primary(invocationId);
     if (!this.allows(s.conversationId, s.visibility, i.memberId) || s.withdrawnAt) conflict();
     if (s.excerptRefs?.length) this.resolveRefs(s.conversationId, s.excerptRefs);
+    // Inputs already frozen under the former cross-room projection cannot be re-sent.
+    if (!c.crossDisclosure && (s.crossRef || s.actionRef || (c.toolPolicyVersion === 'cross-action-v1' &&
+      this.store.cross.grants().some(g=>g.home.conversationId===i.conversationId || g.target.conversationId===i.conversationId)) || c.historySnapshot?.some(m => {
+      if (!m.sourceId) return false;
+      const old = this.data.get<SourceWork>('cc_sources', m.sourceId);
+      return !!(old.crossRef || old.actionRef);
+    }))) conflict('跨房材料的披露规则已更新，请重新发起执行。');
     if (c.materialDigest !== undefined && c.materialDigest !== textDigest(JSON.stringify({ content: this.sourceContent(s), refs: s.excerptRefs, visibility: s.visibility }))) throw new AppError(409, '材料已变化，禁止继续发送旧输入。', 'inputs_changed');
     for (const snapshot of c.historySnapshot ?? []) {
       const current = this.messages(i.conversationId).find(m => m.id === snapshot.id);
@@ -204,7 +241,8 @@ export class VisibilityService {
       const m = this.messages(cid).find(m => m.id === mid); if (!m || (m.revision ?? 1) !== input.expectedRevision) conflict();
       if (!['reveal', 'delete'].includes(String(input.action)) || m!.deletedAt) conflict();
       if (input.action === 'reveal') {
-        if (!privateScope(this.messageScope(m!)) || m!.excerptRefs?.length) conflict('仅未公开私聊可被整体公开；选段分享不能扩大授权。');
+        const origin = m!.sourceId ? this.data.get<SourceWork>('cc_sources',m!.sourceId) : m!.responseId ? this.primary(this.store.response(m!.responseId).invocationId) : undefined;
+        if (origin?.crossRef || !privateScope(this.messageScope(m!)) || m!.excerptRefs?.length) conflict('仅未公开私聊可被整体公开；选段分享不能扩大授权。');
         if (m!.replyTo) this.replyContent(cid, m!.replyTo);
         m!.visibility = { ...this.messageScope(m!)!, revealedAt: now() };
       } else m!.deletedAt = now();

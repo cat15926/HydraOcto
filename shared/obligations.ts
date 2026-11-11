@@ -65,3 +65,12 @@ export interface Obligation {
   createdAt: string;
   updatedAt: string;
 }
+
+/** Included only in the operator's live conversation view. Commands recheck every condition. */
+export interface OperatorObligation extends Obligation {
+  recovery?: {
+    retryUnavailable?: string;
+    handoffTargets: ObligationEndpoint[];
+    taskRevision?: number;
+  };
+}

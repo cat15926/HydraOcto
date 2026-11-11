@@ -5,8 +5,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
-import type { AcceptanceEvidence, CollaborationInvocation, ConversationMessage, Delivery, MentionGroup, OrdinaryTask, ProjectReviewCheck, SourceWork } from '../../shared/collaboration.js';
-import type { Obligation, ObligationDelegation, ObligationEndpoint, ObligationReport } from '../../shared/obligations.js';
+import type { AcceptanceEvidence, CollaborationInvocation, ConversationMessage, Delivery, MentionGroup, OrdinaryTask, ProjectReviewCheck, SourceWork, TaskHandoff } from '../../shared/collaboration.js';
+import type { Obligation, ObligationDelegation, ObligationEndpoint, ObligationReport, OperatorObligation } from '../../shared/obligations.js';
 import { AppError, now } from '../store.js';
 import type { CollaborationStore } from './store.js';
 
@@ -48,13 +48,18 @@ export class ObligationService {
     if (!instance?.active) conflict('责任成员实例不可用。');
     return { memberId, instanceId: instance.id, generation: instance.generation };
   }
-  private actor(id: string, requireRunning = true) {
+  private publicOrigin(id: string) {
     const run = this.store.invocation(id), c = this.store.contract(id), source = this.store.visibility.primary(id);
-    const member = this.endpoint(run.conversationId, run.memberId);
-    if (!c.obligationPolicy || !c.roomMember || c.roomMember.id !== member.instanceId || c.roomMember.generation !== member.generation ||
+    if (!c.obligationPolicy || !c.roomMember ||
         c.roomMember.conversationId !== run.conversationId || c.roomMember.memberId !== run.memberId || !c.roomMember.active ||
         source.withdrawnAt || c.visibility || source.visibility || source.excerptRefs?.length || source.crossRef || source.actionRef ||
         run.acceptance !== 'accepted' || (run.cancelRevision ?? 0) !== 0) conflict('责任操作需要本房间的有效公开执行和真实接受证据。');
+    return {run,source,originalMember:c.roomMember};
+  }
+  private actor(id: string, requireRunning = true) {
+    const {run,source,originalMember} = this.publicOrigin(id);
+    const member = this.endpoint(run.conversationId, run.memberId);
+    if (originalMember.id !== member.instanceId || originalMember.generation !== member.generation) conflict('责任执行所属的房间成员已变化。');
     if (requireRunning) {
       this.store.tasks.actor(id);
       this.store.visibility.validateInvocation(id);
@@ -116,6 +121,22 @@ export class ObligationService {
           (t.executionRef && t.executionRef.invocationId !== id)) conflict('任务负责人或执行权已变化。');
     }
     return {o,run,source};
+  }
+  settleHandoffOffer(h: TaskHandoff) {
+    if (!h.offer) return;
+    const o = this.row(h.conversationId,h.offer.obligationId);
+    if (ended(o) || o.taskId !== h.taskId || o.ownerRevision !== h.expectedOwnerRevision || o.owner.instanceId !== h.offer.issuer.id) return;
+    if (h.state === 'applied') { this.owner(o); return; }
+    if (h.state !== 'refused' || o.state !== 'open') return;
+    if (!this.store.roomMembers.isCurrent(h.offer.issuer)) {
+      this.block(o,'交班未生效，原负责人身份已变化。'); return;
+    }
+    if (h.actor.kind !== 'agent' || this.store.invocation(h.actor.invocationId).cancelRevision ||
+        this.store.artifacts.get<SourceWork>('cc_sources',h.actor.sourceId).withdrawnAt) {
+      this.block(o,'交班未生效，原执行或委托已撤销。'); return;
+    }
+    this.wake(o,'交班未生效，责任仍在你手中。原因：'+h.reason);
+    this.save(o,'handoff_refused');
   }
   private acceptanceRequest(invocationId: string, source: SourceWork): Obligation['userAcceptance'] {
     if (source.taskRef && (source.kind === 'task' || source.kind === 'task_handoff')) {
@@ -542,6 +563,89 @@ export class ObligationService {
       return {obligation:this.save(o,'wait_signalled')};
     }).result);
   }
+  private requireReleased(o: Obligation, withdrawing?: string) {
+    const active = this.store.db.prepare("SELECT d.value FROM cc_obligation_sources s JOIN cc_deliveries d ON d.source_id=s.source_id WHERE s.obligation_id=? AND d.member_id=?").all(o.id,o.owner.memberId) as {value:string}[];
+    if (active.some(r => {
+      const d: Delivery = JSON.parse(r.value);
+      if (d.status === 'pending' || d.status === 'held') return !(d.sourceId === withdrawing && !d.responseId);
+      if (!d.responseId) return false;
+      const run = this.store.invocation(this.store.response(d.responseId).invocationId);
+      return !terminal.has(run.status) || run.teardown !== 'confirmed';
+    })) conflict('仍有待领取或未释放的执行，请先等待。');
+  }
+  private requireRetry(o: Obligation) {
+    const cid = o.conversationId;
+    if (o.state !== 'blocked' || !same(o.owner,this.endpoint(cid,o.owner.memberId))) conflict('只可请当前有效负责人复核阻塞的委托。');
+    const t = o.taskId && this.store.tasks.getTask(o.taskId);
+    if (t && (t.disposition || t.pendingHandoffId || t.status === 'done' || t.status === 'blocked' || t.executionRef)) conflict('关联任务不可复核或仍在处理中。');
+    const {source,originalMember} = this.publicOrigin(o.originInvocationId);
+    if (source.id !== o.originSourceId || source.conversationId !== cid) conflict('原委托授权已失效。');
+    if (originalMember.id !== o.owner.instanceId && (!t || !this.store.tasks.handoffs(cid).some(h =>
+      h.taskId === t.id && h.state === 'applied' && h.toMemberId === o.owner.memberId && h.expectedOwnerRevision + 1 === o.ownerRevision))) {
+      conflict('当前成员缺少正式接手这项责任的凭据。');
+    }
+    if (source.projectWork) {
+      this.actor(o.originInvocationId,false);
+      const c = this.store.contract(o.originInvocationId);
+      this.store.projectReviews.requireGrant(cid,o.owner.memberId,c.workspaceGrant!.revision,c.workspaceGrant);
+    }
+    this.requireReleased(o);
+  }
+  private handoffTask(o: Obligation) {
+    if (o.state !== 'blocked' || o.parentId || !o.taskId) conflict('只能改派受阻的主委托。');
+    const t = this.store.tasks.getTask(o.taskId);
+    if (t.ownerRevision !== o.ownerRevision || t.ownerMemberId !== o.owner.memberId ||
+        t.executionRef || t.pendingHandoffId || t.delegationId || t.disposition || t.status === 'done') {
+      conflict('关联任务已有执行、交接或终结处置，请查看最新进度。');
+    }
+    const {source:origin} = this.publicOrigin(o.originInvocationId);
+    if (origin.id !== o.originSourceId || origin.conversationId !== o.conversationId) conflict('原委托授权已失效。');
+    if (origin.projectWork || this.latestChild(o)?.projectReview) conflict('项目授权与原执行绑定，请在项目中重新授权。');
+    if (o.activeGroupId || this.raw(o.conversationId).some(c => c.parentId === o.id && !ended(c) && c.state !== 'blocked')) conflict('尚有未接回的下游委托。');
+    const source = this.store.artifacts.get<SourceWork>('cc_sources',o.currentSourceId);
+    const unclaimed = source.kind === 'job_result' && source.id === o.wakeSourceId && !source.withdrawnAt &&
+      source.requestedTargets.length === 1 && source.requestedTargets[0] === o.owner.memberId &&
+      this.store.db.prepare("SELECT 1 FROM cc_deliveries WHERE source_id=? AND member_id=? AND status IN ('pending','held') AND json_extract(value,'$.responseId') IS NULL")
+        .get(source.id,o.owner.memberId) ? source : undefined;
+    this.requireReleased(o,unclaimed?.id);
+    return {task:t,unclaimed};
+  }
+  operatorList(cid: string): OperatorObligation[] {
+    const room = this.store.workbench.conversation(cid);
+    return this.raw(cid).map(o => {
+      if (o.parentId || o.state !== 'blocked' || room.archivedAt || room.deletedAt || room.importedFor) return o;
+      const recovery: NonNullable<OperatorObligation['recovery']> = {handoffTargets:[]};
+      try { this.requireRetry(o); } catch (e) {
+        if (!(e instanceof AppError)) throw e;
+        recovery.retryUnavailable = e.message;
+      }
+      try {
+        recovery.taskRevision = this.handoffTask(o).task.revision;
+        for (const id of room.memberIds) {
+          if (id === o.owner.memberId) continue;
+          try { recovery.handoffTargets.push(this.endpoint(cid,id)); }
+          catch (e) { if (!(e instanceof AppError)) throw e; }
+        }
+      } catch (e) { if (!(e instanceof AppError)) throw e; }
+      return {...o,recovery};
+    });
+  }
+  reassign(cid: string, id: string, input: {requestId:string; expectedRevision:number; taskRevision:number; target:ObligationEndpoint; reason:string}) {
+    this.room(cid);
+    return this.port.tx(() => this.port.command('obligation-decision:' + cid + ':' + value(input.requestId,'请求编号',160),{id,input},() => {
+      const o = this.row(cid,id); this.version(o,input.expectedRevision);
+      const {task,unclaimed} = this.handoffTask(o), target = this.endpoint(cid,input.target.memberId);
+      if (!same(input.target,target) || target.memberId === o.owner.memberId) conflict('接手成员已变更，请重新选择。');
+      const result = this.store.tasks.handoff(task.id,{requestId:input.requestId,expectedRevision:input.taskRevision,
+        expectedOwnerRevision:o.ownerRevision!,targetMemberId:target.memberId,reason:value(input.reason,'交接说明',1000)});
+      if (result.handoff.state !== 'applied') conflict('交接尚未生效，请核对当前负责人。');
+      if (unclaimed) this.store.cross.withdraw(unclaimed);
+      this.owner(o);
+      o.state = 'open'; o.groupCount = 0; o.waitCount = 0;
+      delete o.reason; delete o.delivery; delete o.blockedReturnSourceId; delete o.wait;
+      return {obligation:this.save(o,'user_reassigned')};
+    }).result);
+  }
   async decide(cid: string, id: string, input: {requestId:string;expectedRevision:number;decision:'accept'|'cancel'|'retry';reason?:string}) {
     this.room(cid); const key = 'obligation-decision:' + cid + ':' + value(input.requestId,'请求编号',160);
     const initial = this.row(cid,id), child = this.latestChild(initial);
@@ -563,25 +667,9 @@ export class ObligationService {
         if (o.state !== 'awaiting_acceptance' || !o.delivery?.messageId) conflict('当前没有待确认的最终交付。');
         this.endpoint(cid,o.owner.memberId); this.finishTask(o); o.state = 'delivered';
       } else if (input.decision === 'retry') {
-        if (o.state !== 'blocked' || !same(o.owner,this.endpoint(cid,o.owner.memberId))) conflict('只可请当前有效负责人复核阻塞的委托。');
-        const t = o.taskId && this.store.tasks.getTask(o.taskId);
-        if (t && (t.disposition || t.pendingHandoffId || t.status === 'done' || t.status === 'blocked' || t.executionRef)) conflict('关联任务不可复核或仍在处理中。');
-        const source = this.store.artifacts.get<SourceWork>('cc_sources',o.originSourceId);
-        if (source.withdrawnAt || source.visibility || source.excerptRefs?.length) conflict('原委托授权已失效。');
-        this.actor(o.originInvocationId,false);
-        if (source.projectWork) {
-          const c = this.store.contract(o.originInvocationId);
-          this.store.projectReviews.requireGrant(cid,o.owner.memberId,c.workspaceGrant!.revision,c.workspaceGrant);
-        }
-        const active = this.store.db.prepare("SELECT d.value FROM cc_obligation_sources s JOIN cc_deliveries d ON d.source_id=s.source_id WHERE s.obligation_id=? AND d.member_id=?").all(o.id,o.owner.memberId) as {value:string}[];
-        if (active.some(r => {
-          const d: Delivery = JSON.parse(r.value);
-          if (d.status === 'pending' || d.status === 'held') return true;
-          if (!d.responseId) return false;
-          const run = this.store.invocation(this.store.response(d.responseId).invocationId);
-          return !terminal.has(run.status) || run.teardown !== 'confirmed';
-        })) conflict('仍有待领取或未释放的执行，请先等待。');
-        this.wake(o,'用户要求复核先前的阻塞：' + (o.reason ?? '待核对') + '。请核对现有证据，需要新的项目操作时重新申请授权。');
+        this.requireRetry(o);
+        const note = input.reason === undefined ? '' : '\n用户补充的公开材料，请独立核对：' + value(input.reason,'补充材料',1000);
+        this.wake(o,'用户要求复核先前的阻塞：' + (o.reason ?? '待核对') + '。请核对现有证据，需要新的项目操作时重新申请授权。' + note);
         o.state = 'open'; o.reminderCount = 0; o.waitCount = 0; o.groupCount = 0; delete o.reason; delete o.delivery;
       } else if (input.decision === 'cancel') {
         if (o.activeGroupId) {
