@@ -84,7 +84,7 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'obligationPolicy' | 
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
     ? [...projectReviewTools(request.projectReview), ...obligations] : [];
   const tools = [...policyTools(request).map((t): RuntimeToolSpec => {
-    if (t.name === 'multi_mention' && supportsContinuation(request)) {
+    if (t.name === 'multi_mention' && supportsContinuation(request) && !request.projectWork) {
       return {
         ...t,
         description: 'Collect replies to a question from 2–8 other room members. To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
@@ -161,6 +161,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
   if (name === 'collaboration_request' && args.delivery !== undefined && !obligationTools(request).length)
     throw new Error('Tracked delegation is outside this invocation frozen policy.');
+  if (name === 'multi_mention' && args.obligationId !== undefined && request.projectWork) throw new Error('Tracked consultation is outside this project execution.');
   if (((name === 'multi_mention' && args.obligationId !== undefined) || (name === 'obligation_wait' && args.kind !== undefined)) && !supportsContinuation(request))
     throw new Error('This continuation is outside the frozen invocation policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });

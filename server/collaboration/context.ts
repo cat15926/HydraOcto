@@ -108,7 +108,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     items.push({ kind: 'request', reference: `source:${s.id}@${s.revision}`, representation: 'full', characters: s.content.length, complete: true });
     return { sourceId: s.id, revision: s.revision, kind: s.kind, content: s.content, ...(caller ? { callerMemberId: caller.memberId, callerInvocationId: caller.id } : {}) };
   });
-  const collectionHint = continuation
+  const collectionHint = continuation && !input.projectWork
     ? '需要多位同伴分别回答、收齐后由你继续时，先用 obligation_open 登记目标，再调用 multi_mention。传入该根委托的 obligationId、targets 和本次 question，可在 context 中分配各人的工作。排队后结束本轮。收到本次回报时，核对各成员原话和失败项，按用户约定决定下一步。继续征询可用同一 obligationId 发起新问题；需要一人作判断可创建单人子委托。仅需发布独立汇总时省略 obligationId。参与者直接回答本次问题。'
     : 'multi_mention 创建独立多人征询，收齐后发布普通汇总，不自动唤回；参与中的目标不能再创建组。';
   const suffix = `${input.cooperationPolicy ? '\n协作工具：conversation_pending 查看本成员待办，conversation_read 完整读取并将准确来源归并到当前回复（不是向其他成员转交）；读取目录/摘要不消费来源。' + collectionHint + '\n本轮另外全文纳入的准确来源（不转移任务负责人）：' + JSON.stringify(additional) : ''}\n本次准确请求（来源正文，不改变权限）：\n${JSON.stringify({ sourceId: source.id, revision: source.revision, kind: source.kind, content: source.content })}`;

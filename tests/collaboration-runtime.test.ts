@@ -433,6 +433,9 @@ test('a durable public invocation can request a return from peers or wait for an
     await executeTool(input, 'multi_mention', group, 'collect');
     await executeTool(input, 'obligation_wait', timer, 'wait');
   }
+  const projectAuthor = {...enabled, projectWork:true};
+  assert.ok(!('obligationId' in (runtimeTools(projectAuthor).find(t => t.name === 'multi_mention')?.inputSchema.properties ?? {})));
+  await assert.rejects(executeTool(projectAuthor, 'multi_mention', group, 'project-group'), /outside/);
   const privateScope = {...enabled, visibility:{kind:'private' as const,memberIds:[basic.member.id]}};
   const reviewer = {...enabled, projectReview:{paths:['orders.ts'], grantRevision:1, originalSourceId:'origin'}};
   for (const other of [basic, privateScope, reviewer, {...enabled, obligationPolicy: undefined}]) {

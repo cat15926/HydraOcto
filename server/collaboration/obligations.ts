@@ -244,8 +244,9 @@ export class ObligationService {
     const {o} = this.authorize(id,args.obligationId);
     if (o.parentId || o.state !== 'open') conflict('请在开放的主责任上登记等待。');
     const deadline = value(args.deadline,'截止时间',64), condition = value(args.condition,'等待条件');
-    const kind = args.kind;
-    if (kind !== undefined && (this.store.contract(id).continuationPolicy !== 'durable-v1' || (kind !== 'event' && kind !== 'timer'))) conflict('本轮不支持这种等待方式。');
+    const durable = this.store.contract(id).continuationPolicy === 'durable-v1';
+    const kind = args.kind === undefined && durable ? 'event' : args.kind;
+    if (kind !== undefined && (!durable || (kind !== 'event' && kind !== 'timer'))) conflict('本轮不支持这种等待方式。');
     if (kind === 'timer' && condition.startsWith('ci:')) conflict('CI 结果必须来自真实的运行记录。');
     if (condition.startsWith('ci:') && !ciTargets(this.store,id).some(target => target.condition === condition)) conflict('请选择本实例已经获准交付的 PR 和准确提交。');
     if (!Number.isFinite(Date.parse(deadline)) || Date.parse(deadline) <= this.clock()) conflict('请指定未来的有效截止时间。');
