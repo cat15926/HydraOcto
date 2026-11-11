@@ -36,7 +36,7 @@ test('A: schema 13 upgrades deterministically, preserves frozen old work through
     owner.db.prepare("UPDATE cc_conversations SET value=json_remove(value,'$.collaborationMode') WHERE id=?").run(c.id);
     owner.db.exec('DROP TABLE cc_room_members; UPDATE cc_schema SET version=13');
     owner.close(); owner=new Store(db); s=new CollaborationStore(owner);
-    assert.equal(owner.db.prepare('SELECT version FROM cc_schema').get()!.version,16);
+    assert.equal(owner.db.prepare('SELECT version FROM cc_schema').get()!.version,17);
     assert.deepEqual(s.roomMembers.resolve(c.id,'claude'),template);
     assert.equal(s.detail(c.id).conversation.collaborationMode,undefined);
     assert.equal(s.detail(c.id).sources.length,1);

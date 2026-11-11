@@ -1,6 +1,8 @@
+import { VersionPackageReceipt } from './VersionPackageReceipt';
 import { useEffect, useRef, useState } from 'react';
 import type { ConversationDetail, Member, MentionGroup } from '../shared/collaboration';
 import type { Obligation, OperatorObligation } from '../shared/obligations';
+import { OpinionRoundReceipt, opinionProgress } from './OpinionRoundReceipt';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 
 const labels:Record<Obligation['state'],string> = {open:'处理中',delegated:'等待同伴回报',waiting:'等待外部结果',
@@ -8,7 +10,7 @@ const labels:Record<Obligation['state'],string> = {open:'处理中',delegated:'�
 type Operation = 'signal'|'cancel'|'retry'|'reassign'|'accept';
 type Form = Exclude<Operation,'accept'>;
 type Request = {op:Operation; fields:Record<string,unknown>};
-type Props = {item:OperatorObligation; rows:Obligation[]; detail:ConversationDetail; members:Member[]; command:WorkbenchCommand; refresh:()=>Promise<void>};
+type Props = {onMessage?:(id:string)=>void; item:OperatorObligation; rows:Obligation[]; detail:ConversationDetail; members:Member[]; command:WorkbenchCommand; refresh:()=>Promise<void>};
 
 function GroupResults({group, name}: {group:MentionGroup; name:(id:string)=>string}) {
   const results = group.results ?? [];
@@ -24,7 +26,7 @@ function GroupResults({group, name}: {group:MentionGroup; name:(id:string)=>stri
   </details>;
 }
 
-export function ObligationReceipt({item,rows,detail,members,command,refresh}:Props) {
+export function ObligationReceipt({item,rows,detail,members,command,refresh,onMessage}:Props) {
   const [action,setAction] = useState<Form>(), [note,setNote] = useState(''), [target,setTarget] = useState('');
   const [error,setError] = useState(''), [busy,setBusy] = useState(false), [pending,setPending] = useState<Request>();
   const trigger = useRef<HTMLElement>(null), formRevision = useRef(item.revision), sending = useRef(false);
@@ -35,8 +37,11 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh}:Pro
   const current=[...children].reverse().find(c=>!['delivered','cancelled'].includes(c.state));
   const groups = (detail.groups ?? []).filter(group => group.contract?.obligationId === item.id);
   const active = groups.find(group => group.id === item.activeGroupId && group.state === 'collecting');
+  const rounds = (detail.opinionRounds ?? []).filter(round => round.obligationId === item.id);
+  const openRound = rounds.find(round => ['collecting','ready'].includes(round.state));
   const timer = item.wait?.kind === 'timer';
   function progressLabel() {
+    if (openRound && !['blocked','cancelled','delivered'].includes(item.state)) return opinionProgress(openRound);
     if (active) return `等待成员答复 · ${active.results?.length ?? 0}/${active.targets.length}`;
     if (item.state === 'waiting' && timer) return '等待约定时间';
     if (item.state === 'delegated' && current) return '等待 ' + name(current.owner.memberId) + ' 回报';
@@ -79,6 +84,8 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh}:Pro
     <div className="cc-obligation-body"><p>{item.goal}</p><small>交付条件：{item.acceptance}</small>
       {item.userAcceptance&&<small>你在原消息中要求：「{item.userAcceptance.quote}」</small>}
       {groups.map(group => <GroupResults key={group.id} group={group} name={name} />)}
+      {detail.versionPackages?.filter(bundle => bundle.obligationId === item.id).map(bundle => <VersionPackageReceipt key={bundle.id} bundle={bundle} conversationId={detail.conversation.id} command={command} refresh={refresh} />)}
+      {rounds.map(round => <OpinionRoundReceipt key={round.id} round={round} name={name} onMessage={onMessage} />)}
       {children.map(child=><div className="cc-obligation-child" key={child.id}><strong>{name(child.owner.memberId)} · {child.report?{passed:'验证通过',failed:'验证未通过',blocked:'验证受阻'}[child.report.outcome]:labels[child.state]}</strong>
         <p>{child.report?.summary??child.acceptance}</p>{child.version&&<small title={child.version}>验证版本：{child.version}</small>}
         {child.report && <small>{child.report.authority==='project_test'?'项目测试回执':'成员回报'}{child.report.evidenceIds.length?' · '+child.report.evidenceIds.length+' 条证据':''}</small>}

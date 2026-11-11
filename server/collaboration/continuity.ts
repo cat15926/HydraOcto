@@ -14,6 +14,7 @@ export function sessionFingerprint(contract: ExecutionContractSnapshot, identity
       generation:contract.memberContext.generation, factors:digest(contract.memberContext.factors)
     }}),
     ...(contract.obligationPolicy && {obligationPolicy:true}),
+    ...(contract.coordinationPolicy && {coordinationPolicy:contract.coordinationPolicy}),
     ...(contract.continuationPolicy && {continuationPolicy:contract.continuationPolicy}),
     ...(imageInvocationId ? { imageInvocationId } : {}),
     ...(contract.visibilityEpoch !== undefined ? { visibility: contract.visibility, visibilityEpoch: contract.visibilityEpoch } : {}),

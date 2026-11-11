@@ -1,3 +1,5 @@
+import { opinionTools } from './opinion-tools.js';
+import { versionPackageTools } from './version-package-tools.js';
 import { memberContextTools } from './member-context.js';
 import { obligationDeliverySchema, obligationTools, supportsContinuation } from './obligation-tools.js';
 import { projectBrowserTool } from './project-browser.js';
@@ -80,7 +82,7 @@ interface RuntimeToolSpec {
   inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+export function runtimeTools(request: Pick<RuntimeRequest, 'coordinationPolicy' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
   if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') return memberContextTools(request.memberContextMode);
   const obligations = obligationTools(request);
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
@@ -112,6 +114,9 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'handoffPolicy' | 'ma
       inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, delivery: obligationDeliverySchema } },
     };
   }), ...obligations, ...memberContextTools(request.memberContextMode)];
+  if (request.coordinationPolicy === 'decision-material-v1' && request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork) {
+    tools.push(...opinionTools, ...versionPackageTools);
+  }
   if (request.handoffPolicy === 'candidate-v1' && !request.visibility && !request.projectWork && !request.projectReview) {
     tools.push({name:'task_handoff_decide',description:'Reply to the whole-task handoff offered in this exact turn. Accept responsibility for the whole result or decline with a reason. The platform records your decision and contacts the responsible member.',
       inputSchema:{type:'object',properties:{handoffId:{type:'string'},decision:{type:'string',enum:['accept','decline']},reason:{type:'string',minLength:1,maxLength:2000}},required:['handoffId','decision','reason'],additionalProperties:false}});
@@ -186,7 +191,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
     throw new Error('This continuation is outside the frozen invocation policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select' || name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
+  if (name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select' || name.startsWith('opinion_') || name.startsWith('package_') || name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);

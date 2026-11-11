@@ -1,12 +1,13 @@
+import { OpinionRoundReceipt } from './OpinionRoundReceipt';
 import { useRef, useState } from 'react';
 import type { ConversationDetail, Member } from '../shared/collaboration';
 
 const groupNames = { collecting: '等待结果', done: '已收齐', timeout: '已超时', cancelled: '已取消', lost: '重启后停止收集' };
 const appendNames = { sent: '等待追加回执', accepted: '承载已接受', read: '已取得原生读取证据', unknown: '结果未知，保留原绑定', not_accepted: '未接受，保留下一轮' };
-type Props = { detail: ConversationDetail; members: Member[]; command: (path: string, body: unknown) => Promise<unknown>; refresh: () => Promise<void> };
+type Props = {onMessage?:(id:string)=>void;  detail: ConversationDetail; members: Member[]; command: (path: string, body: unknown) => Promise<unknown>; refresh: () => Promise<void> };
 
 /** Scheduling controls and consultation progress; requests originate in the conversation. */
-export function CooperationPanel({ detail, members, command, refresh }: Props) {
+export function CooperationPanel({ detail, members, command, refresh, onMessage }: Props) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const pending = useRef<{ signature: string; body: Record<string, unknown> } | undefined>(undefined);
   const name = (id: string) => members.find(m => m.id === id)?.name ?? id;
@@ -64,6 +65,7 @@ export function CooperationPanel({ detail, members, command, refresh }: Props) {
       </div>)}
       {detail.inputExposures?.filter(e => e.kind !== 'append').map(e => <details className="cc-cooperation-card" key={e.id} data-input-exposure={e.id}><summary>{e.kind === 'prompt' ? '首次输入全文归并' : '工具完整读取'} · 输入第 {e.inputRevision} 版</summary><code>来源 {e.sourceId} · 回复 {e.responseId}</code><p>{e.content}</p></details>)}
     </details>
+    {!!detail.opinionRounds?.length && <section aria-label="征询与决定"><h3>征询与决定</h3>{detail.opinionRounds.map(round => <OpinionRoundReceipt key={round.id} round={round} name={name} onMessage={onMessage} />)}</section>}
     {!!detail.groups?.length && <section aria-label="多人征询进度">
       <div className="cc-section-title"><h3>多人征询 · {detail.groups.length}</h3></div>
       {detail.groups.map(g => <details className="cc-cooperation-card" key={g.id} data-mention-group={g.id}><summary>{g.question} · {g.contract && g.state === 'lost' ? '征询受阻' : groupNames[g.state]}{g.results && ` · 已收集 ${g.results.length}/${g.targets.length}`}</summary>

@@ -153,7 +153,7 @@ test('P0: original authorizations survive schema 11 migration and restart; priva
     const original = h.owner.db.prepare('SELECT value FROM cc_conversations WHERE id=?').get(h.cid);
     h.owner.db.exec('DROP TABLE cc_project_intents; UPDATE cc_schema SET version=11');
     const upgraded = new CollaborationStore(h.owner);
-    assert.equal(h.owner.db.prepare('SELECT version FROM cc_schema').get()?.version, 16);
+    assert.equal(h.owner.db.prepare('SELECT version FROM cc_schema').get()?.version, 17);
     assert.deepEqual(h.owner.db.prepare('SELECT value FROM cc_conversations WHERE id=?').get(h.cid), original);
     const input = { content: '修改项目文件', requestId: randomUUID() }, waiting = upgraded.projects.submit(h.cid, input);
     assert.ok('intent' in waiting);

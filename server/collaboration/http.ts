@@ -142,7 +142,15 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'GET' && conversation) {
         const cid = conversation[1]!, viewer = url.searchParams.get('viewer');
         if (viewer) json(response, 200, store.visibility.view(cid, viewer));
-        else { const detail = store.detail(cid); detail.obligations = store.obligations.operatorList(cid); detail.messages = detail.messages.filter(m => !m.deletedAt).map(m => store.visibility.projectedMessage(m)); json(response, 200, detail); } return true;
+        else {
+          const detail = store.detail(cid);
+          detail.obligations = store.obligations.operatorList(cid);
+          detail.opinionRounds = store.obligations.opinions.list(cid);
+          detail.versionPackages = store.versionPackages.list(cid);
+          detail.messages = detail.messages.filter(m => !m.deletedAt).map(m => store.visibility.projectedMessage(m));
+          json(response, 200, detail);
+        }
+        return true;
       }
       const exportConversation = /^\/api\/conversations\/([^/]+)\/export$/.exec(path);
       if (request.method === 'GET' && exportConversation) { const value = store.visibility.export(exportConversation[1]!, url.searchParams.get('viewer') ?? undefined, url.searchParams.get('messageIds')?.split(',')); response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename=conversation.json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value, null, 2)); return true; }
@@ -223,6 +231,13 @@ export function collaborationHttp(deps: HttpDependencies) {
             store.setCollaborationMode(cid,mode); return {mode};
           }));
           json(response,200,result.result); return true;
+        }
+        const packageChange = /^\/api\/conversations\/([^/]+)\/version-packages\/([^/]+)\/change$/.exec(path);
+        if (packageChange) {
+          const result = store.versionPackages.change(packageChange[1]!, packageChange[2]!, body);
+          engine.kick();
+          json(response, 200, result);
+          return true;
         }
         const obligationRoute = /^\/api\/conversations\/([^/]+)\/obligations\/([^/]+)\/(signal|accept|cancel|retry|reassign)$/.exec(path);
         if (obligationRoute) {

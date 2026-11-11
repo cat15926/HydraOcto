@@ -24,6 +24,8 @@ import { ArtifactService } from './artifacts.js';
 import { InteractionService } from './interactions.js';
 import { CooperationService, compareSources } from './cooperation.js';
 import { RoomMemberService } from './room-members.js';
+import { migrateOpinions } from './opinions.js';
+import { migrateVersionPackages, VersionPackageService } from './version-packages.js';
 import { FactorService, migrateFactors } from './factors.js';
 import { canRequestPublicStatement, freezeMemberContext, requiresFreshMemberContext, validateMemberContext } from './member-context.js';
 import { migrateObligations } from './obligations.js';
@@ -43,6 +45,7 @@ import type { ObligationDelegation } from '../../shared/obligations.js';
 
 export class CollaborationStore {
   readonly factors: FactorService;
+  readonly versionPackages: VersionPackageService;
   readonly obligations: ObligationService;
   readonly db;
   readonly roomMembers: RoomMemberService;
@@ -63,6 +66,7 @@ export class CollaborationStore {
   constructor(readonly owner: Store, readonly options: { mcpReaders?: McpReaders; workspace?: string; artifactDir?: string; singleProjectVm?: boolean; clock?: () => number; projectWorkAvailability?: (member: Member, account: CollaborationAccount, grant?: Conversation['workspaceGrant']) => { available: boolean; reason?: string } } = {}) {
     this.db = owner.db;
     this.factors = new FactorService(this);
+    this.versionPackages = new VersionPackageService(this);
     this.roomMembers = new RoomMemberService(this.db);
     this.obligations = new ObligationService(this);
     this.tasks = new OrdinaryTaskService({ db: this.db, tx: fn => this.tx(fn), command: (key, input, fn) => this.command(key, input, fn),
@@ -149,16 +153,18 @@ export class CollaborationStore {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id),
         state TEXT NOT NULL, value TEXT NOT NULL
       ); CREATE INDEX IF NOT EXISTS cc_project_intents_pending ON cc_project_intents(conversation_id,state)`);
-      if (version > 16) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 17) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
       this.roomMembers.migrate(version < 14);
       migrateObligations(this.db);
       migrateFactors(this.db);
+      migrateOpinions(this.db);
+      migrateVersionPackages(this.db);
       this.db.exec(`CREATE TABLE IF NOT EXISTS cc_obligation_wait_wakes(
         wait_id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES cc_obligations(id),
         source_id TEXT NOT NULL UNIQUE REFERENCES cc_sources(id), event_key TEXT NOT NULL, value TEXT NOT NULL)`);
-      if (version === 16) return;
-      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=16'); return; }
+      if (version === 17) return;
+      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=17'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -175,7 +181,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(16)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(17)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }
@@ -227,7 +233,8 @@ export class CollaborationStore {
     const obligationPolicy = roomMember && !source.publicStatement && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
       !source.crossRef && !source.actionRef && (!source.projectReview || boundObligation) &&
       (source.kind === 'user' || boundObligation || !!source.taskRef);
-    return { ...(roomMember && !source.visibility && !source.publicStatement && !source.projectWork && !source.projectReview && source.handoffPolicy && {handoffPolicy:source.handoffPolicy}), ...(roomMember && canRequestPublicStatement(source) && {mayRequestPublicStatement: true as const}), ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
+    const coordinationPolicy = roomMember && !requiresFreshMemberContext(memberContext) ? source.coordinationPolicy : undefined;
+    return { ...(coordinationPolicy && {coordinationPolicy}), ...(roomMember && !source.visibility && !source.publicStatement && !source.projectWork && !source.projectReview && source.handoffPolicy && {handoffPolicy:source.handoffPolicy}), ...(roomMember && canRequestPublicStatement(source) && {mayRequestPublicStatement: true as const}), ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
       ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', ...(snapshotOrigin === 'admission' && { crossDisclosure: 'excerpt-only-v1' as const }), visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: requiresFreshMemberContext(memberContext) ? [] : this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private verifyProjectWork(source: SourceWork, memberId: string, grant: Conversation['workspaceGrant']) {
@@ -490,7 +497,7 @@ export class CollaborationStore {
     this.factors.recordMessage(value);
     const c = this.get<Conversation>('cc_conversations', value.conversationId); c.updatedAt = value.createdAt; this.put('cc_conversations', c);
   }
-  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'handoffPolicy' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'publicStatement' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>>): SourceWork {
+  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'handoffPolicy' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'publicStatement' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>> & {coordinationOriginSourceId?: string}): SourceWork {
     const conversation = this.get<Conversation>('cc_conversations', input.conversationId);
     if ((!input.requestedTargets.length && !(input.bindingState === 'unresolved' && input.kind === 'user')) || input.requestedTargets.some(t => !conversation.memberIds.includes(t))) throw new AppError(400, 'Targets must belong to this conversation.');
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
@@ -502,7 +509,16 @@ export class CollaborationStore {
     const issuerPolicy = parent && this.contract(parent.id).handoffPolicy;
     const handoffPolicy = continuation && (!parent || issuerPolicy)
       ? input.handoffPolicy ?? (!parent || issuerPolicy === 'consent-v2' ? 'consent-v2' : 'consent-v1') : undefined;
-    const source: SourceWork = { ...input, handoffPolicy, ...(personal && { memberContextPolicy: 'member-context-v1' as const }), ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
+    const {coordinationOriginSourceId, ...sourceInput} = input;
+    const origin = coordinationOriginSourceId ? this.get<SourceWork>('cc_sources', coordinationOriginSourceId) : undefined;
+    if (origin && origin.conversationId !== conversation.id) throw new AppError(409, '接回来源属于其他会话。');
+    const inheritsCoordination = parent
+      ? parent.conversationId === conversation.id && !!this.contract(parent.id).coordinationPolicy
+      : origin ? !!origin.coordinationPolicy : input.kind === 'user';
+    const coordinate = instanceBound && conversation.collaborationMode === 'continuous' && inheritsCoordination &&
+      !conversation.importedFor && !input.visibility && !input.excerptRefs?.length && !input.publicStatement &&
+      !input.crossRef && !input.actionRef && !input.projectWork && !input.projectReview && handoffPolicy !== 'candidate-v1';
+    const source: SourceWork = { ...sourceInput, ...(coordinate && {coordinationPolicy:'decision-material-v1' as const}), handoffPolicy, ...(personal && { memberContextPolicy: 'member-context-v1' as const }), ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
     this.db.prepare('INSERT INTO cc_sources VALUES(?,?,?,?)').run(source.id, source.conversationId, sequence, JSON.stringify(source));
     for (const memberId of source.requestedTargets) {
       const enabled = this.get<Member>('cc_members', memberId).enabled;
@@ -1062,7 +1078,7 @@ export class CollaborationStore {
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (source.revision !== c.sourceRevision || hash(source.content) !== c.sourceDigest) throw new AppError(409, '来源已变化，不能使用旧执行的输入。', 'inputs_changed');
       const response = this.response(i.responseId); const legacy = c.contextPolicyVersion === 'legacy-history-40-v1';
-      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, memberContext: c.memberContext, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, handoffPolicy:c.handoffPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
+      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, memberContext: c.memberContext, coordinationPolicy:c.coordinationPolicy, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, handoffPolicy:c.handoffPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
         history: (c.historySnapshot ?? []).map(m => ({ ...m, sequence: m.sequence! })), historySourceSnapshots: c.historySourceSnapshots,
         ...(source.parentInvocationId ? { caller: this.invocation(source.parentInvocationId) } : {}) });
       let assembly = legacy ? undefined : build([]);

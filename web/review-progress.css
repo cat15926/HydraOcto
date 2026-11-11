@@ -1,0 +1,15 @@
+.cc-review-progress { min-width: 0; max-width: 100%; overflow-wrap: anywhere; margin-block: .5rem; }
+.cc-review-progress > summary { cursor: pointer; padding: .4rem 0; }
+.cc-review-progress > summary span { display: block; padding-inline-start: 1rem; color: var(--muted, #506454); font-size: .84rem; }
+.cc-review-progress > p, .cc-review-progress li > p { margin: .4rem 0; white-space: pre-wrap; }
+.cc-review-progress :is(h4,h5) { margin: .8rem 0 .35rem; font-size: .9rem; }
+.cc-review-rows { list-style: none; margin: .25rem 0; padding: 0; }
+.cc-review-rows > li { padding: .5rem 0; border-top: 1px solid var(--border, #d8e1d4); }
+.cc-review-rows > li > small { margin-inline-start: .5rem; }
+.cc-review-objection { color: #864820; }
+.cc-review-progress textarea { display: block; box-sizing: border-box; min-height: 5rem; width: 100%; }
+.cc-review-progress button { margin: .3rem .4rem .3rem 0; }
+.cc-review-progress :focus-visible { outline: 2px solid #487457; outline-offset: 2px; }
+.cc-version-dialog { border: 1px solid var(--border, #d8e1d4); border-radius: .75rem; padding: 1.2rem; width: min(28rem, 92vw); max-height: 85dvh; overflow: auto; box-sizing: border-box; color: inherit; }
+.cc-version-dialog::backdrop { background: rgb(25 42 32 / 35%); }
+.cc-version-dialog blockquote { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

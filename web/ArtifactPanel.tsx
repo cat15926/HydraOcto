@@ -1,3 +1,4 @@
+import { VersionPackageReceipt } from './VersionPackageReceipt';
 import { NativeFilePermission } from './NativeFilePermission';
 import { isNpmDownload, ProjectNpmDownload } from './ProjectNpmActivity';
 import type { WorkbenchCommand } from './WorkbenchPanel';
@@ -48,6 +49,7 @@ export function ArtifactPanel({ detail, members, command, refresh, visible = tru
     {!interactionId && <p className="cc-note">审查准确版本后批准写入平台产物目录。评审结论不自动完成任务。</p>}
     {notice && <p role="status">{notice}</p>}{!choice && error && <p role="alert">{error}</p>}
     {(detail.interactions ?? []).filter(i => !target && (interactionId ? i.id === interactionId : i.state === 'pending')).map(i => i.kind === 'approval' ? <NativeFilePermission key={i.id} item={i} stopped={!detail.invocations.some(run => run.id === i.invocationId && ['prepared','running'].includes(run.status))} evidence={detail.evidence} member={name(i.memberId)} command={command} refresh={refresh}/> : isNpmDownload(i) ? <ProjectNpmDownload key={i.id} item={i} memberName={name(i.memberId)} stopped={!detail.invocations.some(run => run.id === i.invocationId && ['prepared','running'].includes(run.status))} command={command} refresh={refresh}/> : <div className="cc-interaction"  key={i.id}><strong>{name(i.memberId)} 等待你的回答</strong><p>{i.questions?.map(q => q.question).join('；')}</p>{i.state === 'pending' ? <button onClick={() => { void open({ kind: 'answer', interaction: i }); }}>回答问题</button> : <p>{stateNames[i.state] ?? i.state} · {i.reason}</p>}<small>到期 {new Date(i.expiresAt).toLocaleTimeString()}</small></div>)}
+    {!target && !interactionId && detail.versionPackages?.map(bundle => <VersionPackageReceipt key={bundle.id} bundle={bundle} conversationId={detail.conversation.id} command={command} refresh={refresh} />)}
     {(detail.artifacts ?? []).filter(a => !interactionId && (!target || a.id === target.artifactId)).map(a => <details key={a.id} className="cc-task-card" data-artifact-id={a.id} open={target ? true : undefined}><summary><strong>{a.name}</strong><span>{a.headVersionId ? '有已发布版本' : '尚未发布'}</span></summary><div className="cc-task-body">
       <button onClick={() => { void open({ kind: 'propose', artifact: a }); }}>提出新版本</button>
       {versions.filter(v => v.artifactId === a.id).reverse().map(v => {

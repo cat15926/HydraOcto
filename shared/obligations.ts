@@ -55,8 +55,9 @@ export interface Obligation {
   wait?: ObligationWait;
   waitCount?: number;
   activeGroupId?: string;
+  decisionRoundId?: string;
   groupCount?: number;
-  delivery?: { invocationId: string; summary: string; messageId?: string };
+  delivery?: { invocationId: string; summary: string; messageId?: string; packageEdition?: string };
   /** A failed report may still have one intentional return to the owner. */
   blockedReturnSourceId?: string;
   reminderCount: number;

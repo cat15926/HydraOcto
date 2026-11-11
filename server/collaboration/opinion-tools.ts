@@ -1,0 +1,9 @@
+const text = {type:'string',minLength:1};
+const schema = (properties:Record<string,unknown>)=>({type:'object',properties,required:Object.keys(properties),additionalProperties:false});
+export const opinionTools = [
+  {name:'opinion_open', description:'Collect signed opinions for your existing commitment when distinct qualified reviewers, a decision cutoff or objections matter. Invite the reviewers once, then end this turn. early permits explicit lock after quorum; deadline freezes at the cutoff.',inputSchema:schema({obligationId:text,question:text,targets:{type:'array',items:text,minItems:2,maxItems:8,uniqueItems:true},minimum:{type:'integer',minimum:1},deadline:text,lockMode:{type:'string',enum:['early','deadline']}})},
+  {name:'opinion_submit',description:'Use your own invitation to submit your opinion. Mark objection true for a signed concern that must be checked. A revision counts as one voter. Late submissions are archived.',inputSchema:schema({roundId:text,text,objection:{type:'boolean'}})},
+  {name:'opinion_read',description:'Read the current opinion round. The decision owner sees signed versions and unresolved objections.',inputSchema:schema({roundId:text})},
+  {name:'opinion_lock',description:'As the decision owner explicitly freeze the current qualified opinions after quorum. Pass the revision returned by opinion_read. Resolve every recorded objection before final delivery.',inputSchema:schema({roundId:text,expectedRevision:{type:'integer',minimum:1}})},
+  {name:'opinion_resolve',description:'Record the finding from checking a signed objection against a specific visible user or member evidence message in this room. Use the returned opinion id. Attach the evidence message id and explain what it establishes.',inputSchema:schema({roundId:text,opinionId:text,evidenceMessageId:text,finding:text})},
+];

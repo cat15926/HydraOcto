@@ -1,3 +1,4 @@
+export type CoordinationPolicy = 'decision-material-v1';
 export type HandoffPolicy = 'consent-v1' | 'consent-v2' | 'candidate-v1';
 /** Independently implemented continuous-collaboration protocol, round 1. */
 export const carrierNames = {
@@ -80,6 +81,7 @@ export interface SourceWork {
   memberContextPolicy?: 'member-context-v1';
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
+  coordinationPolicy?: CoordinationPolicy;
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
@@ -198,6 +200,8 @@ export interface ProjectFileExport {
   reason?: string;
 }
 export interface ConversationDetail {
+  opinionRounds?: import('./opinions.js').OpinionRound[];
+  versionPackages?: import('./version-packages.js').VersionPackageView[];
   obligations?: import('./obligations.js').OperatorObligation[];
   projectExports?: ProjectFileExport[];
   projectIntents?: ProjectIntent[];
@@ -398,6 +402,7 @@ export interface ExecutionContractSnapshot {
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
+  coordinationPolicy?: CoordinationPolicy;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -479,6 +484,7 @@ export interface RuntimeRequest {
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
+  coordinationPolicy?: CoordinationPolicy;
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;

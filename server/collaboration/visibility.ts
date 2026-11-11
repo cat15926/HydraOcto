@@ -83,6 +83,9 @@ export class VisibilityService {
     this.assertConversation(i.conversationId, i.memberId);
     if (name === 'project_environment_check' && (i.member.carrier !== 'codex-app-server' || !this.store.checkNativeFilePermission(i.id)))
       throw new AppError(403,'本次项目委托未授权平台环境查询。');
+    if ((name.startsWith('opinion_') || name.startsWith('package_')) && (c.coordinationPolicy !== 'decision-material-v1' || c.toolPolicyVersion !== 'cross-action-v1')) {
+      throw new AppError(403, '本次执行未获此工具权限。');
+    }
     const obligationAllowed = name.startsWith('obligation_') && obligationTools(c).some(tool => tool.name === name);
     if (name.startsWith('obligation_') && !obligationAllowed) throw new AppError(403,'本次执行不能处理此项责任。');
     if (c.projectReview && !obligationAllowed && !projectReviewTools(c.projectReview).some(tool => tool.name === name)) throw new AppError(403,'本次评审未授权此工具。');
