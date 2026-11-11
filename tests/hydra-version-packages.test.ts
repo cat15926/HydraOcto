@@ -40,7 +40,7 @@ test('venue changes preserve independent acceptance, late old review and new pub
     p=f.sign(f.sign(p,'copy'),'bio');
     const bio=p.parts.find(x=>x.key==='bio')!,map=p.parts.find(x=>x.key==='map')!;
     assert.throws(()=>f.deliver(),/资料包/);
-    const change={requestId:randomUUID(),expectedRevision:p.revision,key:'venue',content:'东馆'};
+    const change={requestId:randomUUID(),expectedRevision:p.revision,expectedMaterialVersionId:p.materials.find(m=>m.key==='venue')!.versionId,key:'venue',content:'东馆'};
     p=f.store.versionPackages.change(f.room.id,p.id,change);
     assert.equal(f.store.versionPackages.change(f.room.id,p.id,change).revision,p.revision);
     p=f.sign(p,'map',map.versionId);
@@ -84,7 +84,7 @@ test('a change after delivery request but before settlement prevents the origina
   const f=fixture();try {
     let p=f.open([{key:'map',label:'路线',dependsOn:['venue']}]);
     p=f.submit(p,'map','西馆路线',[{key:'venue',versionId:p.materials[0]!.versionId}]);p=f.publish(f.sign(p,'map'));f.deliver();
-    f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,key:'venue',content:'东馆'});
+    f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,expectedMaterialVersionId:p.materials.find(m=>m.key==='venue')!.versionId,key:'venue',content:'东馆'});
     f.finish(f.id,'本次资料交付');assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'blocked');
   }finally{f.close();}
 });
@@ -95,13 +95,21 @@ test('a material change during manual acceptance reopens the original obligation
     p=f.sign(f.submit(p,'map','西馆',[{key:'venue',versionId:p.materials[0]!.versionId}]),'map');p=f.publish(p);
     f.deliver();f.finish(f.id,'本次资料交付');assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'awaiting_acceptance');
     const edition=p.edition!.id;
-    p=f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,key:'other',content:'其他材料改版'});
+    p=f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,expectedMaterialVersionId:p.materials.find(m=>m.key==='other')!.versionId,key:'other',content:'其他材料改版'});
     assert.equal(p.edition!.id,edition);assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'awaiting_acceptance');
-    const change={requestId:randomUUID(),expectedRevision:p.revision,key:'venue',content:'改成东馆'};
+    const change={requestId:randomUUID(),expectedRevision:p.revision,expectedMaterialVersionId:p.materials.find(m=>m.key==='venue')!.versionId,key:'venue',content:'改成东馆'};
     f.store.versionPackages.change(f.room.id,p.id,change);f.store.versionPackages.change(f.room.id,p.id,change);
     const o=f.store.obligations.list(f.room.id)[0]!;assert.equal(o.state,'open');assert.equal(o.delivery,undefined);
     assert(o.currentSourceId!==o.originSourceId);assert.equal(f.store.detail(f.room.id).sources.length,2);
-    assert.equal(f.store.contract(f.run()).coordinationPolicy,'decision-material-v1');
+    const resume=f.run();
+    assert.equal(f.store.contract(resume).coordinationPolicy,'decision-material-v1');
+    const current=f.store.versionPackages.list(f.room.id)[0]!;
+    const latest=current.materials.find(m=>m.key==='venue')!;
+    const amend={packageId:p.id,key:latest.key,content:'东馆二楼',expectedRevision:current.revision,expectedMaterialVersionId:latest.versionId};
+    assert.throws(()=>f.invoke('package_change',amend,resume),/先用 package_list/);
+    f.invoke('package_list',{packageId:p.id},resume);
+    assert.throws(()=>f.invoke('package_change',{...amend,expectedMaterialVersionId:change.expectedMaterialVersionId},resume),/材料基版/);
+    assert.equal(f.invoke('package_change',amend,resume).materials.find(m=>m.key==='venue')?.content,'东馆二楼');
   }finally{f.close();}
 });
 
@@ -140,11 +148,79 @@ test('rejected referenced artifact removes derived content, parent ids and recei
     p=f.invoke('package_submit',args,f.id,callId);
     const old=p.parts[0]!.versionId!;p=f.sign(p,'map');const evidence=p.parts[0]!.evidenceId!;
     const approval=f.store.artifacts.detail(f.room.id).artifactApprovals.find(a=>a.id===doc.approvalId)!;
+    const opened=p.materials[0]!;
+    const base={key:opened.key,content:opened.content,expectedRevision:p.revision,expectedMaterialVersionId:opened.versionId};
+    const ownerCmd={...base,requestId:randomUUID()}, signedCmd={...base,packageId:p.id}, signedCall=randomUUID();
+    f.store.versionPackages.change(f.room.id,p.id,ownerCmd);
+    f.invoke('package_change',signedCmd,f.id,signedCall);
+    assert.throws(()=>f.store.versionPackages.change(f.room.id,p.id,{...ownerCmd,requestId:randomUUID(),expectedMaterialVersionId:undefined}),/基版/);
     f.store.artifacts.decide(approval.id,{requestId:randomUUID(),decision:'reject',operationDigest:approval.operationDigest,expectedRevision:approval.revision});
-    for (const v of [f.invoke('package_list',{}),f.invoke('package_submit',args,f.id,callId)]) {
+    const stored=f.db.db.prepare('SELECT version_id FROM cc_version_package_reads WHERE invocation_id=? AND package_id=?');
+    const proofs=()=>stored.all(f.id,p.id).map(row=>String(row.version_id)).sort();
+    const beforeProbe=proofs(), allowed=f.store.versionPackages.readableVersions(f.room.id,p.id);
+    for (const captured of [opened.versionId,old,'meta:'+evidence,'meta:'+opened.versionId,'meta:'+old]) {
+      assert(beforeProbe.includes(captured),'missing disclosure: '+captured);
+      assert(!allowed.has(captured),'withdrawn disclosure: '+captured);
+    }
+    assert.deepEqual(proofs(),beforeProbe);assert.deepEqual(f.store.versionPackages.readableVersions('other-room',p.id),new Set());
+    const cachedText=opened.content+' 已被用户编辑';
+    assert.throws(()=>f.store.versionPackages.change(f.room.id,p.id,{...ownerCmd,requestId:randomUUID(),content:cachedText}),/不可读取/);
+    assert.throws(()=>f.invoke('package_change',{...signedCmd,content:cachedText}),/不可读取/);
+    assert.equal(f.store.versionPackages.list(f.room.id)[0]?.revision,p.revision);
+    for (const v of [f.invoke('package_list',{}),f.invoke('package_submit',args,f.id,callId),f.invoke('package_change',signedCmd,f.id,signedCall),f.store.versionPackages.change(f.room.id,p.id,ownerCmd)]) {
       for(const secret of [doc.id,old,evidence,basis[0]!.versionId,'DERIVED_PRIVATE_TEXT','NEVER_SHOW_AFTER_WITHDRAWAL'])assert(!JSON.stringify(v).includes(secret),secret);
     }
     assert.equal(f.store.versionPackages.list(f.room.id)[0]?.parts[0]?.state,'unknown');
     assert.throws(()=>f.publish(p));
   }finally{f.close();}
 });
+
+for (const when of ['still-readable','before-plan','before-dispatch'] as const) {
+  test('native package reader checks historical rights '+when,()=>{
+    const f=fixture(true);
+    try {
+      const secret='ORIGINAL_RESTRICTED_TEXT', priorSession='historical-reader';
+      const proposed=f.store.artifacts.propose(f.room.id,{requestId:randomUUID(),name:'地点.txt',content:secret});
+      let pkg=f.open([{key:'bio',label:'嘉宾',dependsOn:[]}],[{key:'venue',name:'地点',artifactVersionId:proposed.version.id}]);
+      pkg=f.publish(f.sign(f.submit(pkg,'bio','嘉宾简介',[]),'bio'));
+      f.deliver();f.finish(f.id,'本次资料交付');
+      const identity={supported:true,version:'fixture-1',fingerprint:'same-reader-and-account',reason:'test'};
+      function admitReader(){
+        f.store.send(f.room.id,{requestId:randomUUID(),content:'@claude 阅读会话资料'});
+        const i=f.store.admitNext()!.invocations[0]!;
+        assert.equal(i.memberId,'claude');
+        return i.id;
+      }
+      f.store.saveMember({...f.store.members().find(m=>m.id==='claude')!,model:'fixture-model'});
+      const first=admitReader();
+      assert.equal(f.store.prepareSession(first,identity).mode,'fresh');
+      f.store.startInvocation(first);
+      f.store.recordEvidence(first,{kind:'session',detail:{nativeSessionId:priorSession,anchor:'first-turn',continuity:'fresh',historyVerified:true}});
+      f.store.recordEvidence(first,{kind:'accepted',detail:{nativeSessionId:priorSession}});
+      const read=f.store.versionPackages.tool(first,'package_list',{packageId:pkg.id},'read-current') as {packages:VersionPackageView[]};
+      const original=read.packages[0]!.materials[0]!;
+      assert.equal(original.content,secret);
+      f.finish(first,'资料已读。');
+      f.store.versionPackages.change(f.room.id,pkg.id,{requestId:randomUUID(),expectedRevision:pkg.revision,key:original.key,
+        expectedMaterialVersionId:original.versionId,content:'现行公开地址'});
+      const current=f.store.versionPackages.list(f.room.id)[0]!.materials[0]!;
+      assert.notEqual(current.versionId,original.versionId);
+      assert(current.history.some(v=>v.versionId===original.versionId));
+      function withdrawOldSource(){
+        f.store.artifacts.decide(proposed.approval.id,{requestId:randomUUID(),decision:'reject',
+          operationDigest:proposed.approval.operationDigest,expectedRevision:proposed.approval.revision});
+        assert(!f.store.versionPackages.readableVersions(f.room.id,pkg.id).has(original.versionId));
+      }
+      if(when==='before-plan')withdrawOldSource();
+      const next=admitReader(), planned=f.store.prepareSession(next,identity);
+      assert.equal(planned.mode,when==='before-plan'?'replace':'resume',planned.reason);
+      assert.equal(planned.nativeSessionId,when==='before-plan'?undefined:priorSession);
+      if(when==='before-dispatch')withdrawOldSource();
+      const started=f.store.startInvocation(next);
+      assert.equal(started.sessionPlan?.mode,when==='still-readable'?'resume':'replace');
+      assert.equal(started.sessionPlan?.nativeSessionId,when==='still-readable'?priorSession:undefined);
+      assert.equal(f.store.invocation(next).sessionPlan?.nativeSessionId,started.sessionPlan?.nativeSessionId);
+      assert(!f.store.prompt(next).includes(secret));
+    }finally{f.close();}
+  });
+}

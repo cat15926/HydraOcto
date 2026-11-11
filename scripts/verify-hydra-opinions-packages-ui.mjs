@@ -17,7 +17,8 @@ async function exercise(width) {
   const base=join(output,String(width)),workspace=join(base,'work');
   await mkdir(workspace,{recursive:true});
   const holdDecision=gate(), holdRevision=gate(), toolErrors=[];
-  let store,root,round,bundle,room;
+  let store,root,round,bundle,room,permit;
+  const restricted='仅供核查的授权编号 '+randomUUID();
   const runtime={probe:async()=>[],async invoke(request){
     request.onEvent({kind:'accepted',detail:{fixture:true}});
     const source=store.visibility.primary(request.invocationId);
@@ -30,7 +31,7 @@ async function exercise(width) {
         round=await tool('opinion_open',{obligationId:root.id,question:'这件展品是否可以展出？',minimum:2,targets:['codex','editor'],deadline:new Date(Date.now()+120000).toISOString(),lockMode:'early'});
       } else if(source.kind==='user' && source.content===change) {
         root=(await tool('obligation_open',{goal:'交付活动说明资料包'})).obligation;
-        bundle=await tool('package_open',{obligationId:root.id,title:'活动说明资料包',materials:[{key:'venue',name:'活动地点',content:'南馆'}],parts:[
+        bundle=await tool('package_open',{obligationId:root.id,title:'活动说明资料包',materials:[{key:'venue',name:'活动地点',content:'南馆'},{key:'permit',name:'临时授权',artifactVersionId:permit.id}],parts:[
           {key:'map',label:'路线图',dependsOn:['venue']},{key:'guest',label:'嘉宾简介',dependsOn:[]}]});
         for(const key of ['map','guest']){
           const read=(await tool('package_list',{packageId:bundle.id})).packages[0];
@@ -42,7 +43,7 @@ async function exercise(width) {
         const oldGuest=bundle.parts.find(p=>p.key==='guest');
         await holdRevision.waiting;
         const actual=(await tool('package_list',{packageId:bundle.id})).packages[0];
-        if(actual.materials[0].number===2) {
+        if(actual.materials[0].number===3) {
           const map=actual.parts.find(part=>part.key==='map');
           const updated=await tool('package_submit',{packageId:bundle.id,key:'map',content:'路线通往北馆。',basis:[{key:'venue',versionId:actual.materials[0].versionId}],expectedPartVersionId:map.versionId});
           await tool('package_list',{packageId:bundle.id});
@@ -75,6 +76,7 @@ async function exercise(width) {
     store=app.collaborationStore;
     store.saveMember({...store.members()[0],id:'editor',name:'校对者'});
     room=store.create({title:'复核展品',memberIds:['claude','editor','codex'],defaultMemberId:'claude',requestId:randomUUID()}).conversation;
+    permit=store.artifacts.propose(room.id,{requestId:randomUUID(),name:'临时文书.txt',content:restricted}).version;
     const {url}=await app.start();assert.notEqual(new URL(url).port,'4310');
     await page.setViewport({width,height:850});await page.goto(url,{waitUntil:'networkidle2'});
     const wait=(fn,...args)=>page.waitForFunction(fn,{timeout:20000},...args);
@@ -100,12 +102,36 @@ async function exercise(width) {
     await page.type(input,change);await page.click('.cc-send-button');await showCard('[data-version-package]');
     await wait(s=>document.querySelector(s)?.innerText.includes('已验收 2/2 项'),pkg);
     const edit=pkg+' button[aria-label="修改活动地点"]',dialog=pkg+' dialog[open]', submit=dialog+' [type=submit]';
+    const post=async(path,body)=>{
+      const result=await fetch(url+path,{method:'POST',headers:{'content-type':'application/json','x-csrf-token':app.csrfToken},body:JSON.stringify({requestId:randomUUID(),...body})});
+      assert(result.ok,'HTTP '+result.status);return result.json();
+    };
     await page.type(input,'保留这条草稿');
+    // Revoking the pending artifact leaves the package revision unchanged. The old edit must vanish.
+    const permitButton=pkg+' button[aria-label="修改临时授权"]';
+    await key(permitButton);await wait(s=>document.querySelector(s)?.open,dialog);
+    assert.equal(await page.$eval(dialog+' textarea',e=>e.value),restricted);
+    const approval=store.artifacts.detail(room.id).artifactApprovals.find(a=>a.id===permit.approvalId);
+    await post('/api/artifact-approvals/'+approval.id+'/decide',{decision:'reject',operationDigest:approval.operationDigest,expectedRevision:approval.revision});
+    await wait(s=>!document.querySelector(s),dialog);
+    assert.equal(await page.$(permitButton),null);
+    const redacted=store.versionPackages.list(room.id)[0].materials.find(m=>m.key==='permit');
+    assert(!Object.hasOwn(redacted,'number'));
+    const headings=await page.$$eval(pkg+' > ul:first-of-type > li > strong',elements=>elements.map(e=>e.textContent));
+    assert(headings.includes('临时授权'));
+    assert(!await page.$eval(pkg,e=>e.innerText.includes('undefined')));
+    assert(!await page.$eval(pkg,(e,secret)=>e.innerText.includes(secret)||[...e.querySelectorAll('textarea')].some(t=>t.value.includes(secret)),restricted));
+    await wait(s=>document.activeElement===document.querySelector(s+' > summary'),pkg);
     await key(edit);await wait(s=>document.querySelector(s)?.open,dialog);
     await page.focus(dialog+' textarea');await page.keyboard.press('Escape');
     await wait(s=>document.activeElement===document.querySelector(s),edit);
     assert.equal(await page.$eval(input,e=>e.value),'保留这条草稿');
     await key(edit);await page.$eval(dialog+' textarea',e=>e.select());await page.keyboard.type('北馆');
+    const venue=bundle.materials.find(m=>m.key==='venue');
+    await post('/api/conversations/'+room.id+'/version-packages/'+bundle.id+'/change',{expectedRevision:bundle.revision,key:'venue',expectedMaterialVersionId:venue.versionId,content:'东馆'});
+    await wait(s=>document.querySelector(s)?.innerText.includes('按当前版本继续编辑'),dialog);
+    assert.equal(await page.$eval(dialog+' textarea',e=>e.value),'北馆');
+    await key(dialog+' [role=status] button');
     await page.evaluate(()=>{
       const fetchOriginal=window.fetch.bind(window);window.changeRequests=[];
       window.fetch=async(url,options)=>{
@@ -124,9 +150,9 @@ async function exercise(width) {
     await wait(s=>document.activeElement===document.querySelector(s),edit);
     const requests=await page.evaluate(()=>window.changeRequests);
     assert.equal(requests.length,2);assert.deepEqual(requests[0],requests[1]);
-    await wait(s=>document.querySelector(s)?.innerText.includes('活动地点 · v2'),pkg);
+    await wait(s=>document.querySelector(s)?.innerText.includes('活动地点 · v3'),pkg);
     const partText=await page.$$eval(pkg+' > ul:last-of-type > li',es=>es.map(e=>e.innerText));
-    assert.match(partText[0],/路线图.*需要重验/s);assert.match(partText[0],/活动地点 v1（当前 v2）/);
+    assert.match(partText[0],/路线图.*需要重验/s);assert.match(partText[0],/活动地点 v1（当前 v3）/);
     assert.match(partText[1],/嘉宾简介.*已验收.*独立交付/s);
     await key(pkg+' > ul:last-of-type > li:first-child details > summary');
     await wait(s=>document.querySelector(s)?.innerText.includes('验收通过'),pkg);
@@ -136,7 +162,7 @@ async function exercise(width) {
     holdRevision.open();await wait(s=>document.querySelector(s)?.innerText.includes('已发布 · 已验收 2/2 项'),pkg);
     await wait(s=>document.querySelector(s)?.closest('.cc-obligation')?.querySelector(':scope > summary').innerText.includes('已交付'),pkg);
     assert.deepEqual(errors,[]);assert.deepEqual(toolErrors,[]);
-    results.push({width,approvedOpinions:2,duplicateMaterialRequests:requests.length,originalDecisionKept:true,focusReturned:true,draftKept:true});
+    results.push({width,approvedOpinions:2,duplicateMaterialRequests:requests.length,originalDecisionKept:true,focusReturned:true,draftKept:true,revokedDraftRemoved:true,concurrentRevisionRebased:true});
   } catch(error){throw Error(error.message+'; fixture errors: '+JSON.stringify(toolErrors),{cause:error});}
   finally{holdDecision.open();holdRevision.open();await page.close();await app.close();}
 }

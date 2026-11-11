@@ -40,7 +40,7 @@ async function moveVenueIfReady() {
   if(!pkg || pkg.parts.length!==3 || !pkg.parts.every(p=>p.state==='accepted'))return;
   const location=pkg.materials.find(m=>m.content.includes(venue)); assert(location,'Missing immutable original venue');
   before=pkg;
-  await post('/api/conversations/'+cid+'/version-packages/'+pkg.id+'/change',{expectedRevision:pkg.revision,key:location.key,content:revisedVenue});
+  await post('/api/conversations/'+cid+'/version-packages/'+pkg.id+'/change',{expectedRevision:pkg.revision,expectedMaterialVersionId:location.versionId,key:location.key,content:revisedVenue});
   evidence.venueChanges++;
   afterChange=(await detail()).versionPackages[0];
 }

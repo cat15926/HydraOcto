@@ -162,18 +162,44 @@ export class VersionPackageService {
     const parts=p.parts.map(part=>this.projectPart(p,part));
     const materials=p.materials.map(m=>{
       const v=last(m.versions),visible=this.available(v,p.conversationId);
-      return {key:m.key,name:m.name,versionId:visible?v.versionId:'',number:v.number,content:visible?v.content:'依据待核实',
+      return {key:m.key,name:m.name,versionId:visible?v.versionId:'',...(visible && {number:v.number}),content:visible?v.content:'依据待核实',
         history:m.versions.filter(v=>this.available(v,p.conversationId)).map(({versionId,number})=>({versionId,number}))};
     });
     const edition=p.editions.at(-1);
     const current=edition && this.validOrigin(edition.publisher) && parts.every(part=>part.state==='accepted' && edition.parts.some(x=>x.key===part.key && x.versionId===part.versionId && x.reviewId===part.evidenceId));
+    const view:VersionPackageView = {id:p.id,obligationId:p.obligationId,title:p.title,revision:p.revision,editable:this.editable(p),
+      state:current?'published':edition || parts.some(x=>x.state==='needs_review')?'needs_review':'draft',
+      materials,parts,...(current&&{edition:{id:edition.id,parts:edition.parts}})};
     if(origin){
       const save=this.store.db.prepare('INSERT OR IGNORE INTO cc_version_package_reads VALUES(?,?,?)');
       for(const item of [...materials,...parts])if(item.versionId)save.run(origin.invocationId,p.id,item.versionId);
+      for(const id of this.disclosedMetadata(view))save.run(origin.invocationId,p.id,'meta:'+id);
     }
-    return {id:p.id,obligationId:p.obligationId,title:p.title,revision:p.revision,editable:this.editable(p),
-      state:current?'published':edition || parts.some(x=>x.state==='needs_review')?'needs_review':'draft',
-      materials,parts,...(current&&{edition:{id:edition.id,parts:edition.parts}})};
+    return view;
+  }
+  private disclosedMetadata(view:VersionPackageView):Set<string> {
+    const ids=new Set([view.id]);
+    if (view.edition) ids.add(view.edition.id);
+    for (const m of view.materials) for (const version of m.history) ids.add(version.versionId);
+    for (const part of view.parts) {
+      for (const version of part.history) {
+        ids.add(version.versionId);
+        if (version.reviewId) ids.add(version.reviewId);
+      }
+    }
+    return ids;
+  }
+  /** Current disclosure rights for revalidating a native session; never records a read. */
+  readableVersions(cid:string,packageId:string):Set<string> {
+    let p:Package;
+    try {p=this.load(cid,packageId);}
+    catch(error){if(error instanceof AppError && error.status===404)return new Set();throw error;}
+    const view=this.view(p);
+    const ids=new Set(Array.from(this.disclosedMetadata(view),id=>'meta:'+id));
+    // A body read in an earlier turn may still be authorized as a historical version.
+    for (const m of view.materials) for (const v of m.history) ids.add(v.versionId);
+    for (const part of view.parts) for (const v of part.history) ids.add(v.versionId);
+    return ids;
   }
   list(cid:string) {return this.data.rows<Package>('cc_version_packages',cid).filter(p=>this.accessible(p)).map(p=>this.view(p));}
   private notify(p:Package,parts:Part[],role:'writer'|'reviewer',reason:string,skip?:string) {
@@ -216,12 +242,17 @@ export class VersionPackageService {
     return this.view(p,origin);
   }
   private changeInput(p:Package,args:Record<string,unknown>,origin?:Authorship){
-    if(Object.keys(args).some(k=>!['key','content','expectedRevision','requestId','packageId'].includes(k)))throw new AppError(400,'材料修订参数无效。');
+    if(Object.keys(args).some(k=>!['key','content','expectedRevision','expectedMaterialVersionId','requestId','packageId'].includes(k)))throw new AppError(400,'材料修订参数无效。');
     if(!this.editable(p)||p.revision!==args.expectedRevision)conflict('资料包已变化，请重新核对。');
     const material=p.materials.find(m=>m.key===args.key);
     if(!material)unavailable();
+    const base=last(material.versions);
+    // The referenced artifact may have been withdrawn without a package revision.
+    if (!this.available(base,p.conversationId)) throw new AppError(403,'原材料已不可读取，无法在此版本上修改。');
+    if (args.expectedMaterialVersionId!==base.versionId) conflict('材料基版已变化，请重新打开当前材料。');
+    if (origin) this.readVersion(origin,p,base.versionId);
     const text=body(args.content);
-    if(text===last(material.versions).content)return this.view(p,origin);
+    if(text===base.content)return this.view(p,origin);
     material.versions.push(version(text,material.versions.length+1,origin));
     this.save(p,'material_changed');
     this.notify(p,p.parts.filter(part=>part.dependsOn?.includes(material.key)),'writer','依据材料已改版，请复核受影响的分项',origin?.instanceId);

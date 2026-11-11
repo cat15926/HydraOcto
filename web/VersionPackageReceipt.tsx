@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { VersionPackageView } from '../shared/version-packages';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 import './review-progress.css';
@@ -6,7 +6,7 @@ import './review-progress.css';
 type Material = VersionPackageView['materials'][number];
 type Part = VersionPackageView['parts'][number];
 type Props = {bundle: VersionPackageView; conversationId: string; command: WorkbenchCommand; refresh: () => Promise<void>};
-type Edit = {key: string; content: string; revision: number; original: string};
+type Edit = {key: string; baseVersionId: string; content: string; revision: number; original: string};
 const packageLabels: Record<VersionPackageView['state'], string> = {draft:'准备中', needs_review:'需要复核', published:'已发布'};
 const partLabels: Record<Part['state'], string> = {missing:'等待交付',unknown:'依据待核实',needs_review:'需要重验',pending:'等待验收',accepted:'已验收'};
 
@@ -17,10 +17,18 @@ export function VersionPackageReceipt({bundle, conversationId, command, refresh}
   const dialog = useRef<HTMLDialogElement>(null), trigger = useRef<HTMLButtonElement | null>(null), sending = useRef(false);
   const summary = useRef<HTMLElement>(null), titleId = useId(), retry = useRef<HTMLButtonElement>(null);
   const material = bundle.materials.find(m => m.key === edit?.key);
-  const stale = edit && bundle.revision !== edit.revision;
+  // Revocation may change the readable projection even when the package revision stays the same.
+  const canReadBase = !!edit && !!material?.versionId && material.history.some(v => v.versionId === edit.baseVersionId);
+  const stale = edit && (bundle.revision !== edit.revision || material?.versionId !== edit.baseVersionId);
+  useEffect(() => {
+    if (!edit || canReadBase) return;
+    request.current = undefined;
+    close();
+    setNotice('原资料已无法读取，编辑已关闭。');
+  }, [edit, canReadBase]);
   function open(m:Material, button:HTMLButtonElement) {
     trigger.current = button; request.current = undefined;
-    setEdit({key:m.key,content:m.content,original:m.content,revision:bundle.revision});setError('');setNotice('');setUncertain(false);
+    setEdit({key:m.key,baseVersionId:m.versionId,content:m.content,original:m.content,revision:bundle.revision});setError('');setNotice('');setUncertain(false);
     dialog.current?.showModal();
   }
   function close() {
@@ -30,8 +38,8 @@ export function VersionPackageReceipt({bundle, conversationId, command, refresh}
   }
   async function save(event:FormEvent) {
     event.preventDefault();
-    if (!edit || sending.current || (!uncertain && (stale || !bundle.editable || !edit.content.trim() || edit.content === edit.original))) return;
-    const fields = {key:edit.key,content:edit.content,expectedRevision:edit.revision};
+    if (!edit || !canReadBase || sending.current || (!uncertain && (stale || !bundle.editable || !edit.content.trim() || edit.content === edit.original))) return;
+    const fields = {key:edit.key,content:edit.content,expectedRevision:edit.revision,expectedMaterialVersionId:edit.baseVersionId};
     const body = JSON.stringify(fields);
     if (request.current?.body !== body) request.current = {body,id:crypto.randomUUID()};
     sending.current=true; setBusy(true);setError('');
@@ -51,6 +59,7 @@ export function VersionPackageReceipt({bundle, conversationId, command, refresh}
   function basisLabel(part:Part, key:string) {
     const material=bundle.materials.find(m=>m.key===key);
     if (!material) return '关联资料';
+    if (material.number === undefined) return material.name;
     const usedId=part.basis?.find(ref=>ref.key===key)?.versionId;
     const used=material.history.find(version=>version.versionId===usedId);
     if (!used) return material.name;
@@ -60,8 +69,8 @@ export function VersionPackageReceipt({bundle, conversationId, command, refresh}
     <summary ref={summary}><strong>{bundle.title}</strong><span>{packageLabels[bundle.state]} · 已验收 {accepted}/{bundle.parts.length} 项</span></summary>
     <h4>依据资料</h4>
     <ul className="cc-review-rows">{bundle.materials.map(m=><li key={m.key}>
-      <strong>{m.name} · v{m.number}</strong><p>{m.content}</p>
-      {bundle.editable && <button type="button" aria-label={'修改'+m.name} onClick={e=>open(m,e.currentTarget)}>修改资料</button>}
+      <strong>{m.name}{m.number !== undefined && ` · v${m.number}`}</strong><p>{m.content}</p>
+      {bundle.editable && !!m.versionId && <button type="button" aria-label={'修改'+m.name} onClick={e=>open(m,e.currentTarget)}>修改资料</button>}
     </li>)}</ul>
     <h4>分项交付</h4>
     <ul className="cc-review-rows">{bundle.parts.map(part=><li key={part.key}>
@@ -79,12 +88,12 @@ export function VersionPackageReceipt({bundle, conversationId, command, refresh}
     </li>)}</ul>
     {notice && <p role="status">{notice}</p>}
     <dialog ref={dialog} aria-labelledby={titleId} className="cc-version-dialog" onCancel={e=>{e.preventDefault();if (!busy) close();}}>
-      {edit && <form className="cc-settings-form" onSubmit={save}>
+      {edit && canReadBase && <form className="cc-settings-form" onSubmit={save}>
         <h3 id={titleId}>修改{material?.name ?? '资料'}</h3>
         <label>新版内容<textarea autoFocus required value={edit.content} readOnly={busy || uncertain} onChange={e=>setEdit({...edit,content:e.target.value})}/></label>
         <p>保存后，引用旧版的交付需要复核。</p>
         {stale && !uncertain && <div role="status"><p>资料包已更新。当前原文为</p><blockquote>{material?.content}</blockquote>
-          {material && bundle.editable && <button type="button" onClick={()=>{setEdit({...edit,original:material.content,revision:bundle.revision});setError('');}}>按当前版本继续编辑</button>}
+          {material && bundle.editable && <button type="button" onClick={()=>{setEdit({...edit,original:material.content,baseVersionId:material.versionId,revision:bundle.revision});setError('');}}>按当前版本继续编辑</button>}
         </div>}
         {error && <p role="alert">{error}</p>}
         <div><button disabled={busy} type="button" onClick={close}>{uncertain ? '关闭' : '取消'}</button><button ref={retry} type="submit"

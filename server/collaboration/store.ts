@@ -669,12 +669,56 @@ export class CollaborationStore {
     });
   }
   nativeSessions(conversationId: string): NativeSessionBinding[] { return this.rows('cc_native_sessions', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]); }
-  /** Called after read-only runtime discovery, before dispatch. Replays retain the original plan. */
+  private packageReadsVisible(conversationId: string, bindingId: string): boolean {
+    const reads = this.db.prepare(`SELECT DISTINCT r.package_id, r.version_id
+      FROM cc_invocations i JOIN cc_version_package_reads r ON r.invocation_id=i.id
+      WHERE i.conversation_id=? AND json_extract(i.value,'$.sessionPlan.bindingId')=?`)
+      .all(conversationId, bindingId) as {package_id:string; version_id:string}[];
+    const packages = new Map<string, Set<string>>();
+    for (const {package_id, version_id} of reads) {
+      let readable = packages.get(package_id);
+      if (!readable) {
+        readable = this.versionPackages.readableVersions(conversationId, package_id);
+        packages.set(package_id, readable);
+      }
+      if (!readable.has(version_id)) return false;
+    }
+    return true;
+  }
+
+  // A reserved resume plan can outlive a change to the source it previously read.
+  private replaceRevokedSession(i: CollaborationInvocation): void {
+    const plan = i.sessionPlan;
+    if (plan?.mode !== 'resume' || !plan.bindingId || !plan.identity || this.packageReadsVisible(i.conversationId, plan.bindingId)) return;
+    const previous = this.get<NativeSessionBinding>('cc_native_sessions', plan.bindingId);
+    const reason = '先前读取的资料已不可见，使用新的原生会话。';
+    previous.status = 'sealed'; previous.reason = reason; previous.updatedAt = now();
+    this.put('cc_native_sessions', previous);
+    const next = this.newSession(i, previous.fingerprint, plan.identity, reason, previous);
+    i.sessionPlan = {mode:'replace', bindingId:next.id, identity:plan.identity, reason,
+      ...(plan.fingerprint && {fingerprint:plan.fingerprint})};
+    this.saveInvocation(i);
+    this.event(i.conversationId, 'session.replaced', {invocationId:i.id, bindingId:next.id, previousBindingId:previous.id, reason});
+  }
+
+  sessionForDispatch(invocationId: string): NativeSessionPlan | undefined {
+    return this.tx(() => {
+      const i = this.invocation(invocationId);
+      if (i.status !== 'running' || i.acceptance === 'accepted') throw new AppError(409, '本轮已不处于派发阶段。');
+      this.replaceRevokedSession(i);
+      return i.sessionPlan;
+    });
+  }
+
+  /** Called after runtime discovery, before dispatch. Replays recheck access to prior tool results. */
   prepareSession(invocationId: string, identity: NativeSessionIdentity): NativeSessionPlan {
     return this.tx(() => {
       const i = this.invocation(invocationId), c = this.contract(i.id);
       if (i.status !== 'prepared' || i.dispatchStarted) throw new AppError(409, '原生会话计划只能在派发前创建。');
-      if (i.sessionPlan) return i.sessionPlan;
+      if (i.sessionPlan) {
+        this.replaceRevokedSession(i);
+        return i.sessionPlan!;
+      }
       const previous = this.nativeSessions(i.conversationId).filter(s => s.memberId === i.memberId).at(-1);
       const compatible = identity.supported && !!identity.fingerprint && !!i.member.model && c.adapterCapabilityVersion === 'native-continuity-v1';
       const source = this.visibility.primary(i.id);
@@ -694,6 +738,7 @@ export class CollaborationStore {
         const binding = this.newSession(i, fingerprint, identity, reason, previous);
         i.sessionPlan = { bindingId: binding.id, ...(imageTurn ? { imageTurnOnly: true } : {}), ...(c.projectContinuity ? { fingerprint } : {}), mode: previous ? 'replace' : 'fresh', reason, identity };
       }
+      this.replaceRevokedSession(i);
       this.saveInvocation(i); this.event(i.conversationId, 'session.planned', { invocationId, ...i.sessionPlan }); return i.sessionPlan;
     });
   }
@@ -785,6 +830,7 @@ export class CollaborationStore {
       if (i.status !== 'prepared' || i.dispatchStarted) throw new AppError(409, 'Invocation cannot start again.');
       if (!this.projectWriterReady(i)) throw new AppError(409, '项目正在等待前一执行确认退出。');
       this.validateContract(this.contract(i.id)); this.prepareInput(i.id);
+      this.replaceRevokedSession(i);
       i.status = 'running'; i.dispatchStarted = true; i.startedAt = now(); this.saveInvocation(i);
       const r = this.response(i.responseId); r.status = 'running'; this.put('cc_responses', r);
       this.event(i.conversationId, 'invocation.dispatch_started', { invocationId }); return i;
