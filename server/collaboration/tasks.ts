@@ -1,6 +1,7 @@
+import type { Obligation } from '../../shared/obligations.js';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { CollaborationInvocation, CollaborationResponse, Consumption, Conversation, CreateOrdinaryTask, Delivery, ExecutionContractSnapshot, HandoffOrdinaryTask, Member, OrdinaryTask, ResponsibilityItem, SourceWork, TaskActor, TaskCommandVersion, TaskExecutionRef, TaskHandoff, UpdateOrdinaryTask } from '../../shared/collaboration.js';
+import type { CollaborationInvocation, CollaborationResponse, Consumption, Conversation, ConversationMessage, CreateOrdinaryTask, Delivery, ExecutionContractSnapshot, HandoffOrdinaryTask, Member, OrdinaryTask, ResponsibilityItem, SourceWork, TaskActor, TaskCommandVersion, TaskExecutionRef, TaskHandoff, UpdateOrdinaryTask } from '../../shared/collaboration.js';
 import { AppError, now } from '../store.js';
 import { digest } from './continuity.js';
 
@@ -101,6 +102,15 @@ export class OrdinaryTaskService {
       inputRevision: this.get<CollaborationResponse>('cc_responses', i.responseId).inputRevision, fence: randomUUID(), nativeSessionId: i.nativeSessionId, nativeTurnId: i.nativeTurnId };
     t.executionRef = ref; i.taskBindings = [...(i.taskBindings ?? []).filter(b => b.taskId !== t.id), { taskId: t.id, ownerRevision: t.ownerRevision, fence: ref.fence }]; this.port.saveInvocation(i);
   }
+  /** The obligation service has verified the current root, source, owner and generation. */
+  bindObligation(taskId:string,source:SourceWork,i:CollaborationInvocation):void {
+    const t=this.getTask(taskId);
+    if((source.kind!=='job_result'&&!(source.kind==='user'&&source.projectWork&&source.replyTo))||source.conversationId!==i.conversationId||t.conversationId!==i.conversationId||
+      t.ownerMemberId!==i.memberId||i.status!=='prepared'||source.requestedTargets.length!==1||source.requestedTargets[0]!==i.memberId||
+      t.executionRef||t.pendingHandoffId||t.disposition||t.delegationId||t.status==='done'||t.status==='blocked')
+      fail('当前委托不能占用这项任务。','task_source_conflict');
+    this.bind(t,i,source);this.save(t,'task.execution_bound',{invocationId:i.id});
+  }
   bindAdmission(source: SourceWork, i: CollaborationInvocation): void {
     if (!source.taskRef) return;
     if (this.admissionReason(source)) fail('任务来源已失效，不能领取。', 'task_source_conflict');
@@ -133,9 +143,35 @@ export class OrdinaryTaskService {
       }); return { ...result.result, replayed: result.replayed };
     });
   }
+  /** Called only by the obligation settlement transaction after checking its public delivery. */
+  finishObligation(obligationId: string, messageId: string) {
+    const o = this.get<Obligation>('cc_obligations', obligationId);
+    if (!o.taskId || !o.delivery || !((o.state === 'delivery_pending' && o.acceptBy === 'delivery') ||
+        (o.state === 'awaiting_acceptance' && o.acceptBy === 'user' && o.delivery.messageId === messageId))) {
+      fail('责任尚未到达约定的验收步骤。', 'obligation_conflict');
+    }
+    const t = this.getTask(o.taskId!), run = this.port.invocation(o.delivery!.invocationId);
+    const m = this.get<ConversationMessage>('cc_messages', messageId);
+    if (t.conversationId !== o.conversationId || t.ownerMemberId !== o.owner.memberId || t.ownerRevision !== o.ownerRevision ||
+        t.pendingHandoffId || t.delegationId || t.disposition || t.status === 'blocked' || t.status === 'done' ||
+        run.status !== 'succeeded' || run.acceptance !== 'accepted' || run.teardown !== 'confirmed' || (run.cancelRevision ?? 0) !== 0 ||
+        run.roomMember?.id !== o.owner.instanceId || run.roomMember.generation !== o.owner.generation ||
+        m.conversationId !== t.conversationId || m.responseId !== run.responseId || m.memberId !== t.ownerMemberId || m.author !== 'member' ||
+        m.deletedAt || m.visibility || !m.content.includes(o.delivery!.summary)) fail('责任、执行或公开交付记录已变化。', 'obligation_conflict');
+    if (t.currentSourceId) this.delivery(t.currentSourceId, 'withdrawn', '任务已按约定完成交付。');
+    t.status = 'done'; delete t.statusReason;
+    this.save(t, 'task.updated', { status:t.status, obligationId, messageId, acceptance:o.acceptBy });
+  }
   update(taskId: string, input: UpdateOrdinaryTask, invocationId?: string) {
     return this.port.tx(() => {
       const actor = this.actor(invocationId);
+      if (input.status === 'done') {
+        const bound = this.port.db.prepare("SELECT id FROM cc_obligations WHERE json_extract(value,'$.taskId')=? AND json_extract(value,'$.state') NOT IN ('delivered','cancelled')").get(taskId);
+        if (bound && actor.kind === 'agent' && this.getTask(taskId).conversationId !== this.port.invocation(actor.invocationId).conversationId) fail('任务不属于当前执行会话。','task_scope_conflict');
+        if (bound) fail(invocationId
+          ? '此任务有未结委托。请用 obligation_deliver 提交交付摘要，并在本轮最终公开回复中原样写出。若约定了用户验收，平台将等待用户确认。'
+          : '此任务有未结委托。负责人需先公开交付；约定由你验收时，请在原消息旁确认验收。', 'obligation_delivery_required');
+      }
       const result = this.port.command(`task-update:${taskId}:${input.requestId}`, { ...input, actor }, () => {
         const t = this.getTask(taskId); this.version(t, input); if (t.delegationId) fail('任务正在委托，请通过专用责任验收或先取消委托。');
         if ((!input.status && !input.disposition) || (input.status && !taskStates.includes(input.status)) || (input.disposition && !dispositions.includes(input.disposition)) || (input.status && input.disposition)) throw new AppError(400, '选择有效的任务状态或单独终结原因。');

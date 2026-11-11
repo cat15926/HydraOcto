@@ -89,7 +89,7 @@ export class CooperationService {
     const c = this.data.get<Conversation>('cc_conversations', s.conversationId);
     try {
       const route = this.store.previewRoute(s.conversationId, s.routingContent ?? s.content); s.requestedTargets = route.targets; s.bindingState = 'bound'; s.revision++;
-      for (const memberId of route.targets) { const d: Delivery = { id: randomUUID(), sourceId: s.id, memberId, status: 'pending', revision: 1 }; this.store.db.prepare('INSERT INTO cc_deliveries VALUES(?,?,?,?,?,?)').run(d.id, s.id, memberId, null, d.status, JSON.stringify(d)); }
+      for (const memberId of route.targets) { const d: Delivery = { id: randomUUID(), sourceId: s.id, memberId, ...(s.roomPolicy && {roomMember: this.store.roomMembers.resolve(s.conversationId, memberId)}), status: 'pending', revision: 1 }; this.store.db.prepare('INSERT INTO cc_deliveries VALUES(?,?,?,?,?,?)').run(d.id, s.id, memberId, null, d.status, JSON.stringify(d)); }
       route.id = randomUUID(); route.sourceId = s.id; s.routingDecisionId = route.id; this.store.db.prepare('INSERT INTO cc_routing VALUES(?,?,?)').run(route.id, s.id, JSON.stringify(route));
       this.putSource(s); this.changed(c.id); this.newUserInput(c.id, route.targets); this.port.event(c.id, 'source.targets_resolved', { sourceId: s.id, targets: route.targets }); return true;
     } catch (e) { if (e instanceof AppError && e.code === 'no_routable_member') return false; throw e; }
@@ -98,6 +98,7 @@ export class CooperationService {
     // An image belongs only to its own turn, including while that turn is still running.
     if (this.store.workbench.imageReferences(s.conversationId, s.attachmentIds).length) return false;
     const primary = this.store.visibility.primary(i.id);
+    if (this.store.obligations.isBoundSource(s.id) || this.store.obligations.isBoundSource(primary.id)) return false;
     if (this.store.workbench.imageReferences(i.conversationId, primary.attachmentIds).length) return false;
     const contract = this.store.contract(i.id);
     if (contract.projectReview || s.projectReview || s.projectRepair || s.projectCiRepair || s.allowCiRepair || s.allowReviewRevision) return false;
@@ -109,7 +110,9 @@ export class CooperationService {
     if (this.store.visibility.primary(i.id).actionRef || s.actionRef || s.crossRef || !this.store.visibility.sameScope(i.id, s) || s.conversationId !== i.conversationId || s.bindingState !== 'bound' || s.withdrawnAt || s.taskRef || s.reviewRef || s.groupId || this.delayed(s.id) || this.suppressed(i.conversationId, i.memberId)) return false;
     if (['visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(i.id).toolPolicyVersion) && this.store.visibility.admissionReason(s)) return false;
     const d = this.data.rows<Delivery>('cc_deliveries').find(d => d.sourceId === s.id && d.memberId === i.memberId);
-    return d?.status === 'pending' && !d.handoffId && (!d.continuation || d.continuation.fallback === true);
+    // A project amendment marked for the next turn must not enter another prompt or tool read early.
+    if (d?.continuation?.projectGuidance) return false;
+    return d?.status === 'pending' && d.roomMember?.id === i.roomMember?.id && !d.handoffId && (!d.continuation || d.continuation.fallback === true);
   }
   pending(invocationId: string) {
     const i = this.store.invocation(invocationId); this.actor(i);
@@ -193,13 +196,21 @@ export class CooperationService {
   exposures(cid?: string) { return this.data.rows<InputExposure>('cc_input_exposures', cid); }
   detail(cid: string) { return { queue: this.queue(cid), groups: this.groups(cid), inputExposures: this.exposures(cid), inputHandoffs: this.handoffs(cid) }; }
   bindContinuation(s: SourceWork, deliveryMode?: 'next_turn' | 'continue_current') {
-    if (deliveryMode === 'next_turn' || s.excerptRefs?.length || s.requestedTargets.length !== 1) return;
+    if ((deliveryMode === 'next_turn' && !s.projectWork) || s.excerptRefs?.length || s.requestedTargets.length !== 1) return;
     for (const d of this.data.rows<Delivery>('cc_deliveries').filter(d => d.sourceId === s.id)) {
       const i = this.store.invocations(s.conversationId).find(i => i.memberId === d.memberId && ['prepared', 'running'].includes(i.status));
-      if (!i || !this.sameProjectAccess(i, s) || !this.store.visibility.sameScope(i.id, s) || !['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(i.id).toolPolicyVersion ?? '')) continue;
-      d.continuation = { invocationId: i.id, responseId: i.responseId, cancelRevision: i.cancelRevision ?? 0, ...(i.member.carrier !== 'codex-app-server' ? { fallback: true, reason: '当前承载不支持活动追加，保留下一轮投递。' } : {}) };
+      if (!i || i.roomMember?.id !== d.roomMember?.id || !this.sameProjectAccess(i, s) || !this.store.visibility.sameScope(i.id, s) || !['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(this.store.contract(i.id).toolPolicyVersion ?? '')) continue;
+      d.continuation = { invocationId: i.id, responseId: i.responseId, cancelRevision: i.cancelRevision ?? 0, ...(s.projectWork && {projectGuidance:true}), ...((deliveryMode === 'next_turn' || i.member.carrier !== 'codex-app-server') ? { fallback: true, reason: '保留下一轮投递。' } : {}) };
       this.saveDelivery(d);
     }
+  }
+  private projectGrantStillValid(run: CollaborationInvocation, source: SourceWork) {
+    if (!source.projectWork) return true;
+    try {
+      this.store.projectReviews.requireGrant(run.conversationId, run.memberId, source.projectGrantRevision!, this.store.contract(run.id).workspaceGrant);
+      this.store.visibility.validateInvocation(run.id);
+      return true;
+    } catch { return false; }
   }
   prepareAppend(ready: Set<string>): InputHandoff | undefined {
     return this.port.tx(() => {
@@ -212,7 +223,9 @@ export class CooperationService {
             const ref = d.continuation; if (!ref || ref.fallback || held.has(d.memberId) || this.suppressed(c.id, d.memberId) || this.delayed(s.id)) continue;
             const i = this.store.invocation(ref.invocationId);
             if (!this.store.members().some(m => m.id === d.memberId && m.enabled) || !c.memberIds.includes(d.memberId)) continue;
-            if (i.responseId !== ref.responseId || (i.cancelRevision ?? 0) !== ref.cancelRevision || !['prepared', 'running'].includes(i.status)) { ref.fallback = true; ref.reason = '原运行已结束或取消，尚未发送的输入保留排队。'; this.saveDelivery(d); continue; }
+            if (i.roomMember?.id !== d.roomMember?.id || i.responseId !== ref.responseId || (i.cancelRevision ?? 0) !== ref.cancelRevision || !['prepared', 'running'].includes(i.status)) { ref.fallback = true; ref.reason = '原运行已结束或取消，尚未发送的输入保留排队。'; this.saveDelivery(d); continue; }
+            // Admission will hold a pending project source if the grant was revoked or replaced.
+            if (!this.projectGrantStillValid(i,s)) continue;
             if (!ready.has(i.id) || !i.nativeSessionId || !i.nativeTurnId || this.handoffs().some(h => h.invocationId === i.id && ['sent', 'unknown'].includes(h.state))) continue;
             const h: InputHandoff = { id: randomUUID(), conversationId: c.id, sourceId: s.id, sourceRevision: s.revision, sourceDigest: digest(s.content), deliveryId: d.id, deliveryRevision: d.revision + 1, memberId: d.memberId, invocationId: i.id, responseId: i.responseId, inputRevision: this.store.response(i.responseId).inputRevision, cancelRevision: i.cancelRevision ?? 0, nativeSessionId: i.nativeSessionId, nativeTurnId: i.nativeTurnId, nativeDeliveryId: randomUUID(), content: s.content, state: 'sent', requiresCompletion: false, revision: 1, createdAt: now(), updatedAt: now() };
             d.handoffId = h.id; d.status = 'held'; d.revision++; d.holdReason = '追加已绑定准确执行，等待承载回执。'; this.saveDelivery(d); this.data.save('cc_input_handoffs', h, 'input.append_sent'); this.changed(c.id); return h;
@@ -229,12 +242,13 @@ export class CooperationService {
       if (h.state === 'read' || (h.state === 'accepted' && observation.state !== 'read') || h.state === 'not_accepted') return h;
       h.evidence = [...(h.evidence ?? []), observation].slice(-32);
       const i = this.store.invocation(h.invocationId), r = this.store.response(h.responseId), s = this.source(h.sourceId), d = this.delivery(h.deliveryId);
-      const bindingValid = (i.cancelRevision ?? 0) === h.cancelRevision && i.responseId === h.responseId && i.nativeSessionId === h.nativeSessionId && i.nativeTurnId === h.nativeTurnId && s.revision === h.sourceRevision && digest(s.content) === h.sourceDigest && !s.withdrawnAt && d.handoffId === h.id && d.revision === h.deliveryRevision && r.inputRevision === h.inputRevision;
+      const scopeValid = this.projectGrantStillValid(i,s);
+      const bindingValid = scopeValid && (i.cancelRevision ?? 0) === h.cancelRevision && i.responseId === h.responseId && i.nativeSessionId === h.nativeSessionId && i.nativeTurnId === h.nativeTurnId && s.revision === h.sourceRevision && digest(s.content) === h.sourceDigest && !s.withdrawnAt && d.handoffId === h.id && d.revision === h.deliveryRevision && r.inputRevision === h.inputRevision;
       const valid = bindingValid && i.status === 'running' && this.store.members().some(m => m.id === h.memberId && m.enabled) && this.data.get<Conversation>('cc_conversations', h.conversationId).memberIds.includes(h.memberId);
       if (h.state === 'accepted' && observation.state === 'read') {
         // Acceptance already advanced delivery/input once; a later read must validate that
         // post-consumption binding, rather than bypassing cancellation or source drift.
-        const acceptedBinding = i.status === 'running' && (i.cancelRevision ?? 0) === h.cancelRevision && i.responseId === h.responseId && i.nativeSessionId === h.nativeSessionId && i.nativeTurnId === h.nativeTurnId
+        const acceptedBinding = scopeValid && i.status === 'running' && (i.cancelRevision ?? 0) === h.cancelRevision && i.responseId === h.responseId && i.nativeSessionId === h.nativeSessionId && i.nativeTurnId === h.nativeTurnId
           && s.revision === h.sourceRevision && digest(s.content) === h.sourceDigest && !s.withdrawnAt
           && d.handoffId === h.id && d.status === 'consumed' && d.responseId === h.responseId && d.revision === h.deliveryRevision + 1 && r.inputRevision === h.inputRevision + 1
           && this.store.members().some(m => m.id === h.memberId && m.enabled) && this.data.get<Conversation>('cc_conversations', h.conversationId).memberIds.includes(h.memberId);

@@ -318,7 +318,7 @@ async function runCodex(request: RuntimeRequest, command: string, project?: Proj
   };
   try {
     if (project) await project.ready;
-    if (proc.pid !== undefined) request.onEvent({ kind: 'prepared', detail: { processStarted: true, transport: 'stdio' } });
+    if (proc.pid !== undefined) request.onEvent({ kind: 'prepared', detail: { processStarted: true, transport: 'stdio', ...(!project && {pid:proc.pid}) } });
     request.signal.throwIfAborted();
     await initializeCodex(proc);
     if (!api) {

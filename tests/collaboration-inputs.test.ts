@@ -145,3 +145,19 @@ test('N1 context: directory truncation is explicit and a capability claim does n
   assert.match(result.prompt, /"authorizedTools":\["workspace_list","workspace_read","collaboration_request"\]/);
   assert.doesNotMatch(result.prompt, /"authorizedTools":\[[^\]]*shell/i);
 });
+
+test('only a public enabled obligation run gets the tracked return instructions in its frozen prompt', () => {
+  const ordinary = fixture();
+  const active = { ...ordinary, crossPolicy: true, obligationPolicy: true };
+  const review = {
+    ...active,
+    source: { ...ordinary.source, projectReview: {paths:['orders.ts'],grantRevision:1,originalSourceId:ordinary.source.id} },
+  };
+  const prompt = assembleContext(active);
+  assert.ok(prompt.prompt.includes('obligation_open'));
+  assert.ok(prompt.prompt.includes('tracked_subtask_returns_to_parent'));
+  const reviewer = assembleContext(review);
+  assert.ok(reviewer.prompt.includes('obligation_report') && !reviewer.prompt.includes('obligation_open'));
+  assert.notEqual(prompt.renderDigest, assembleContext({...active, obligationPolicy:false}).renderDigest);
+  assert.ok(!assembleContext({...active, visibility:{kind:'private',memberIds:['claude']}}).prompt.includes('obligation_list'));
+});

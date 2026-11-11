@@ -1,3 +1,4 @@
+import { ProjectPreviewPanel } from './ProjectPreviewPanel';
 import type { AcceptanceEvidence, CollaborationInvocation, ConversationDetail } from '../shared/collaboration';
 
 import { ProjectWebSources } from './ProjectWebSources';
@@ -51,12 +52,23 @@ export function NativeProjectActivity({ detail, run, cancelling, stop, command, 
   const request = author && detail.messages.find(m => m.sourceId === reviewSourceId && m.memberId === author.memberId && !m.deletedAt);
   const exports = detail.projectExports?.filter(item => item.invocationId === run.id) ?? [];
   const approvals = (detail.interactions ?? []).filter(i => i.invocationId === run.id && i.kind === 'approval');
-  if (!approvals.length && !operations.length && !projectWork && !review && !exports.length && !detail.evidence.some(e => e.invocationId === run.id && e.detail.origin === 'project_web')) return null;
+  const service=detail.evidence.find(e=>e.invocationId===run.id && e.detail.origin==='project_service');
+  const browserChecks=detail.evidence.filter(e=>e.invocationId===run.id && e.detail.origin==='project_browser' && e.detail.result);
+  if (!browserChecks.length && !service && !approvals.length && !operations.length && !projectWork && !review && !exports.length && !detail.evidence.some(e => e.invocationId === run.id && e.detail.origin === 'project_web')) return null;
   const replacement = detail.evidence.find(event => event.invocationId === run.id && event.kind === 'session_replaced');
   const reason = typeof replacement?.detail.reason === 'string' ? replacement.detail.reason :
     run.sessionPlan?.mode === 'replace' ? run.sessionPlan.reason : undefined;
   const running = ['prepared', 'running', 'cancel_requested'].includes(run.status);
   return <div className="cc-native-project-activity">
+    {browserChecks.map(event=>{
+      const result=event.detail.result as {passed:boolean;asserted?:boolean;error?:string;trace?:string[];evidenceId?:string};
+      const path='/api/invocations/'+encodeURIComponent(run.id)+'/browser-evidence/'+encodeURIComponent(String(event.detail.evidenceId));
+      return <details key={event.id} className="cc-browser-evidence"><summary>页面验收 · {!result.passed?'未通过':result.asserted?'通过':'已操作'}</summary>
+        {result.trace?.length ? <ol>{result.trace.map((step,i)=><li key={i}>{step.replace(/^inspect/,'查看页面').replace(/^reload/,'刷新页面').replace(/^fill/,'填写').replace(/^click/,'点击').replace(/^expect/,'核对文字')}</li>)}</ol>:null}
+        {result.error && <p>{result.error}</p>}{result.evidenceId && <div>{(['before','after'] as const).map(which=><a key={which} href={path+'/'+which+'.png'} target="_blank" rel="noreferrer"><img loading="lazy" src={path+'/'+which+'.png'} alt={which==='before'?'操作前截图':'操作后截图'}/>{which==='before'?'操作前':'操作后'}</a>)}</div>}
+      </details>;
+    })}
+    {service && <ProjectPreviewPanel conversation={detail.conversation} instanceId={String(service.detail.previewId)} visible command={command}/>}
     {projectWork && run.continuity === 'resumed' && <p className="cc-note">已接续该成员上次的项目会话</p>}
     {projectWork && reason && <p className="cc-note">已新建项目会话 · {reason}</p>}
     {approvals.map(i =>

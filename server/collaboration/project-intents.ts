@@ -32,6 +32,8 @@ export function requestsProjectWork(content: string, members: Member[] = []) {
     }
   }
   if (/(?:如何|怎样|怎么|为什么|解释|介绍|先分析|\b(?:how (?:do|can|would)|explain)\b)/i.test(discussionText)) return false;
+  if (!/(?:别|不要|暂不).{0,4}(?:跑|启动|运行)/.test(authorRequest) &&
+      /(?:项目|开发服务).{0,8}(?:跑起来|启动起来)|(?:启动|运行).{0,6}(?:开发服务|项目预览)|npm run dev/i.test(authorRequest)) return true;
   if (requestsPullRequest(authorRequest)) return true;
   if (!/(?:不要|别|无需|暂不)(?:运行|执行)|\b(?:do not|don't) run\b/i.test(authorRequest) &&
       /(?:项目|仓库|工作区|\b(?:project|repo|workspace)\b)/i.test(authorRequest) &&
@@ -128,6 +130,18 @@ export class ProjectIntents {
     }
   }
 
+  private hasActiveAuthor(c: Conversation, targets: string[]) {
+    if (targets.length !== 1 || !this.authorized(c,c.workspaceGrant,targets)) return false;
+    return this.store.invocations(c.id).some(run => {
+      if (run.memberId !== targets[0] || !['prepared','running'].includes(run.status)) return false;
+      const contract = this.store.contract(run.id);
+      const primary = this.store.visibility.primary(run.id);
+      return contract.projectWork && !contract.visibility && !contract.projectReview && !primary.projectRepair &&
+        !primary.projectCiRepair && !primary.allowReviewRevision && !primary.allowCiRepair && !primary.attachmentIds?.length &&
+        contract.workspaceGrant?.revision === c.workspaceGrant?.revision;
+    });
+  }
+
   private followsCompletedWork(c: Conversation, targets: string[]) {
     if (targets.length !== 1 || c.workspaceGrant?.mode !== 'project-work') return false;
     const detail = this.store.detail(c.id);
@@ -140,17 +154,23 @@ export class ProjectIntents {
       i.status === 'succeeded' && i.acceptance === 'accepted' && i.teardown === 'confirmed');
   }
 
-  submit(cid: string, input: SendMessage) {
+  submit(cid: string, input: SendMessage, hasRunningService?: () => boolean) {
     // N6 may append a public work request only to an active turn with matching project access.
     const conversation = this.store.workbench.conversation(cid);
     const participants = this.store.members().filter(member => conversation.memberIds.includes(member.id) && member.enabled && !member.deletedAt);
     const explicitWork = requestsProjectWork(input.content, participants);
     const continuation = !input.replyTo && !input.attachmentIds?.length &&
       /^(?:@[^@，,。!！\n]{1,60}?[\s，,]+)?(?:请)?(?:继续(?:做|实施|修改|上次的工作)?|接着(?:做|改|上次的工作)|沿用上次(?:的)?约定继续|continue(?: the previous work)?)[。！.!\s]*$/i.test(input.content.trim());
+    // During a public project turn a short instruction can refer to the active work
+    // without repeating a filename or starting with a special command.
+    const plainGuidance = !!input.content.trim() && !input.replyTo && !input.attachmentIds?.length &&
+      !/(?:只读|只讨论|仅讨论|先解释|仅咨询|如何|怎么|为什么|[？?])/u.test(input.content);
+    const changesPage = plainGuidance && /(?:再加|再补|改成|换成|禁用|启用|显示|隐藏|校验|修正|change|add|disable|enable)/iu.test(input.content) &&
+      !/(?:不要改|不要修改|先别动)/u.test(input.content);
     const publicWork = !input.privateTo && !input.excerptRefs && !input.excerptTargets && !input.resolveWhenIdle &&
-      (explicitWork || continuation);
+      (explicitWork || continuation || (plainGuidance && conversation.workspaceGrant?.mode === 'project-work'));
     if (!publicWork) {
-      if (this.store.db.prepare('SELECT 1 FROM cc_commands WHERE request_id=?').get('project-submit:' + input.requestId)) throw new AppError(409, '此请求标识已用于另一条项目委托。', 'idempotency_conflict');
+      if (!this.store.db.prepare('SELECT 1 FROM cc_commands WHERE request_id=?').get('message:' + input.requestId) && this.store.db.prepare('SELECT 1 FROM cc_commands WHERE request_id=?').get('project-submit:' + input.requestId)) throw new AppError(409, '此请求标识已用于另一条项目委托。', 'idempotency_conflict');
       return this.store.send(cid, input);
     }
     return this.port.tx(() => {
@@ -164,7 +184,12 @@ export class ProjectIntents {
         try { routing = this.store.previewRoute(cid, input.content); }
         catch (e) { if (e instanceof AppError && e.code === 'no_routable_member') return this.store.send(cid, input); throw e; }
         const targets = routing.targets;
-        if (!explicitWork && (!this.followsCompletedWork(c,targets) || !this.authorized(c,c.workspaceGrant,targets))) return this.store.send(cid,input);
+        if (!explicitWork) {
+          const active = this.hasActiveAuthor(c,targets);
+          const previous = (continuation || changesPage) && this.followsCompletedWork(c,targets);
+          const preview = targets.length === 1 && changesPage && hasRunningService?.();
+          if (!(active || previous || preview) || !this.authorized(c,c.workspaceGrant,targets)) return this.store.send(cid,input);
+        }
         if (!targets.some(t => this.store.members().some(m => m.id === t && (m.carrier === 'claude-cli' || m.carrier === 'codex-app-server')))) return this.store.send(cid, input);
         if (this.authorized(c, c.workspaceGrant, targets) && targets.every(t => this.store.workbench.projectCapability(t, c.workspaceGrant).available)) {
           verifyWorkspace(c.workspaceGrant!);

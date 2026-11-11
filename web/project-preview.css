@@ -10,3 +10,9 @@
 .cc-site-preview ol {margin:0;padding:10px 12px;list-style:none;background:#f1f4ef;border-radius:8px;font:12px/1.65 ui-monospace,monospace;overflow-wrap:anywhere;max-height:16rem;overflow:auto}
 .cc-site-preview time {color:#536457}
 @media(pointer:coarse){.cc-site-preview button{min-height:44px}}
+
+.cc-browser-evidence {margin: .5rem 0; overflow-wrap: anywhere}
+.cc-browser-evidence > div {display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,10rem),1fr)); gap: .6rem}
+.cc-browser-evidence img {display: block; width: 100%; height: auto; border: 1px solid #d4dccf; border-radius: .5rem}
+
+.cc-guidance-receipt {display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;margin-top:.45rem;font-size:.84rem;overflow-wrap:anywhere}

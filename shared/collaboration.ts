@@ -21,7 +21,10 @@ export interface Member {
   model?: string; enabled: boolean; revision?: number; aliases?: string[]; deletedAt?: string;
   accountBinding?: 'follow' | 'override'; modelBinding?: 'follow' | 'override'; effort?: string;
 }
+export type RoomCollaborationMode = 'continuous' | 'legacy';
+export interface RoomMemberInstance { id: string; conversationId: string; memberId: string; generation: number; active: boolean }
 export interface Conversation {
+  collaborationMode?: RoomCollaborationMode;
   id: string; title: string; memberIds: string[]; defaultMemberId: string;
   createdAt: string; updatedAt: string; revision?: number;
   preferredMemberIds?: string[]; routingMode?: 'normal' | 'concierge';
@@ -61,6 +64,7 @@ export interface ProjectReviewCheck {
   files: { path: string; status: 'unchanged' | 'changed' | 'unavailable' | 'unread'; sha256?: string; currentSha256?: string }[];
 }
 export interface SourceWork {
+  roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
   allowCiRepair?: true;
@@ -90,7 +94,7 @@ export type WaitCondition = { kind: 'timer'; at: string } | { kind: 'signal'; na
 export interface ActionWait { id: string; conversationId: string; actionId: string; generation: number; episode: number; revision: number; invocationId: string; sourceId: string; condition: WaitCondition; state: 'waiting' | 'ready' | 'fired' | 'expired' | 'cancelled'; deadline: string; notBefore: string; evidenceId?: string; wakeSourceId?: string; createdAt: string }
 export interface ConditionEvidence { id: string; conversationId: string; waitId: string; episode: number; eventId: string; authority: 'human_signal' | 'platform_timer' | 'managed_job' | 'artifact_receipt'; detail: Record<string, unknown>; createdAt: string }
 /** Absence is public for legacy records. Private scope is an immutable audience until explicit reveal. */
-export interface MessageVisibility { kind: 'private'; memberIds: string[]; revealedAt?: string }
+export interface MessageVisibility { kind: 'private'; memberIds: string[]; memberGenerations?: Record<string,number>; revealedAt?: string }
 export interface MessageExcerpt { messageId: string; revision: number; digest: string; start: number; end: number }
 export interface ReadCursor { conversationId: string; sequence: number; updatedAt: string }
 export interface MemoryEntry { id: string; conversationId: string; key: string; scope: 'conversation' | 'library'; visibility?: MessageVisibility; owner: string; revision: number; headVersionId?: string; createdAt: string; updatedAt: string; revokedAt?: string }
@@ -132,15 +136,17 @@ export interface ConfigurationPreview {
   affectedMemberIds: string[]; unaffectedMemberIds: string[]; appliedAt?: string;
 }
 export interface Delivery {
+  roomMember?: RoomMemberInstance;
   id: string; sourceId: string; memberId: string; status: 'pending' | 'consumed' | 'held' | 'withdrawn';
   responseId?: string; holdReason?: string; revision: number;
-  continuation?: { invocationId: string; responseId: string; cancelRevision: number; fallback?: boolean; reason?: string };
+  continuation?: { invocationId: string; responseId: string; cancelRevision: number; projectGuidance?: true; fallback?: boolean; reason?: string };
   handoffId?: string;
 }
 export interface DispatchBatch {
   id: string; sourceId: string; targets: string[]; mode: ExecutionMode; createdAt: string; historyCutoff?: number;
 }
 export interface CollaborationInvocation {
+  roomMember?: RoomMemberInstance;
   id: string; conversationId: string; batchId: string; responseId: string; memberId: string;
   member: Member; status: InvocationStatus; acceptance: 'unknown' | 'accepted' | 'not_accepted';
   nativeSessionId?: string; nativeTurnId?: string; continuity: 'fresh' | 'resumed' | 'unknown';
@@ -175,6 +181,7 @@ export interface ProjectFileExport {
   reason?: string;
 }
 export interface ConversationDetail {
+  obligations?: import('./obligations.js').Obligation[];
   projectExports?: ProjectFileExport[];
   projectIntents?: ProjectIntent[];
   conversation: Conversation; messages: ConversationMessage[]; sources: SourceWork[]; deliveries: Delivery[];
@@ -355,6 +362,8 @@ export interface HistorySourceResponsibility {
   }[];
 }
 export interface ExecutionContractSnapshot {
+  roomMember?: RoomMemberInstance;
+  obligationPolicy?: boolean;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -367,7 +376,7 @@ export interface ExecutionContractSnapshot {
   primarySourceId?: string;
   workspaceGrant?: WorkspaceGrant;
   projectWork?: true; projectContinuity?: true; mayProposeProject?: true;
-  webResearch?: true; gitDelivery?: true;
+  webResearch?: true; gitDelivery?: true; projectPreview?: true; projectBrowser?: true;
   projectReview?: ProjectReviewScope; mayRequestProjectReview?: true; mayExportProjectFile?: true; mayRunProjectNpmTest?: true; projectNpmChecks?: true;
   visibility?: MessageVisibility; visibilityEpoch?: number; materialDigest?: string; memorySnapshot?: MemorySnapshot[];
 }
@@ -422,6 +431,7 @@ export interface CollaborationBootstrap {
   defaults?: RuntimeDefault[]; accountObservations?: AccountObservation[]; configurationRevision?: number;
 }
 export interface CreateConversation {
+  collaborationMode?: RoomCollaborationMode;
   title: string; memberIds: string[]; defaultMemberId: string; requestId: string;
 }
 export interface SendMessage { content: string; requestId: string; deliveryMode?: 'next_turn' | 'continue_current'; resolveWhenIdle?: boolean; attachmentIds?: string[]; replyTo?: string; privateTo?: string[]; excerptRefs?: MessageExcerpt[]; excerptTargets?: string[] }
@@ -430,6 +440,7 @@ export interface RuntimeEvent {
   detail: Record<string, unknown>;
 }
 export interface RuntimeRequest {
+  obligationPolicy?: boolean;
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;
@@ -443,7 +454,7 @@ export interface RuntimeRequest {
   onAppendReady?: (dispatcher: AppendDispatcher) => void;
   onInputRead?: (observation: AppendObservation) => void;
   workspaceGrant?: WorkspaceGrant; visibility?: MessageVisibility; projectWork?: true; projectContinuity?: true; mayProposeProject?: true;
-  webResearch?: true; gitDelivery?: true;
+  webResearch?: true; gitDelivery?: true; projectPreview?: true; projectBrowser?: true;
   projectReview?: ProjectReviewScope; mayRequestProjectReview?: true; mayExportProjectFile?: true; mayRunProjectNpmTest?: true; projectNpmChecks?: true;
 }
 export interface RuntimeResult {
@@ -475,6 +486,7 @@ export interface ProjectReviewTestResult {
   treeExited: true;
 }
 export interface CollaborationRuntime {
+  runProjectService?(request:import('./project-preview.js').ProjectServiceRequest):Promise<void>;
   projectLoginGuidance?(): {loginCommand?:string;loginIssue?:string};
   runProjectReviewTest?(request: ProjectReviewTestRequest): Promise<ProjectReviewTestResult>;
   inspectProjectDomain?(invocationId: string, evidence: AcceptanceEvidence[]): Promise<ProjectDomainObservation>;

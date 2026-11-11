@@ -1,3 +1,5 @@
+import { obligationDeliverySchema, obligationTools } from './obligation-tools.js';
+import { projectBrowserTool } from './project-browser.js';
 import { webResearchTools } from './project-research.js';
 import { gitDeliveryTool } from './project-git.js';
 import { managedEnvironmentCommands } from './native-command-approval.js';
@@ -71,9 +73,21 @@ function authorNpmTool(extended: boolean) {
   };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}) {
-  if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork ? projectReviewTools(request.projectReview) : [];
-  const tools = [...policyTools(request)];
+export function runtimeTools(request: Pick<RuntimeRequest, 'obligationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}) {
+  const obligations = obligationTools(request);
+  if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
+    ? [...projectReviewTools(request.projectReview), ...obligations] : [];
+  const tools = [...policyTools(request).map(t => {
+    if (!obligations.length || t.name !== 'collaboration_request') return t;
+    return {
+      ...t,
+      description: t.description + ' For a tracked subtask, choose one target and include delivery with the parent obligation, fixed version and acceptance criteria. Its report returns to the parent owner.',
+      inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, delivery: obligationDeliverySchema } },
+    };
+  }), ...obligations];
+  if(request.projectBrowser && !request.visibility && request.toolPolicyVersion==='cross-action-v1') tools.push(projectBrowserTool);
+  if (request.projectPreview && !request.visibility && request.toolPolicyVersion==='cross-action-v1')
+    tools.push({name:'project_service_start',description:'When asked to start or preview the current development project, call this tool. It runs npm run dev in a managed Linux project snapshot and provides a service card. A starting receipt is not readiness. Do not start a background shell yourself.',inputSchema:{type:'object',properties:{},additionalProperties:false}});
   if (request.webResearch && !request.visibility && request.toolPolicyVersion === 'cross-action-v1') tools.push(...webResearchTools);
   if (request.gitDelivery && request.projectWork && !request.visibility && request.toolPolicyVersion === 'cross-action-v1') tools.push(gitDeliveryTool);
   if (request.toolPolicyVersion === 'cross-action-v1' && request.mayProposeProject && !request.projectWork && !request.visibility) return [...tools, PROJECT_FOLLOWUP];
@@ -129,9 +143,11 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   request.signal.throwIfAborted();
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object.');
   if (!runtimeTools(request).some(tool => tool.name === name)) throw new Error('Tool is outside this invocation frozen policy.');
+  if (name === 'collaboration_request' && args.delivery !== undefined && !obligationTools(request).length)
+    throw new Error('Tracked delegation is outside this invocation frozen policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
+  if (name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);

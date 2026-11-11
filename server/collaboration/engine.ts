@@ -1,3 +1,6 @@
+import { ciTargets } from './obligation-ci.js';
+import type { ProjectBrowser } from './project-browser.js';
+import type { ProjectPreviews } from './project-preview.js';
 import type { githubApi } from './project-github.js';
 import { ProjectPullMonitor } from './project-pulls.js';
 import { researchPublicWeb } from './project-research.js';
@@ -20,7 +23,7 @@ export class CollaborationEngine {
   private appenders = new Map<string, AppendDispatcher>();
   private appending = new Map<string, Promise<void>>();
   readonly pulls:ProjectPullMonitor;
-  constructor(readonly store: CollaborationStore, readonly runtime: CollaborationRuntime, readonly options: { workspace: string; maxDepth?: number; projectGitHub?: typeof githubApi }) {
+  constructor(readonly store: CollaborationStore, readonly runtime: CollaborationRuntime, readonly options: { workspace: string; maxDepth?: number; previews?:ProjectPreviews; browser?:ProjectBrowser; projectGitHub?: typeof githubApi }) {
     this.pulls=new ProjectPullMonitor(store,options.projectGitHub);
   }
   start(): void {
@@ -97,7 +100,8 @@ export class CollaborationEngine {
       const input = this.store.input(i.id)!; const contract = this.store.contract(i.id);
       const images = this.store.runtimeImages(i.id, input.manifest);
       onEvent({ kind: 'exposed', detail: { source: 'platform_prompt', characters: prompt.length, manifestId: input.manifest.id, renderDigest: input.manifest.renderDigest, providerAcceptance: false } });
-      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
+      if(contract.projectWork) await this.options.previews?.releaseForWriter(i.conversationId);
+      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, obligationPolicy: contract.obligationPolicy, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch,projectPreview:contract.projectPreview,projectBrowser:contract.projectBrowser, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
         onAppendReady: dispatcher => { if (['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
         onInputRead: observation => {
           const h = this.store.cooperation.handoffs(i.conversationId).find(h => h.invocationId === i.id && h.nativeDeliveryId === observation.nativeDeliveryId);
@@ -128,6 +132,26 @@ export class CollaborationEngine {
             if (typeof args.query === 'string' && redact(args.query) !== args.query) throw new AppError(403,'查询含有受保护信息。');
             return this.store.searchProjectMcp(i.id,args,callId,controller.signal,redact);
           }
+          if(name==='project_browser_check') {
+            if(!this.options.browser) throw new AppError(409,'当前没有可用的项目浏览器。');
+            return this.options.browser.check(i.id,args,callId,controller.signal);
+          }
+          if(name==='project_service_start') {
+            const grant=this.store.requireProjectCapability(i.id,'projectPreview');
+            const previews=this.options.previews;
+            if(!previews || Object.keys(args).length) throw new AppError(400,'请使用本会话已授权的项目启动服务。');
+            const previous=this.store.projectToolEvents(i.id,'project_service').find(e=>e.callId===callId);
+            if(previous) return {id:previous.previewId,state:'already_requested'};
+            const state=previews.start(i.conversationId,previews.state(i.conversationId).id ?? null,grant.revision,'service',()=>{
+              const run=this.store.invocation(i.id);
+              if(run.cancelRevision!==i.cancelRevision || !['running','succeeded'].includes(run.status))
+                throw new Error('原委托已停止。');
+              this.store.visibility.validateInvocation(i.id);
+              this.store.projectReviews.requireGrant(i.conversationId,i.memberId,grant.revision,grant);
+            });
+            this.store.recordEvidence(i.id,{kind:'tool',detail:{origin:'project_service',callId,previewId:state.id,state:state.status}});
+            return {state:state.status,id:state.id,script:'npm run dev',message:'已发起启动，请在回复下的服务卡查看就绪状态、日志与停止操作。'};
+          }
           if (name === 'project_npm_test') return this.store.projectReviews.authorNpmTest(i.id,args,callId,controller.signal,this.runtime.runProjectReviewTest?.bind(this.runtime));
           if (name === 'project_export_request') return this.store.projectExports.tool(i.id,args,callId,controller.signal);
           if (name === 'project_review_read') return this.store.projectReviews.read(i.id,args,callId,controller.signal);
@@ -135,6 +159,11 @@ export class CollaborationEngine {
           if (name === 'project_review_test') return this.store.projectReviews.verifyTests(i.id,args,callId,controller.signal,this.runtime.runProjectReviewTest?.bind(this.runtime));
           if (name === 'project_work_propose') return this.store.projects.propose(i.id, JSON.parse(redact(JSON.stringify(args))), callId);
           if (name.startsWith('cross_')) return this.store.cross.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
+          if (name.startsWith('obligation_')) {
+            if (!contract.obligationPolicy) throw new AppError(403,'本轮未启用委托跟进。');
+            const result=this.store.obligations.tool(i.id,name,JSON.parse(redact(JSON.stringify(args))),callId);
+            this.kick(); return name==='obligation_list'?{...result,ciTargets:ciTargets(this.store,i.id)}:result;
+          }
           if (name.startsWith('action_')) return this.store.actions.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
           if (name.startsWith('memory_')) return this.store.memory.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
           if (name === 'material_search') { if (Object.keys(args).some(k => !['query', 'kinds', 'mode'].includes(k))) throw new AppError(400, '搜索不能指定其他身份或会话。'); return this.store.memory.search({ query: String(args.query ?? ''), kinds: args.kinds as string[] | undefined, mode: args.mode as string | undefined, invocationId: i.id, signal: controller.signal }); }
@@ -154,7 +183,7 @@ export class CollaborationEngine {
           if (name.startsWith('task_')) { const result = this.store.tasks.tool(i.id, name, JSON.parse(redact(JSON.stringify(args))), callId); this.kick(); return result; }
           if (name !== 'collaboration_request') throw new AppError(400, 'Unsupported collaboration tool.');
           const content = typeof args.content === 'string' ? redact(args.content) : '';
-          const admitted = this.store.requestCollaboration(i.id, callId, { targets: args.targets as string[], content, ...(args.projectReview !== undefined ? {projectReview:args.projectReview} : {}) }, this.options.maxDepth);
+          const admitted = this.store.requestCollaboration(i.id, callId, { targets: args.targets as string[], content, ...(args.delivery !== undefined ? {delivery:JSON.parse(redact(JSON.stringify(args.delivery)))} : {}), ...(args.projectReview !== undefined ? {projectReview:args.projectReview} : {}) }, this.options.maxDepth);
           this.kick(); return admitted;
         },
       });
@@ -165,6 +194,7 @@ export class CollaborationEngine {
       }
       await this.appending.get(i.id);
       if (result.nativeSessionId) onEvent({ kind: 'session', detail: { nativeSessionId: result.nativeSessionId, nativeTurnId: result.nativeTurnId, continuity: result.continuity } });
+      if(contract.obligationPolicy && !this.stopping && !controller.signal.aborted) await this.store.obligations.verifyDelivery(i.id,controller.signal);
       this.store.finish(i.id, this.stopping ? 'interrupted' : 'succeeded', this.stopping ? '服务停止，执行结果等待核查。' : redact(result.text), undefined, this.options.maxDepth);
     } catch (error) {
       try {

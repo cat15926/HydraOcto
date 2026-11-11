@@ -9,8 +9,8 @@ import { ProjectInspection } from '../server/collaboration/project-inspection.js
 import { CollaborationStore } from '../server/collaboration/store.js';
 import { Store } from '../server/store.js';
 
-function projectExecution(store:CollaborationStore,root:string) {
-  const cid=store.create({title:'断连现场',memberIds:['codex'],defaultMemberId:'codex',requestId:randomUUID()}).conversation.id;
+function projectExecution(store:CollaborationStore,root:string,collaborationMode:'legacy'|'continuous'='continuous') {
+  const cid=store.create({title:'断连现场',collaborationMode,memberIds:['codex'],defaultMemberId:'codex',requestId:randomUUID()}).conversation.id;
   const preview=store.workbench.previewWorkspace(cid,{path:root,mode:'project-work'});
   store.workbench.applyPreview({previewId:preview.id,requestId:randomUUID()},cid);
   const sent=store.projects.submit(cid,{content:'@Codex 请修改项目文件',requestId:randomUUID()});
@@ -31,7 +31,8 @@ test('P3 inspects a disconnected project after restart, retaining operation, fil
   t.after(()=>{owner.close();rmSync(tmp,{recursive:true,force:true});});
   const options={workspace:project,projectWorkAvailability:()=>({available:true})};
   let store=new CollaborationStore(owner,options);
-  const {cid,id,native}=projectExecution(store,project);
+  // Historical databases can contain mismatched receipts; legacy inspection must still discard them.
+  const {cid,id,native}=projectExecution(store,project,'legacy');
   const event={...native,origin:'native',state:'completed',callId:'file1',name:'fileChange',path:'result.csv'};
   store.recordEvidence(id,{kind:'tool',detail:event});
   store.recordEvidence(id,{kind:'tool',detail:{...event,nativeTurnId:randomUUID(),callId:'other',path:'wrong-file'}});

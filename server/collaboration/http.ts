@@ -1,3 +1,4 @@
+import type { ProjectBrowser } from './project-browser.js';
 import { imageUploadJsonLimit } from './attachment-data.js';
 import { carrierNames } from '../../shared/collaboration.js';
 import { projectLoginGuidance } from './account-discovery.js';
@@ -64,6 +65,8 @@ function memberInput(body: unknown): Member {
     ...(b.model !== undefined && b.model !== '' ? { model: field(b.model, '模型', 200) } : {}) };
 }
 interface HttpDependencies {
+  previews:ProjectPreviews;
+  browser:ProjectBrowser;
   store: CollaborationStore; engine: CollaborationEngine; runtime: CollaborationRuntime;
   projectFilePicker: ProjectFilePicker; folderPicker: FolderPicker; dataDir:string; workspace: string; csrfToken: string;
   verifyCsrf(request: IncomingMessage): void;
@@ -72,7 +75,7 @@ interface HttpDependencies {
 }
 
 export function collaborationHttp(deps: HttpDependencies) {
-  const previews = new ProjectPreviews(cid => deps.store.workbench.conversation(cid));
+  const previews=deps.previews;
   const detachPreviews = deps.store.subscribe(events => { for (const cid of new Set(events.map(e => e.conversationId))) previews.reconcile(cid); });
   const projectInspection = new ProjectInspection(deps.store,deps.runtime.inspectProjectDomain?.bind(deps.runtime));
   const history = new HistoryImport(deps.store,deps.runtime,deps.dataDir);
@@ -88,18 +91,24 @@ export function collaborationHttp(deps: HttpDependencies) {
     configured: account.auth === 'api' ? Boolean(account.apiKeyEnv && process.env[account.apiKeyEnv]?.trim()) : true,
   });
   return {
-    close() { detachPreviews(); previews.close(); picker?.abort(); for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); },
+    close() { detachPreviews(); const stopping=previews.close(); picker?.abort(); for (const [stream, timer] of streams) { clearInterval(timer); stream.end(); } streams.clear(); return stopping; },
     async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
       const path = decodeURIComponent(url.pathname);
       if (!/^\/api\/(native-history(?:\/|$)|collaboration(?:\/|$)|conversations(?:\/|$)|members(?:\/|$)|accounts(?:\/|$)|invocations(?:\/|$)|deliveries(?:\/|$)|ordinary-tasks(?:\/|$)|managed-artifacts(?:\/|$)|artifact-approvals(?:\/|$)|managed-jobs(?:\/|$)|runtime-interactions(?:\/|$)|sources(?:\/|$)|mention-groups(?:\/|$)|input-handoffs(?:\/|$)|cross-grants(?:\/|$)|actions(?:\/|$)|conditions(?:\/|$))/.test(path)) return false;
       const { store, engine, json } = deps;
-      const previewRoute = /^\/api\/conversations\/([^/]+)\/project-preview(?:\/(start|stop))?$/.exec(path);
+      const shot=/^\/api\/invocations\/([^/]+)\/browser-evidence\/([a-f0-9-]{36})\/(before|after)\.png$/.exec(path);
+      if(request.method==='GET' && shot) {
+        const bytes=await deps.browser.image(shot[1]!,shot[2]!,shot[3] as 'before'|'after');
+        response.writeHead(200,{'Content-Type':'image/png','Cache-Control':'no-store','Cross-Origin-Resource-Policy':'same-origin','X-Content-Type-Options':'nosniff'}).end(bytes);
+        return true;
+      }
+      const previewRoute = /^\/api\/conversations\/([^/]+)\/project-preview(?:\/(start|stop|download))?$/.exec(path);
       if (request.method==='GET' && previewRoute && !previewRoute[2]) {
         json(response,200,previews.state(previewRoute[1]!)); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.25.0-p8-pr-ci', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.29.0-hydra-ab', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
@@ -165,10 +174,37 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const uploadLimit = /^\/api\/conversations\/[^/]+\/attachments$/.test(path) ? imageUploadJsonLimit : undefined;
         const body = object(await deps.readJson(request, uploadLimit));
+        const modeRoute = /^\/api\/conversations\/([^/]+)\/collaboration-mode$/.exec(path);
+        if (modeRoute) {
+          if (body.mode !== 'legacy' && body.mode !== 'continuous') throw new AppError(400,'请选择有效的协作模式。');
+          if (Object.keys(body).some(k=>!['mode','requestId','expectedMode'].includes(k))) throw new AppError(400,'设置包含未知字段。');
+          const cid=modeRoute[1]!, mode=body.mode, key=id(body.requestId);
+          const result=store.artifacts.port.tx(()=>store.artifacts.port.command('room-mode:'+cid+':'+key,body,()=>{
+            const room=store.workbench.conversation(cid);
+            if (room.archivedAt || room.deletedAt || (body.expectedMode!==undefined && (room.collaborationMode??'legacy')!==body.expectedMode)) throw new AppError(409,'会话设置已变化，请刷新后重试。');
+            store.setCollaborationMode(cid,mode); return {mode};
+          }));
+          json(response,200,result.result); return true;
+        }
+        const obligationRoute = /^\/api\/conversations\/([^/]+)\/obligations\/([^/]+)\/(signal|accept|cancel|retry)$/.exec(path);
+        if (obligationRoute) {
+          const [,cid,oid,operation]=obligationRoute;
+          const keys=operation==='signal'?['requestId','condition','summary','waitId','expectedRevision']:['requestId','reason','expectedRevision'];
+          if (Object.keys(body).some(k=>!keys.includes(k))) throw new AppError(400,'操作包含未知字段。');
+          const requestId=id(body.requestId), rowId=id(oid);
+          const expectedRevision=revision(body.expectedRevision,'委托版本',1);
+          const room=store.workbench.conversation(cid!);
+          if(room.archivedAt||room.deletedAt) throw new AppError(409,'请先恢复会话。');
+          const result=operation==='signal'
+            ? store.obligations.signal(cid!,rowId,{requestId,expectedRevision,condition:field(body.condition,'等待条件',1000),summary:field(body.summary,'观察结果',2000),waitId:id(body.waitId)})
+            : await store.obligations.decide(cid!,rowId,{requestId,expectedRevision,decision:operation==='accept'?'accept':operation==='retry'?'retry':'cancel',...(body.reason!==undefined?{reason:field(body.reason,'原因',1000)}:{})});
+          engine.kick(); json(response,200,result); return true;
+        }
         if (previewRoute?.[2]) {
           const state = previewRoute[2]==='start'
-            ? await previews.start(previewRoute[1]!,body.previousId,body.grantRevision)
-            : previews.end(previewRoute[1]!,body.id);
+            ? previews.start(previewRoute[1]!,body.previousId,body.grantRevision,body.mode==='service'?'service':'static')
+            : previewRoute[2]==='download' ? previews.approveDownload(previewRoute[1]!,body.id,body.lock)
+            : await previews.endAndWait(previewRoute[1]!,body.id);
           json(response,200,state); return true;
         }
         if(path.startsWith('/api/native-history/')){
@@ -378,7 +414,10 @@ export function collaborationHttp(deps: HttpDependencies) {
         if (send) {
           if (body.deliveryMode !== undefined && !['next_turn', 'continue_current'].includes(String(body.deliveryMode))) throw new AppError(400, '输入投递模式无效。');
           if (body.resolveWhenIdle !== undefined && typeof body.resolveWhenIdle !== 'boolean') throw new AppError(400, '空闲解析必须为布尔值。');
-          const result = store.projects.submit(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.privateTo !== undefined ? { privateTo: memberIds(body.privateTo) } : {}), ...(body.excerptRefs !== undefined ? { excerptRefs: body.excerptRefs as import('../../shared/collaboration.js').MessageExcerpt[] } : {}), ...(body.excerptTargets !== undefined ? { excerptTargets: memberIds(body.excerptTargets) } : {}), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) });
+          const result = store.projects.submit(send[1]!, { content: field(body.content ?? '', '消息', 20_000, true), ...(body.privateTo !== undefined ? { privateTo: memberIds(body.privateTo) } : {}), ...(body.excerptRefs !== undefined ? { excerptRefs: body.excerptRefs as import('../../shared/collaboration.js').MessageExcerpt[] } : {}), ...(body.excerptTargets !== undefined ? { excerptTargets: memberIds(body.excerptTargets) } : {}), ...(body.attachmentIds !== undefined ? { attachmentIds: Array.isArray(body.attachmentIds) ? body.attachmentIds.map(id) : (() => { throw new AppError(400, '附件列表无效。'); })() } : {}), ...(body.replyTo ? { replyTo: id(body.replyTo) } : {}), requestId: field(body.requestId, '请求标识', 200), ...(body.deliveryMode ? { deliveryMode: body.deliveryMode as 'next_turn' | 'continue_current' } : {}), ...(body.resolveWhenIdle ? { resolveWhenIdle: true } : {}) }, () => {
+            const preview = previews.state(send[1]!);
+            return preview.mode === 'service' && preview.status === 'running';
+          });
           if ('intent' in result) { json(response, result.intent.state === 'cancelled' ? 200 : 202, result); return true; }
           engine.kick(); json(response, result.replayed ? 200 : 201, result); return true;
         }

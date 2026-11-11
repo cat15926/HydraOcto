@@ -23,6 +23,8 @@ import { verifyWorkspace, WorkbenchService } from './workbench.js';
 import { ArtifactService } from './artifacts.js';
 import { InteractionService } from './interactions.js';
 import { CooperationService, compareSources } from './cooperation.js';
+import { RoomMemberService } from './room-members.js';
+import { migrateObligations } from './obligations.js';
 import { OrdinaryTaskService } from './tasks.js';
 
 const id = () => randomUUID();
@@ -34,8 +36,13 @@ export interface Admission { batch: DispatchBatch; invocations: CollaborationInv
 interface FailureProof { sourceId: string; responseId: string; invocationId: string; callerMemberId: string; callerInvocationId: string; identity: 'strict' }
 
 /** One SQLite transaction covers each domain transition; no provider calls inside. */
+import { ObligationService } from './obligations.js';
+import type { ObligationDelegation } from '../../shared/obligations.js';
+
 export class CollaborationStore {
+  readonly obligations: ObligationService;
   readonly db;
+  readonly roomMembers: RoomMemberService;
   readonly tasks: OrdinaryTaskService;
   readonly artifacts: ArtifactService;
   readonly interactions: InteractionService;
@@ -52,6 +59,8 @@ export class CollaborationStore {
   private emitted: CollaborationEvent[] | undefined;
   constructor(readonly owner: Store, readonly options: { mcpReaders?: McpReaders; workspace?: string; artifactDir?: string; singleProjectVm?: boolean; clock?: () => number; projectWorkAvailability?: (member: Member, account: CollaborationAccount, grant?: Conversation['workspaceGrant']) => { available: boolean; reason?: string } } = {}) {
     this.db = owner.db;
+    this.roomMembers = new RoomMemberService(this.db);
+    this.obligations = new ObligationService(this);
     this.tasks = new OrdinaryTaskService({ db: this.db, tx: fn => this.tx(fn), command: (key, input, fn) => this.command(key, input, fn),
       invocation: key => this.invocation(key), saveInvocation: i => this.saveInvocation(i), contract: key => this.contract(key), addSource: input => this.addSource(input),
       message: (conversationId, content, sourceId) => this.addMessage({ conversationId, content, sourceId, author: 'system' }), event: (conversationId, type, data) => this.event(conversationId, type, data) });
@@ -134,10 +143,12 @@ export class CollaborationStore {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id),
         state TEXT NOT NULL, value TEXT NOT NULL
       ); CREATE INDEX IF NOT EXISTS cc_project_intents_pending ON cc_project_intents(conversation_id,state)`);
-      if (version > 13) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 14) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
-      if (version === 13) return;
-      if (version >= 2 && version < 13) { this.db.exec('UPDATE cc_schema SET version=13'); return; }
+      this.roomMembers.migrate(version < 14);
+      migrateObligations(this.db);
+      if (version === 14) return;
+      if (version >= 2 && version < 14) { this.db.exec('UPDATE cc_schema SET version=14'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -154,7 +165,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(13)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(14)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }
@@ -193,7 +204,18 @@ export class CollaborationStore {
     const publicProject = snapshotOrigin === 'admission' && source.kind === 'user' && !source.visibility && !source.projectConsultation &&
       !source.excerptRefs?.length && !detail.conversation.importedFor && grant?.mode === 'project-work' && grant.memberIds?.includes(i.memberId) &&
       ['codex-app-server','claude-cli'].includes(i.member.carrier);
-    return { id: id(), invocationId: i.id, primarySourceId: source.id, ...(publicProject ? {webResearch:true as const} : {}),
+    const peerBrowser = snapshotOrigin==='admission' && source.kind==='a2a' && !source.visibility && !source.projectReview &&
+      !source.excerptRefs?.length && !detail.conversation.importedFor && source.parentInvocationId && grant?.mode==='project-work' &&
+      ['claude-cli','codex-app-server'].includes(i.member.carrier) && grant.memberIds?.includes(i.memberId) && !!grant.memberBindings?.[i.memberId] &&
+      grant.memberBindings[i.memberId]===this.workbench.projectMemberBinding(i.memberId) &&
+      this.invocation(source.parentInvocationId).conversationId===i.conversationId &&
+      this.contract(source.parentInvocationId).projectBrowser && this.contract(source.parentInvocationId).workspaceGrant?.revision===grant.revision;
+    const roomMember = snapshotOrigin === 'admission' ? i.roomMember : undefined;
+    const boundObligation = roomMember && this.obligations.isBoundSource(source.id);
+    const obligationPolicy = roomMember && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
+      !source.crossRef && !source.actionRef && (!source.projectReview || boundObligation) &&
+      (source.kind === 'user' || boundObligation || !!source.taskRef);
+    return { ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
       ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private verifyProjectWork(source: SourceWork, memberId: string, grant: Conversation['workspaceGrant']) {
@@ -223,7 +245,7 @@ export class CollaborationStore {
       return true;
     } catch { return false; }
   }
-  requireProjectCapability(id: string, key:'webResearch'|'gitDelivery') {
+  requireProjectCapability(id: string, key:'webResearch'|'gitDelivery'|'projectPreview'|'projectBrowser') {
     const contract = this.contract(id), run = this.invocation(id), grant = contract.workspaceGrant;
     const current = this.workbench.conversation(run.conversationId).workspaceGrant;
     if (!contract[key] || contract.visibility || contract.projectReview || contract.toolPolicyVersion !== 'cross-action-v1' ||
@@ -233,7 +255,7 @@ export class CollaborationStore {
       throw new AppError(409,'原委托或项目授权已变化，请重新发起请求。');
     }
     this.visibility.validateInvocation(id);
-    this.visibility.assertTool(id,key === 'webResearch' ? 'project_web_read' : 'project_git_deliver');
+    this.visibility.assertTool(id,key === 'webResearch' ? 'project_web_read' : key==='projectPreview' ? 'project_service_start' : key==='projectBrowser' ? 'project_browser_check' : 'project_git_deliver');
     this.validateContract(contract);
     verifyWorkspace(grant);
     return grant;
@@ -243,6 +265,11 @@ export class CollaborationStore {
     return rows.map(row => (JSON.parse(row.value) as AcceptanceEvidence).detail);
   }
   private validateContract(c: ExecutionContractSnapshot): void {
+    if (c.roomMember) {
+      const run = this.invocation(c.invocationId);
+      this.roomMembers.assertCurrent(c.roomMember, run.conversationId, run.memberId);
+      if (run.roomMember?.id !== c.roomMember.id) throw new AppError(409, '执行与冻结契约的成员身份不一致。', 'room_member_conflict');
+    }
     if (c.projectReview) {
       const source = this.get<SourceWork>('cc_sources',c.primarySourceId!);
       this.projectRevisions.validateRetest(source,c.memberSnapshot.id);
@@ -323,13 +350,29 @@ export class CollaborationStore {
   }
   create(input: CreateConversation): { conversation: Conversation; replayed: boolean } {
     checkText(input.title, 'title', 200);
+    if (input.collaborationMode !== undefined && !['continuous','legacy'].includes(input.collaborationMode)) throw new AppError(400, '协作模式无效。');
     if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 12 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
     return this.tx(() => {
       const result = this.command(`conversation:${input.requestId}`, input, () => {
         for (const memberId of input.memberIds) if (!this.get<Member>('cc_members', memberId).enabled) throw new AppError(400, 'Member disabled.');
-        const createdAt = now(); const conversation: Conversation = { id: id(), title: input.title, memberIds: [...input.memberIds], defaultMemberId: input.defaultMemberId, createdAt, updatedAt: createdAt, revision: 1 };
-        this.db.prepare('INSERT INTO cc_conversations VALUES(?,?)').run(conversation.id, JSON.stringify(conversation)); this.event(conversation.id, 'conversation.created', { conversationId: conversation.id }); return conversation;
+        const createdAt = now(); const conversation: Conversation = { id: id(), collaborationMode: input.collaborationMode ?? 'continuous', title: input.title, memberIds: [...input.memberIds], defaultMemberId: input.defaultMemberId, createdAt, updatedAt: createdAt, revision: 1 };
+        this.db.prepare('INSERT INTO cc_conversations VALUES(?,?)').run(conversation.id, JSON.stringify(conversation));
+        this.roomMembers.sync(conversation.id, conversation.memberIds); this.event(conversation.id, 'conversation.created', { conversationId: conversation.id }); return conversation;
       }); return { conversation: result.result, replayed: result.replayed };
+    });
+  }
+  setCollaborationMode(conversationId: string, mode: NonNullable<Conversation['collaborationMode']>): Conversation {
+    if (!['continuous','legacy'].includes(mode)) throw new AppError(400, '协作模式无效。');
+    return this.tx(() => {
+      const c = this.get<Conversation>('cc_conversations', conversationId);
+      if (c.deletedAt || c.archivedAt) throw new AppError(409, '请先恢复会话。');
+      if (c.importedFor && mode === 'continuous') throw new AppError(409, '导入的个人历史会话保留原有模式。');
+      if ((c.collaborationMode ?? 'legacy') === mode) return c;
+      if (mode === 'legacy' && this.obligations.list(c.id).some(o => o.state !== 'delivered' && o.state !== 'cancelled')) {
+        throw new AppError(409, '会话还有未结责任，请先交付或取消后再关闭持续跟进。', 'open_obligations');
+      }
+      c.collaborationMode = mode; c.revision = (c.revision ?? 1) + 1; c.updatedAt = now();
+      this.put('cc_conversations', c); this.configurationChanged(); this.event(c.id, 'conversation.updated', { collaborationMode: mode }); return c;
     });
   }
   importReplay(token: string, first: number, last: number): { conversationId: string } | undefined {
@@ -342,7 +385,7 @@ export class CollaborationStore {
                  origin: Omit<ImportedOrigin, 'anchor' | 'timestamp' | 'digest'>) {
     return this.tx(() => this.command('native-import:' + token, { first, last }, () => {
       const title = origin.carrier === 'codex-app-server' ? '导入的 Codex 会话' : '导入的 Claude Code 会话';
-      const { conversation, replayed } = this.create({ title, memberIds: [memberId], defaultMemberId: memberId, requestId: id() });
+      const { conversation, replayed } = this.create({ title, collaborationMode:'legacy', memberIds: [memberId], defaultMemberId: memberId, requestId: id() });
       if (replayed) throw new AppError(409, '无法创建新会话，请重试。');
       conversation.importedFor = memberId;
       this.put('cc_conversations', conversation);
@@ -368,7 +411,9 @@ export class CollaborationStore {
       const removed = detail.conversation.memberIds.filter(m => !input.memberIds.includes(m));
       if (detail.deliveries.some(d => removed.includes(d.memberId) && ['pending', 'held'].includes(d.status)) || detail.invocations.some(i => removed.includes(i.memberId) && this.busy(i))) throw new AppError(409, 'A removed member still owns pending or active work.');
       const conversation = { ...detail.conversation, memberIds: [...input.memberIds], defaultMemberId: input.defaultMemberId, ...(input.preferredMemberIds ? { preferredMemberIds: [...input.preferredMemberIds] } : { preferredMemberIds: detail.conversation.preferredMemberIds?.filter(m => input.memberIds.includes(m)) }), ...(input.routingMode ? { routingMode: input.routingMode } : {}), updatedAt: now(), revision: (detail.conversation.revision ?? 1) + 1 };
-      if (hash(detail.conversation.memberIds) !== hash(input.memberIds)) this.visibility.changed(conversationId);
+      if (hash(detail.conversation.memberIds) !== hash(input.memberIds)) {
+        this.roomMembers.sync(conversationId, input.memberIds); this.visibility.changed(conversationId);
+      }
       this.put('cc_conversations', conversation); this.configurationChanged(); this.cross.sweep(); this.event(conversationId, 'conversation.updated', { memberIds: input.memberIds, defaultMemberId: input.defaultMemberId }); return conversation;
     });
   }
@@ -428,11 +473,13 @@ export class CollaborationStore {
     const conversation = this.get<Conversation>('cc_conversations', input.conversationId);
     if ((!input.requestedTargets.length && !(input.bindingState === 'unresolved' && input.kind === 'user')) || input.requestedTargets.some(t => !conversation.memberIds.includes(t))) throw new AppError(400, 'Targets must belong to this conversation.');
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
-    const source: SourceWork = { ...input, id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
+    const parent = input.parentInvocationId ? this.invocation(input.parentInvocationId) : undefined;
+    const instanceBound = parent?.conversationId === conversation.id ? !!parent.roomMember : conversation.collaborationMode === 'continuous';
+    const source: SourceWork = { ...input, ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
     this.db.prepare('INSERT INTO cc_sources VALUES(?,?,?,?)').run(source.id, source.conversationId, sequence, JSON.stringify(source));
     for (const memberId of source.requestedTargets) {
       const enabled = this.get<Member>('cc_members', memberId).enabled;
-      const delivery: Delivery = { id: id(), sourceId: source.id, memberId, status: enabled ? 'pending' : 'held', ...(enabled ? {} : { holdReason: '成员已禁用；需要显式恢复。' }), revision: 1 };
+      const delivery: Delivery = { id: id(), sourceId: source.id, memberId, ...(instanceBound && { roomMember: this.roomMembers.resolve(conversation.id, memberId) }), status: enabled ? 'pending' : 'held', ...(enabled ? {} : { holdReason: '成员已禁用；需要显式恢复。' }), revision: 1 };
       this.db.prepare('INSERT INTO cc_deliveries VALUES(?,?,?,?,?,?)').run(delivery.id, source.id, memberId, null, delivery.status, JSON.stringify(delivery));
     }
     this.cooperation.changed(source.conversationId); this.event(source.conversationId, 'source.admitted', { sourceId: source.id, kind: source.kind, targets: source.requestedTargets }); return source;
@@ -441,7 +488,7 @@ export class CollaborationStore {
     const conversation = this.get<Conversation>('cc_conversations', conversationId);
     const sources = this.rows<SourceWork>('cc_sources', 'WHERE conversation_id=? ORDER BY sequence', [conversationId]);
     const sourcesIds = new Set(sources.map(s => s.id)); const invocations = this.invocations(conversationId); const invocationIds = new Set(invocations.map(i => i.id));
-    return { conversation, projectExports: this.projectExports.list(conversationId), projectIntents: this.projects.pending(conversationId), ...this.cross.detail(conversationId), ...this.actions.detail(conversationId), ...this.memory.detail(conversationId), readCursor: this.visibility.readCursor(conversationId), attachments: this.workbench.attachments(conversationId), ...this.artifacts.detail(conversationId), ...this.cooperation.detail(conversationId), interactions: this.interactions.list(conversationId), messages: this.rows<ConversationMessage>('cc_messages', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), sources,
+    return { conversation, obligations: this.obligations.list(conversationId), projectExports: this.projectExports.list(conversationId), projectIntents: this.projects.pending(conversationId), ...this.cross.detail(conversationId), ...this.actions.detail(conversationId), ...this.memory.detail(conversationId), readCursor: this.visibility.readCursor(conversationId), attachments: this.workbench.attachments(conversationId), ...this.artifacts.detail(conversationId), ...this.cooperation.detail(conversationId), interactions: this.interactions.list(conversationId), messages: this.rows<ConversationMessage>('cc_messages', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), sources,
       deliveries: this.rows<Delivery>('cc_deliveries', 'ORDER BY rowid').filter(d => sourcesIds.has(d.sourceId)), batches: this.rows<DispatchBatch>('cc_batches', 'ORDER BY rowid').filter(b => sourcesIds.has(b.sourceId)), invocations,
       responses: this.rows<CollaborationResponse>('cc_responses', 'WHERE conversation_id=? ORDER BY rowid', [conversationId]), consumptions: this.rows<Consumption>('cc_consumptions', 'ORDER BY rowid').filter(c => sourcesIds.has(c.sourceId)),
       evidence: this.rows<AcceptanceEvidence>('cc_evidence', 'ORDER BY rowid').filter(e => invocationIds.has(e.invocationId)), events: this.events(0, conversationId),
@@ -520,17 +567,17 @@ export class CollaborationStore {
   /** Reads and claims synchronously under the same write lock: there is no async resolver snapshot. */
   admitNext(): Admission | undefined {
     return this.tx(() => {
-      this.tasks.reconcile(); this.cross.sweep(); this.actions.reconcile(); this.artifacts.sweep(); this.interactions.sweep(); this.cooperation.reconcileDeliveries();
+      this.tasks.reconcile(); this.obligations.reconcile(); this.cross.sweep(); this.actions.reconcile(); this.artifacts.sweep(); this.interactions.sweep(); this.cooperation.reconcileDeliveries();
       for (const conversation of this.list().filter(c => !c.deletedAt).reverse()) {
         const detail = this.detail(conversation.id); const busy = new Set(detail.invocations.filter(i => this.busy(i)).map(i => i.memberId)); const held = new Set<string>();
         for (const source of this.cooperation.sources(conversation.id)) {
           if (source.withdrawnAt) continue;
           if (source.bindingState === 'unresolved') { if (busy.size || !this.cooperation.resolveUnbound(source)) break; return this.admitNext(); }
           const outstanding = detail.deliveries.filter(d => d.sourceId === source.id && ['pending', 'held'].includes(d.status)); if (!outstanding.length) continue;
-          const taskHold = this.visibility.admissionReason(source) ?? this.actions.admissionReason(source) ?? this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
+          const taskHold = this.visibility.admissionReason(source) ?? this.obligations.admissionReason(source) ?? this.actions.admissionReason(source) ?? this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
           if (taskHold) { for (const d of outstanding) if (d.status === 'pending') { d.status = 'held'; d.holdReason = taskHold; d.revision++; this.saveDelivery(d); } continue; }
           // Bound recipients never silently fall back to a new default member.
-          for (const d of outstanding) if (d.status === 'pending' && (!this.get<Member>('cc_members', d.memberId).enabled || !conversation.memberIds.includes(d.memberId))) { d.status = 'held'; d.holdReason = '成员已禁用或离开会话；需要显式恢复。'; d.revision++; this.saveDelivery(d); this.event(conversation.id, 'delivery.held', { deliveryId: d.id }); }
+          for (const d of outstanding) if (d.status === 'pending' && ((d.roomMember && !this.roomMembers.isCurrent(d.roomMember)) || !this.get<Member>('cc_members', d.memberId).enabled || !conversation.memberIds.includes(d.memberId))) { d.status = 'held'; d.holdReason = '成员已禁用或离开会话；需要显式恢复。'; d.revision++; this.saveDelivery(d); this.event(conversation.id, 'delivery.held', { deliveryId: d.id }); }
           for (const d of outstanding.filter(d => d.status === 'pending')) { try { this.workbench.resolveMember(this.get<Member>('cc_members', d.memberId)); } catch { d.status = 'held'; d.holdReason = '成员账户或默认模型不可用；请修正配置后重验。'; d.revision++; this.saveDelivery(d); } }
           if (source.projectWork || source.projectReview) {
             for (const delivery of outstanding.filter(d => d.status === 'pending')) {
@@ -553,7 +600,7 @@ export class CollaborationStore {
           const invocations: CollaborationInvocation[] = [];
           for (const delivery of targets) {
             const member = this.workbench.resolveMember(this.get<Member>('cc_members', delivery.memberId)); const account = this.get<CollaborationAccount>('cc_accounts', member.accountId);
-            const invocation: CollaborationInvocation = { id: id(), conversationId: conversation.id, batchId: batch.id, responseId: id(), memberId: member.id, member, status: 'prepared', acceptance: 'unknown', continuity: 'unknown', teardown: 'unknown', dispatchStarted: false, createdAt, invocationRevision: 1, cancelRevision: 0, recoveryState: 'none' };
+            const invocation: CollaborationInvocation = { ...(delivery.roomMember && {roomMember:delivery.roomMember}), id: id(), conversationId: conversation.id, batchId: batch.id, responseId: id(), memberId: member.id, member, status: 'prepared', acceptance: 'unknown', continuity: 'unknown', teardown: 'unknown', dispatchStarted: false, createdAt, invocationRevision: 1, cancelRevision: 0, recoveryState: 'none' };
             const response: CollaborationResponse = { id: invocation.responseId, invocationId: invocation.id, conversationId: conversation.id, memberId: member.id, status: 'prepared', content: '', inputSourceIds: [source.id], inputRevision: 1, createdAt };
             this.db.prepare('INSERT INTO cc_invocations VALUES(?,?,?,?,?,?,?)').run(invocation.id, invocation.conversationId, batch.id, member.id, response.id, JSON.stringify(account), JSON.stringify(invocation));
             this.db.prepare('INSERT INTO cc_responses VALUES(?,?,?,?)').run(response.id, invocation.id, conversation.id, JSON.stringify(response));
@@ -565,7 +612,7 @@ export class CollaborationStore {
             }
             delivery.status = 'consumed'; delivery.responseId = response.id; delivery.revision++; this.saveDelivery(delivery);
             this.cooperation.changed(conversation.id);
-            this.tasks.bindAdmission(source, invocation); this.actions.bind(source, invocation);
+            this.tasks.bindAdmission(source, invocation); this.obligations.bindAdmission(source,invocation); this.actions.bind(source, invocation);
             const contract = this.makeContract(invocation, batch); invocation.contractId = contract.id;
             this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(contract.id, invocation.id, JSON.stringify(contract)); this.put('cc_invocations', invocation);
             invocations.push(invocation);
@@ -630,6 +677,29 @@ export class CollaborationStore {
     return b;
   }
   private validateSessionEvent(i: CollaborationInvocation, e: RuntimeEvent): void {
+    if (i.roomMember) {
+      this.roomMembers.assertCurrent(i.roomMember, i.conversationId, i.memberId);
+      const expected = {conversationId: i.conversationId, memberId: i.memberId, invocationId: i.id, roomMemberId: i.roomMember.id, responseId: i.responseId};
+      for (const [key, value] of Object.entries(expected)) if (e.detail[key] !== undefined && e.detail[key] !== value) {
+        throw new AppError(409, '回执与执行的房间成员身份不一致。', 'room_member_conflict');
+      }
+    }
+    if (i.roomMember && typeof e.detail.nativeSessionId === 'string') {
+      const sid = e.detail.nativeSessionId;
+      if ((i.nativeSessionId && sid !== i.nativeSessionId) ||
+          (i.sessionPlan?.nativeSessionId && sid !== i.sessionPlan.nativeSessionId)) {
+        throw new AppError(409, '回执与本轮原生会话不一致。', 'session_identity_conflict');
+      }
+      if (!i.nativeSessionId && this.db.prepare(`SELECT 1 FROM cc_invocations
+        WHERE json_extract(value,'$.nativeSessionId')=? AND json_extract(value,'$.member.carrier')=?
+        AND (conversation_id<>? OR member_id<>? OR COALESCE(json_extract(value,'$.roomMember.id'),'')<>?) LIMIT 1`)
+          .get(sid, i.member.carrier, i.conversationId, i.memberId, i.roomMember.id)) {
+        throw new AppError(409, '该原生会话属于其他房间成员实例。', 'session_identity_conflict');
+      }
+      if (i.nativeTurnId && typeof e.detail.nativeTurnId === 'string' && i.nativeTurnId !== e.detail.nativeTurnId) {
+        throw new AppError(409, '回执与本轮原生轮次不一致。', 'session_identity_conflict');
+      }
+    }
     if (!i.sessionPlan?.bindingId) return;
     if (e.kind === 'session_replaced') {
       const exposed = this.rows<AcceptanceEvidence>('cc_evidence', 'WHERE invocation_id=?', [i.id]).some(x => x.kind === 'exposed' && x.detail.source !== 'platform_prompt');
@@ -692,7 +762,7 @@ export class CollaborationStore {
       this.tasks.onInvocationChanged(i);
     });
   }
-  requestCollaboration(invocationId: string, callId: string, input: { targets: string[]; content: string; projectReview?: unknown }, maxDepth = 8): { sourceId: string; targets: string[]; replayed: boolean } {
+  requestCollaboration(invocationId: string, callId: string, input: { targets: string[]; content: string; projectReview?: unknown; delivery?: ObligationDelegation }, maxDepth = 8): { sourceId: string; targets: string[]; replayed: boolean } {
     checkText(callId, 'callId', 200); checkText(input.content, 'content'); this.visibility.assertTool(invocationId, 'collaboration_request');
     return this.tx(() => {
       const i = this.invocation(invocationId);
@@ -715,18 +785,19 @@ export class CollaborationStore {
           for (const target of input.targets) this.projectReviews.requireGrant(i.conversationId,target,contract.workspaceGrant.revision,contract.workspaceGrant);
           const previous = source.allowReviewRevision && this.cooperation.sources(i.conversationId).find(s=>s.projectReview?.revisionAuthorInvocationId===i.id);
           if (previous && canonical(previous.requestedTargets)===canonical(input.targets)) {
-            if (previous.content!==input.content || canonical(previous.projectReview!.paths)!==canonical(paths)) {
+            if (input.delivery!==undefined || previous.content!==input.content || canonical(previous.projectReview!.paths)!==canonical(paths)) {
               throw new AppError(409,'原评审成员已收到本次委托，请等待评审结果。');
             }
             return {sourceId:previous.id,targets:previous.requestedTargets};
           }
-          const eligible = source.allowReviewRevision && !previous && contract.workspaceGrant.reviewMode==='project' &&
+          const eligible = input.delivery===undefined && source.allowReviewRevision && !previous && contract.workspaceGrant.reviewMode==='project' &&
             input.targets.length===1 && source.depth + 3 <= maxDepth;
           projectReview = {paths,grantRevision:contract.workspaceGrant.revision,originalSourceId:source.id,
             ...(eligible ? {revisionAuthorInvocationId:i.id} : {}),
             ...(contract.workspaceGrant.reviewMode === 'project' ? {mode:'project' as const, ...(contract.mayRunProjectNpmTest ? {npmTest:true as const} : {}), ...(contract.projectNpmChecks ? {projectNpmChecks:true as const} : {})} : {})};
         }
         const target = this.addSource({ conversationId: i.conversationId, kind: 'a2a', content: input.content, requestedTargets: input.targets, parentInvocationId: i.id, authorMemberId: i.memberId, depth: source.depth + 1, ...(projectReview ? {projectReview} : {}) });
+        if (input.delivery!==undefined) this.obligations.bindDelegation(i.id,target,input.delivery);
         this.addMessage({ conversationId: i.conversationId, author: 'member', memberId: i.memberId, sourceId: target.id, content: input.content });
         return { sourceId: target.id, targets: target.requestedTargets };
       }); return { ...result.result, replayed: result.replayed };
@@ -742,6 +813,7 @@ export class CollaborationStore {
         if (i.status !== 'interrupted' || !['service_restart', 'service_stop'].includes(i.interruptionCause ?? '') || i.recoveryState !== 'pending' || (i.cancelRevision ?? 0) !== 0) throw new AppError(409, '执行不允许修正终态，取消或既有结果不会被覆盖。', 'recovery_not_allowed');
         this.event(i.conversationId, 'recovery.previous_result', { invocationId, status: i.status, content: response.content, finishedAt: i.finishedAt, recoveryId });
       } else if (terminal.has(i.status)) { if (i.status === status && response.content === content) return; throw new AppError(409, 'Terminal replay conflicts with saved result.', 'terminal_conflict'); }
+      if (i.roomMember) this.roomMembers.assertCurrent(i.roomMember, i.conversationId, i.memberId);
       if (expectedRevision !== undefined && response.inputRevision !== expectedRevision) throw new AppError(409, 'Response inputs changed.', 'inputs_changed');
       if (i.status === 'cancel_requested') { status = i.teardown === 'confirmed' ? 'cancelled' : 'interrupted'; content = '用户已请求停止；实际退出证据单独记录。'; }
       const callers = new Set<string>();
@@ -750,7 +822,7 @@ export class CollaborationStore {
         const receipt = this.rows<Consumption>('cc_consumptions', 'WHERE source_id=? AND response_id=?', [source.id, response.id])[0];
         const delivery = receipt && this.get<Delivery>('cc_deliveries', receipt.deliveryId);
         if (proof.invocationId !== i.id || proof.responseId !== response.id || proof.identity !== 'strict' || source.conversationId !== i.conversationId || caller.conversationId !== i.conversationId || caller.memberId !== proof.callerMemberId || source.authorMemberId !== caller.memberId || source.parentInvocationId !== caller.id || !response.inputSourceIds.includes(source.id) || receipt?.memberId !== i.memberId || delivery?.responseId !== response.id || delivery?.status !== 'consumed') throw new AppError(409, 'Failure return proof is inconsistent.', 'failure_proof_conflict');
-        if (!privateScope(this.contract(i.id).visibility) && source.kind !== 'a2a_failure' && !source.withdrawnAt && caller.memberId !== i.memberId) callers.add(caller.memberId);
+        if (!privateScope(this.contract(i.id).visibility) && source.kind !== 'a2a_failure' && !this.obligations.isBoundSource(source.id) && !source.withdrawnAt && caller.memberId !== i.memberId && (!caller.roomMember || this.roomMembers.isCurrent(caller.roomMember))) callers.add(caller.memberId);
       }
       i.status = status; i.finishedAt = now(); if (status !== 'succeeded') i.error = content; else delete i.error;
       if (status === 'interrupted') { i.interruptionCause ??= (i.cancelRevision ?? 0) > 0 ? 'user_cancel' : interruptionCause ?? 'service_stop'; i.recoveryState = 'pending'; }
@@ -763,8 +835,8 @@ export class CollaborationStore {
         message.content = content; message.revision = (message.revision ?? 1) + 1; this.put('cc_messages', message);
       } else this.addMessage({ conversationId: i.conversationId, author: 'member', memberId: i.memberId, responseId: response.id, content });
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
-      if (callers.size) this.addSource({ id: response.id, conversationId: i.conversationId, kind: 'a2a_failure', content: `成员 ${i.memberId} 的执行失败：${content}`, requestedTargets: [...callers], authorMemberId: i.memberId, depth: source.depth + 1 });
-      if (status === 'succeeded' && !source.projectReview && !source.projectRepair && !source.actionRef && !privateScope(this.contract(i.id).visibility)) {
+      if (callers.size) this.addSource({ id: response.id, conversationId: i.conversationId, kind: 'a2a_failure', parentInvocationId: i.id, content: `成员 ${i.memberId} 的执行失败：${content}`, requestedTargets: [...callers], authorMemberId: i.memberId, depth: source.depth + 1 });
+      if (status === 'succeeded' && !this.obligations.isBoundSource(source.id) && !source.projectReview && !source.projectRepair && !source.actionRef && !privateScope(this.contract(i.id).visibility)) {
         const handingOff = new Set(this.tasks.handoffs(i.conversationId).filter(h => h.executionRef?.invocationId === i.id && ['waiting', 'applied'].includes(h.state)).map(h => h.toMemberId));
         const mentioned = this.mentions(content, i.conversationId, true);
         // A writer can name the reviewer again while reporting a successful handoff.
@@ -774,9 +846,11 @@ export class CollaborationStore {
               .flatMap(review => review.requestedTargets)
           : [];
         const mentions = mentioned.filter(m => m !== i.memberId && !handingOff.has(m) && !dispatchedReviewers.includes(m)).slice(0, 2);
-        if (mentions.length && (batch.mode === 'parallel' || source.groupId)) this.event(i.conversationId, 'routing.text_suppressed', { invocationId, reason: 'parallel_batch' });
+        if (mentions.length && i.roomMember) this.event(i.conversationId, 'routing.text_suppressed', {invocationId, reason:'structured_requests_only'});
+        else if (mentions.length && (batch.mode === 'parallel' || source.groupId)) this.event(i.conversationId, 'routing.text_suppressed', { invocationId, reason: 'parallel_batch' });
         else if (mentions.length && source.depth < maxDepth) this.addSource({ conversationId: i.conversationId, kind: 'mention', content, requestedTargets: mentions, parentInvocationId: i.id, authorMemberId: i.memberId, depth: source.depth + 1 });
       }
+      this.obligations.onFinish(i);
       if (!recoveryId) this.projectRevisions.onFinished(i,source);
       this.tasks.onInvocationChanged(i);
       this.event(i.conversationId, `invocation.${status}`, { invocationId, responseId: response.id, failureTargets: [...callers] });
@@ -876,7 +950,7 @@ export class CollaborationStore {
         if (d.revision !== input.expectedDeliveryRevision || source.revision !== input.expectedSourceRevision) throw new AppError(409, '来源或投递已变化，请刷新后重新核查。', 'delivery_version_conflict');
         if (d.status !== 'held') throw new AppError(409, '仅阻塞中的投递需要重验。', 'delivery_not_held');
         const conversation = this.get<Conversation>('cc_conversations', source.conversationId); const member = this.get<Member>('cc_members', d.memberId);
-        const taskHold = this.visibility.admissionReason(source) ?? this.actions.admissionReason(source) ?? this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
+        const taskHold = this.visibility.admissionReason(source) ?? this.obligations.admissionReason(source) ?? this.actions.admissionReason(source) ?? this.tasks.admissionReason(source) ?? this.artifacts.admissionReason(source);
         if (d.handoffId && this.cooperation.handoffs().some(h => h.id === d.handoffId && h.state !== 'not_accepted')) throw new AppError(409, '此投递须核查原追加，不可恢复为新执行。');
         if (source.withdrawnAt) throw new AppError(409, '来源已撤回。');
         let accountHold: string | undefined; try { this.workbench.resolveMember(member); } catch { accountHold = '成员账户或默认模型不可用，请先修正配置。'; }
@@ -909,7 +983,7 @@ export class CollaborationStore {
       this.artifacts.target(i.conversationId, i.memberId);
       const additions = sources.map(snapshot => {
         const s = this.get<SourceWork>('cc_sources', snapshot.id), d = this.rows<Delivery>('cc_deliveries', 'WHERE source_id=? AND member_id=?', [s.id, i.memberId])[0];
-        if (s.conversationId !== i.conversationId || s.revision !== snapshot.revision || hash(s.content) !== hash(snapshot.content) || s.withdrawnAt || !d || r.inputSourceIds.includes(s.id) || (kind === 'append' ? d.status !== 'held' || d.handoffId !== handoffId : !this.cooperation.canConsume(i, s))) throw new AppError(409, '完整输入归并的准确来源或投递已变化。', 'inputs_changed');
+        if (s.conversationId !== i.conversationId || s.revision !== snapshot.revision || hash(s.content) !== hash(snapshot.content) || s.withdrawnAt || !d || d.roomMember?.id !== i.roomMember?.id || r.inputSourceIds.includes(s.id) || (kind === 'append' ? d.status !== 'held' || d.handoffId !== handoffId : !this.cooperation.canConsume(i, s))) throw new AppError(409, '完整输入归并的准确来源或投递已变化。', 'inputs_changed');
         return { s, d };
       });
       if (!additions.length) return;
@@ -943,7 +1017,7 @@ export class CollaborationStore {
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (source.revision !== c.sourceRevision || hash(source.content) !== c.sourceDigest) throw new AppError(409, '来源已变化，不能使用旧执行的输入。', 'inputs_changed');
       const response = this.response(i.responseId); const legacy = c.contextPolicyVersion === 'legacy-history-40-v1';
-      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, webResearch:c.webResearch,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
+      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, obligationPolicy:c.obligationPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
         history: (c.historySnapshot ?? []).map(m => ({ ...m, sequence: m.sequence! })), historySourceSnapshots: c.historySourceSnapshots,
         ...(source.parentInvocationId ? { caller: this.invocation(source.parentInvocationId) } : {}) });
       let assembly = legacy ? undefined : build([]);

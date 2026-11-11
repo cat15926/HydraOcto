@@ -1,3 +1,4 @@
+import { runProjectService } from './project-dev-service.js';
 import { isManagedProbeArgv } from './native-command-approval.js';
 import { checkImageTransport } from './runtime-images.js';
 import { attachOfficialExecutor } from './project-official.js';
@@ -66,6 +67,10 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
     return capabilities;
   };
   return withRuntimeInspection({
+    async runProjectService(request) {
+      if (!vm) throw new Error('请先登记项目 Linux 虚拟机。');
+      await runProjectService(vm,privateRoots,()=>authorTests.size>0,request);
+    },
     projectLoginGuidance:()=>projectLoginGuidance(configuredCodex),
     async runProjectReviewTest(request) {
       if (!vm) throw new Error(vmError ?? '请先登记本机 Linux 项目执行器，再运行评审测试。');

@@ -65,8 +65,9 @@ test('SCH-07/08：parallel最终@受抑制，结构化callback独立准入，工
   } finally { h.owner.close(); }
 });
 
-test('串行最终行首@可接力，代码块内和正文内提及不接力', () => {
+test('旧模式保留串行最终行首@接力，代码块内和正文内提及不接力', () => {
   const h = setup(); try {
+    h.store.setCollaborationMode(h.conversation.id,'legacy');
     h.send('请处理'); const a = h.store.admitNext()!.invocations[0]; finish(h.store, a.id, '正文 @claude 不路由\n```\n@claude 示例\n```\n@third 请复核');
     const d = h.store.detail(h.conversation.id); assert.equal(d.sources.length, 2); assert.equal(d.sources[1].kind, 'mention'); assert.deepEqual(d.sources[1].requestedTargets, ['third']);
   } finally { h.owner.close(); }

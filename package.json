@@ -1,6 +1,6 @@
 {
   "name": "multi-agent-collab",
-  "version": "0.25.0",
+  "version": "0.29.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -19,6 +19,7 @@
     "history:terminal": "node --env-file-if-exists=.env --import tsx scripts/history-terminal.ts"
   },
   "dependencies": {
+    "puppeteer-core": "24.38.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "ws": "8.21.0"

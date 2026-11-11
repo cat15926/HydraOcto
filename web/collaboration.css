@@ -105,3 +105,14 @@
 .cc-action-panel .cc-settings-form { padding: 12px 0; }
 .cc-action-panel select, .cc-action-panel input, .cc-action-panel textarea { max-width: 100%; min-width: 0; }
 .cc-action-panel article + article { border-top: 1px solid #dce5d7; margin-top: 10px; }
+
+.cc-room-follow,.cc-obligation-actions {display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}
+.cc-room-follow p,.cc-obligation-body p {margin:.25rem 0}
+.cc-obligation {margin:.5rem 0;max-width:100%;font-size:.88rem;overflow-wrap:anywhere}
+.cc-obligation summary {cursor:pointer;color:#385b43;padding:.35rem 0}
+.cc-obligation-body {border-inline-start:2px solid #abc1a4;padding:.25rem .8rem;display:grid;gap:.4rem}
+.cc-obligation-child {display:grid;gap:.2rem;padding:.4rem 0}
+.cc-obligation-actions {justify-content:flex-start}
+.cc-obligation-actions form,.cc-obligation-actions label {width:100%}
+.cc-obligation-actions textarea {display:block;width:100%;min-height:3em;box-sizing:border-box}
+.cc-obligation-actions button {margin:.25rem .4rem .25rem 0}

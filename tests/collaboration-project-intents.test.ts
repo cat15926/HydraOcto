@@ -153,7 +153,7 @@ test('P0: original authorizations survive schema 11 migration and restart; priva
     const original = h.owner.db.prepare('SELECT value FROM cc_conversations WHERE id=?').get(h.cid);
     h.owner.db.exec('DROP TABLE cc_project_intents; UPDATE cc_schema SET version=11');
     const upgraded = new CollaborationStore(h.owner);
-    assert.equal(h.owner.db.prepare('SELECT version FROM cc_schema').get()?.version, 13);
+    assert.equal(h.owner.db.prepare('SELECT version FROM cc_schema').get()?.version, 14);
     assert.deepEqual(h.owner.db.prepare('SELECT value FROM cc_conversations WHERE id=?').get(h.cid), original);
     const input = { content: '修改项目文件', requestId: randomUUID() }, waiting = upgraded.projects.submit(h.cid, input);
     assert.ok('intent' in waiting);
@@ -301,4 +301,49 @@ test('P2: a short continuation inherits only the latest completed public assignm
       assert.equal(!!next.source.projectWork,scenario==='same',scenario);
     } finally { h.close(); }
   }
+});
+
+test('short project guidance stays with the active writer; only a later Claude invocation may consume its queued instruction', () => {
+  for (const member of ['codex','claude']) {
+    const h=fixture(true);
+    try {
+      const grant=h.store.workbench.previewWorkspace(h.cid,{path:h.project,mode:'project-work'});
+      h.store.workbench.applyPreview({previewId:grant.id,requestId:randomUUID()},h.cid);
+      const name=member==='codex'?'Codex':'Claude Code';
+      h.store.projects.submit(h.cid,{content:'@'+name+' 修改页面文件',requestId:randomUUID()});
+      const original=h.store.admitNext()!.invocations[0]!;
+      h.store.startInvocation(original.id);
+      h.store.recordEvidence(original.id,{kind:'accepted',detail:{source:'test'}});
+      const input={content:'备注为空时请让保存按钮变灰',requestId:randomUUID()};
+      const result=h.store.projects.submit(h.cid,input);
+      assert.ok('source' in result && result.source.projectWork);
+      const source=result.source;
+      assert.equal(h.store.projects.submit(h.cid,input).source?.id,source.id);
+      const delivery=h.store.detail(h.cid).deliveries.find(d=>d.sourceId===source.id)!;
+      assert.equal(delivery.continuation?.invocationId,original.id);
+      assert.equal(delivery.continuation?.projectGuidance,true);
+      assert.equal(!!delivery.continuation?.fallback,member==='claude');
+      assert.equal(h.store.cooperation.canConsume(original,source),false);
+      h.store.recordEvidence(original.id,{kind:'process_exit',detail:{confirmed:true}});
+      h.store.finish(original.id,'succeeded','原任务已结束');
+      const next=h.store.admitNext()!.invocations[0]!;
+      assert.notEqual(next.id,original.id);assert.equal(h.store.contract(next.id).primarySourceId,source.id);
+      assert.equal(h.store.contract(next.id).projectWork,true);
+    } finally {h.close();}
+  }
+});
+
+test('a running preview alone can start a new project edit; questions and unrelated chat keep their ordinary scope',()=>{
+  const h=fixture(true);
+  try {
+    const g=h.store.workbench.previewWorkspace(h.cid,{path:h.project,mode:'project-work'});
+    h.store.workbench.applyPreview({previewId:g.id,requestId:randomUUID()},h.cid);
+    for (const content of ['另外明天下雨','再解释一下如何校验？','请只讨论，不要修改']) {
+      const r=h.store.projects.submit(h.cid,{content,requestId:randomUUID()},()=>true);
+      assert.ok('source' in r && !r.source.projectWork);
+    }
+    const r=h.store.projects.submit(h.cid,{content:'再加一条校验，备注为空时禁用保存',requestId:randomUUID()},()=>true);
+    assert.ok('source' in r && r.source.projectWork);
+    assert(!h.store.detail(h.cid).deliveries.find(d=>d.sourceId===r.source.id)!.continuation);
+  } finally {h.close();}
 });

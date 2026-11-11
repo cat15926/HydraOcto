@@ -4,16 +4,17 @@ import type { ProjectPreviewState } from '../shared/project-preview';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 import './project-preview.css';
 
-export function ProjectPreviewPanel({conversation,visible,command,selectProject}:{
-  conversation:Conversation;visible:boolean;command:WorkbenchCommand;selectProject:()=>void;
+export function ProjectPreviewPanel({conversation,visible,command,selectProject,instanceId}:{
+  conversation:Conversation;visible:boolean;command:WorkbenchCommand;selectProject?:()=>void;instanceId?:string;
 }) {
   const base='/api/conversations/'+encodeURIComponent(conversation.id)+'/project-preview';
   const [state,setState]=useState<ProjectPreviewState>();
-  const [showLogs,setShowLogs]=useState(false),[expanded,setExpanded]=useState(true);
+  const [showLogs,setShowLogs]=useState(false),[expanded,setExpanded]=useState(!instanceId);
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const revision=useRef(0), pending=useRef(false);
   const primary=useRef<HTMLButtonElement>(null);
   const grant=conversation.workspaceGrant;
+  const [retried,setRetried]=useState<string>();
   useEffect(()=>{ if(state?.status==='failed') setShowLogs(true); },[state?.status]);
   useEffect(()=>{
     if(!visible) return;
@@ -32,18 +33,20 @@ export function ProjectPreviewPanel({conversation,visible,command,selectProject}
     void poll();
     return ()=>{ controller.abort(); clearTimeout(timer); };
   },[visible,base,grant?.revision]);
-  async function change(action:'start'|'stop') {
+  async function change(action:'start'|'stop'|'download',mode:'static'|'service'='static') {
     if(pending.current || !state) return;
     revision.current++; pending.current=true; setBusy(true); setError('');
     try {
       const result=await command<ProjectPreviewState>(base+'/'+action, action==='start'
-        ? {grantRevision:grant?.revision,previousId:state.id ?? null} : {id:state.id});
+        ? {grantRevision:grant?.revision,previousId:state.id ?? null,mode} : {id:state.id,lock:state.download?.lock});
+      if(instanceId && action==='start') setRetried(result.id);
       setState(result); setExpanded(true);
       if(result.status==='failed') setShowLogs(true);
       requestAnimationFrame(()=>primary.current?.focus({preventScroll:true}));
     } catch(e) { setError((e as Error).message); }
     finally { pending.current=false; setBusy(false); }
   }
+  if(instanceId && (!state || state.id!==(retried ?? instanceId))) return <p>{!state?'正在读取项目服务…':'这次开发服务已结束。'}</p>;
   if(!grant) return <section className="cc-site-preview"><p>选择一个包含网页的项目文件夹，即可在这里预览。</p><button onClick={selectProject}>选择项目文件夹</button></section>;
   const running=state?.status==='running', starting=state?.status==='starting';
   const disabled=busy || !state || starting || !!conversation.archivedAt || !!conversation.deletedAt;
@@ -51,15 +54,17 @@ export function ProjectPreviewPanel({conversation,visible,command,selectProject}
   return <section className="cc-site-preview" aria-label="项目页面与日志">
     <div className="cc-site-heading"><strong>{grant.path.split('/').filter(Boolean).at(-1)}</strong><span role="status">{state?labels[state.status]:'读取中…'}</span></div>
     {state?.entry && <code>{state.entry}</code>}
-    {(!state || state.status==='idle') && <p>预览项目中的静态网页。支持项目根目录及 dist、build、public 中的 index.html。</p>}
+    {(!state || state.status==='idle') && <p>可直接打开项目的静态网页，也可以启动开发服务。</p>}
     <div className="cc-site-actions">
       {running ? <button ref={primary} onClick={()=>setExpanded(v=>!v)} aria-expanded={expanded}>{expanded?'收起预览':'打开预览'}</button> :
-        <button ref={primary} disabled={disabled} onClick={()=>void change('start')}>{!state || state.status==='idle'?'启动预览':starting?'正在启动…':'重新启动预览'}</button>}
+        <button ref={primary} disabled={disabled} onClick={()=>void change('start',state?.mode ?? 'static')}>{!state || state.status==='idle'?'启动预览':starting?'正在启动…':'重新启动预览'}</button>}
+      {!instanceId && grant.mode==='project-work' && !running && !starting && <button disabled={disabled} onClick={()=>void change('start',state?.mode==='service'?'static':'service')}>{state?.mode==='service'?'预览静态页面':'启动开发服务'}</button>}
+      {state?.download && <button disabled={busy} onClick={()=>void change('download')}>下载 {state.download.count} 项 npm 依赖并继续</button>}
       {!!state?.logs.length && <button onClick={()=>setShowLogs(v=>!v)} aria-expanded={showLogs}>{showLogs?'收起日志':'查看日志'}</button>}
       {(running || starting) && <button disabled={busy} onClick={()=>void change('stop')}>{starting?'取消启动':'停止预览'}</button>}
     </div>
     {error && <p role="alert">{error}</p>}
     {running && expanded && visible && <iframe key={state.id} title="项目预览" sandbox="allow-same-origin allow-scripts" referrerPolicy="no-referrer" src={state.url} />}
-    {showLogs && !!state?.logs.length && <ol aria-label="预览日志">{state.logs.map((item,i)=><li key={i}><time>{new Date(item.time).toLocaleTimeString()}</time> {item.message}</li>)}</ol>}
+    {showLogs && !!state?.logs.length && <ol aria-label="预览日志">{state.logs.map((item,i)=><li key={i}>{item.time && <time>{new Date(item.time).toLocaleTimeString()}</time>} {item.message}</li>)}</ol>}
   </section>;
 }

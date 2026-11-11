@@ -1,3 +1,4 @@
+import { obligationTools } from './obligation-tools.js';
 import { projectReviewTools } from './project-review-tools.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Conversation, ConversationMessage, MessageExcerpt, MessageVisibility, ReadCursor, SendMessage, SourceWork } from '../../shared/collaboration.js';
@@ -6,7 +7,14 @@ import type { CollaborationStore } from './store.js';
 
 export const textDigest = (text: string) => createHash('sha256').update(text).digest('hex');
 export const privateScope = (v?: MessageVisibility) => v?.kind === 'private' && !v.revealedAt;
-export const scopeKey = (v?: MessageVisibility) => privateScope(v) ? `private:${[...v!.memberIds].sort().join(',')}` : 'public';
+export function scopeKey(v?: MessageVisibility): string {
+  if (!v || !privateScope(v)) return 'public';
+  const members = [...v.memberIds].sort();
+  if (members.some(id => (v.memberGenerations?.[id] ?? 1) > 1)) {
+    return 'instances:' + JSON.stringify(members.map(id => [id, v.memberGenerations?.[id] ?? 1]));
+  }
+  return 'private:' + members.join(',');
+}
 export const scopeAllows = (v: MessageVisibility | undefined, memberId?: string) => !memberId || !privateScope(v) || v!.memberIds.includes(memberId);
 const conflict = (message = '材料已变化或不可访问，请重新选择。'): never => { throw new AppError(409, message, 'visibility_conflict'); };
 const text = (v: unknown, max = 200): string => { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new AppError(400, '参数文本无效。'); return v.trim(); };
@@ -34,7 +42,19 @@ export class VisibilityService {
     if (ids === undefined) return undefined;
     const c = this.assertConversation(cid);
     if (!Array.isArray(ids) || !ids.length || ids.length > 10 || new Set(ids).size !== ids.length || ids.some(m => typeof m !== 'string' || !c.memberIds.includes(m) || !this.store.members().some(x => x.id === m && x.enabled && !x.deletedAt))) throw new AppError(400, '私聊接收成员必须是会话中启用的成员。');
-    return { kind: 'private', memberIds: [...ids].sort() };
+    const memberIds = [...ids].sort() as string[];
+    const memberGenerations = c.collaborationMode === 'continuous' ?
+      Object.fromEntries(memberIds.map(id => [id, this.store.roomMembers.resolve(cid, id).generation])) : undefined;
+    return { kind: 'private', memberIds, ...(memberGenerations && { memberGenerations }) };
+  }
+  allows(cid: string, scope: MessageVisibility | undefined, memberId?: string): boolean {
+    if (!scopeAllows(scope, memberId)) return false;
+    if (!memberId || !scope || !privateScope(scope)) return true;
+    if (!scope.memberGenerations && this.conversation(cid).collaborationMode !== 'continuous') return true;
+    const room = this.conversation(cid);
+    if (!room.memberIds.includes(memberId)) return false;
+    // A legacy private item in a newly enabled room may belong only to the initial generation.
+    return this.store.roomMembers.resolve(cid, memberId).generation === (scope.memberGenerations?.[memberId] ?? 1);
   }
   messageScope(m: ConversationMessage): MessageVisibility | undefined {
     if (m.visibility) return m.visibility;
@@ -43,7 +63,7 @@ export class VisibilityService {
     return undefined;
   }
   visible(m: ConversationMessage, memberId?: string, executionScope?: string): boolean {
-    if (m.deletedAt || !scopeAllows(this.messageScope(m), memberId)) return false;
+    if (m.deletedAt || !this.allows(m.conversationId, this.messageScope(m), memberId)) return false;
     try { const s = m.sourceId ? this.data.get<SourceWork>('cc_sources',m.sourceId) : m.responseId ? this.primary(this.store.response(m.responseId).invocationId) : undefined; if(s?.crossRef) this.store.cross.material(s); if(s?.actionRef) this.store.actions.material(s); } catch { return false; }
     return executionScope === undefined || !privateScope(this.messageScope(m)) || scopeKey(this.messageScope(m)) === executionScope;
   }
@@ -58,10 +78,13 @@ export class VisibilityService {
   sameScope(invocationId: string, s: SourceWork) { return !s.crossRef && !s.actionRef && !this.primary(invocationId).actionRef && scopeKey(this.store.contract(invocationId).visibility) === scopeKey(s.visibility) && !s.excerptRefs?.length; }
   assertTool(invocationId: string, name: string) {
     const i = this.store.invocation(invocationId), c = this.store.contract(invocationId);
+    if (i.roomMember) this.store.roomMembers.assertCurrent(i.roomMember, i.conversationId, i.memberId);
     this.assertConversation(i.conversationId, i.memberId);
     if (name === 'project_environment_check' && (i.member.carrier !== 'codex-app-server' || !this.store.checkNativeFilePermission(i.id)))
       throw new AppError(403,'本次项目委托未授权平台环境查询。');
-    if (c.projectReview && !projectReviewTools(c.projectReview).some(tool => tool.name === name)) throw new AppError(403,'本次评审未授权此工具。');
+    const obligationAllowed = name.startsWith('obligation_') && obligationTools(c).some(tool => tool.name === name);
+    if (name.startsWith('obligation_') && !obligationAllowed) throw new AppError(403,'本次执行不能处理此项责任。');
+    if (c.projectReview && !obligationAllowed && !projectReviewTools(c.projectReview).some(tool => tool.name === name)) throw new AppError(403,'本次评审未授权此工具。');
     const source = this.primary(invocationId); if(source.crossRef)this.store.cross.material(source); this.store.actions.validateInvocation(invocationId,true);
     if (c.visibilityEpoch !== undefined && c.visibilityEpoch !== this.epoch()) conflict('材料权限已变化，本轮不能继续读取或转发。');
     if (privateScope(c.visibility) && (name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'multi_mention' || name === 'collaboration_request')) throw new AppError(403, '私聊执行不能写入公开任务、产物或向其他范围协作；请由用户选择片段分享。');
@@ -73,11 +96,11 @@ export class VisibilityService {
       const m = this.messages(cid).find(m => m.id === input.replyTo && !m.deletedAt);
       if (!m) throw new AppError(400, '引用必须属于当前会话且仍可访问。');
       const origin = this.messageScope(m!);
-      if (privateScope(origin) && (!visibility || visibility.memberIds.some(t => !origin!.memberIds.includes(t)))) throw new AppError(403, '普通引用不能公开私聊内容；请使用选段分享或先公开原消息。');
+      if (privateScope(origin) && (!visibility || visibility.memberIds.some(t => !this.allows(cid, origin, t)))) throw new AppError(403, '普通引用不能公开私聊内容；请使用选段分享或先公开原消息。');
     }
     for (const id of input.attachmentIds ?? []) {
       const uses = this.messages(cid).filter(m => m.attachmentIds?.includes(id));
-      if (uses.some(m => m.deletedAt || privateScope(this.messageScope(m)) && (!visibility || visibility.memberIds.some(t => !this.messageScope(m)!.memberIds.includes(t))))) throw new AppError(403, '私密附件不能作为公开消息重新发送。');
+      if (uses.some(m => m.deletedAt || privateScope(this.messageScope(m)) && (!visibility || visibility.memberIds.some(t => !this.allows(cid, this.messageScope(m), t))))) throw new AppError(403, '私密附件不能作为公开消息重新发送。');
     }
     if (input.excerptRefs !== undefined) {
       if (!Array.isArray(input.excerptRefs) || !input.excerptRefs.length || input.excerptRefs.length > 8 || input.attachmentIds?.length || input.replyTo || input.resolveWhenIdle) throw new AppError(400, '选段分享需要 1–8 个引用，不能混入附件、普通引用或延迟路由。');
@@ -116,7 +139,7 @@ export class VisibilityService {
     const m = this.messages(cid).find(m => m.id === mid && this.visible(m));
     if (!m) conflict('引用来源已删除或不可访问，请重新发送。');
     const origin = this.messageScope(m!);
-    if (privateScope(origin) && (!privateScope(visibility) || visibility!.memberIds.some(id => !origin!.memberIds.includes(id)))) conflict('被引用消息仍是私聊，请先公开原消息或只分享选定正文。');
+    if (privateScope(origin) && (!privateScope(visibility) || visibility!.memberIds.some(id => !this.allows(cid, origin, id)))) conflict('被引用消息仍是私聊，请先公开原消息或只分享选定正文。');
     return `\n<reply-context messageId=${JSON.stringify(m!.id)} author=${JSON.stringify(m!.memberId ?? m!.author)}>\n${m!.content.slice(0, 8000)}${m!.content.length > 8000 ? '\n[引用超过 8,000 字符，余文未包含]' : ''}\n</reply-context>`;
   }
   sourceContent(s: SourceWork, visibility = s.visibility): string {
@@ -149,10 +172,11 @@ export class VisibilityService {
   validateInvocation(invocationId: string) {
     const i = this.store.invocation(invocationId), c = this.store.contract(invocationId);
     if (c.visibilityEpoch === undefined) return; // Preserve frozen legacy behavior.
+    if (i.roomMember) this.store.roomMembers.assertCurrent(i.roomMember, i.conversationId, i.memberId);
     this.assertConversation(i.conversationId, i.memberId);
     if (c.visibilityEpoch !== this.epoch()) conflict('材料可见性已经变化，不能继续发送旧输入。');
     const s = this.primary(invocationId);
-    if (!scopeAllows(s.visibility, i.memberId) || s.withdrawnAt) conflict();
+    if (!this.allows(s.conversationId, s.visibility, i.memberId) || s.withdrawnAt) conflict();
     if (s.excerptRefs?.length) this.resolveRefs(s.conversationId, s.excerptRefs);
     if (c.materialDigest !== undefined && c.materialDigest !== textDigest(JSON.stringify({ content: this.sourceContent(s), refs: s.excerptRefs, visibility: s.visibility }))) throw new AppError(409, '材料已变化，禁止继续发送旧输入。', 'inputs_changed');
     for (const snapshot of c.historySnapshot ?? []) {
@@ -222,9 +246,9 @@ export class VisibilityService {
       const parent = this.assertConversation(cid), at = this.messages(cid).find(m => m.id === input.messageId && !m.deletedAt);
       if (!at || (at.revision ?? 1) !== input.expectedRevision) conflict();
       const chosen = this.audience(cid, input.memberIds ?? parent.memberIds)!.memberIds;
-      const c = this.store.create({ title: text(input.title), memberIds: chosen, defaultMemberId: chosen.includes(parent.defaultMemberId) ? parent.defaultMemberId : chosen[0]!, requestId: `branch-create:${input.requestId}` }).conversation;
+      const c = this.store.create({ collaborationMode: parent.collaborationMode ?? 'legacy', title: text(input.title), memberIds: chosen, defaultMemberId: chosen.includes(parent.defaultMemberId) ? parent.defaultMemberId : chosen[0]!, requestId: `branch-create:${input.requestId}` }).conversation;
       c.branch = { conversationId: cid, messageId: at!.id, cutoff: at!.sequence! }; this.put('cc_conversations', c);
-      const inherited = this.readable(cid).filter(m => m.sequence! <= at!.sequence! && (!privateScope(this.messageScope(m)) || this.messageScope(m)!.memberIds.some(id => chosen.includes(id))) && (!m.responseId || ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(this.store.response(m.responseId).status)));
+      const inherited = this.readable(cid).filter(m => m.sequence! <= at!.sequence! && (!privateScope(this.messageScope(m)) || chosen.some(id => this.allows(cid, this.messageScope(m), id))) && (!m.responseId || ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(this.store.response(m.responseId).status)));
       const copiedIds = new Map(inherited.map(m => [m.id, randomUUID()]));
       for (const m of inherited) {
         const v = this.messageScope(m);
@@ -238,7 +262,7 @@ export class VisibilityService {
             continue;
           }
           const { attachment: a, content: body } = this.store.workbench.attachmentContent(id); content += `\n\n<user-attachment id=${JSON.stringify(a.id)} name=${JSON.stringify(a.name)} sha256=${JSON.stringify(a.digest)}>\n${body}\n</user-attachment>`; }
-        const copy: ConversationMessage = { id: copiedIds.get(m.id)!, conversationId: c.id, author: m.author, memberId: m.memberId, content, ...(images.length ? {attachmentIds: images} : {}), replyTo: m.replyTo ? copiedIds.get(m.replyTo) : undefined, ...(m.excerptRefs ? { excerptRefs: m.excerptRefs, excerptConversationId: m.excerptConversationId ?? cid } : {}), createdAt: m.createdAt, revision: 1, visibility: privateScope(v) ? { kind: 'private', memberIds: v!.memberIds.filter(id => chosen.includes(id)) } : undefined, branchOrigin: { conversationId: cid, messageId: m.id } };
+        const copy: ConversationMessage = { id: copiedIds.get(m.id)!, conversationId: c.id, author: m.author, memberId: m.memberId, content, ...(images.length ? {attachmentIds: images} : {}), replyTo: m.replyTo ? copiedIds.get(m.replyTo) : undefined, ...(m.excerptRefs ? { excerptRefs: m.excerptRefs, excerptConversationId: m.excerptConversationId ?? cid } : {}), createdAt: m.createdAt, revision: 1, visibility: privateScope(v) ? this.audience(c.id, chosen.filter(id => this.allows(cid, v, id))) : undefined, branchOrigin: { conversationId: cid, messageId: m.id } };
         const row = this.store.db.prepare('INSERT INTO cc_messages VALUES(?,?,NULL,?)').run(copy.id, c.id, JSON.stringify(copy)); copy.sequence = Number(row.lastInsertRowid); this.put('cc_messages', copy);
       }
       this.port.event(c.id, 'conversation.branched', { sourceConversationId: cid, cutoff: at!.sequence }); return c;

@@ -1,3 +1,5 @@
+import { ProjectBrowser } from './collaboration/project-browser.js';
+import { ProjectPreviews } from './collaboration/project-preview.js';
 import type { githubApi } from './collaboration/project-github.js';
 import { McpReaders } from './collaboration/mcp-reader.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -80,8 +82,10 @@ export async function createApplication(options: ApplicationOptions = {}) {
   const collaborationRuntime = options.collaborationRuntime ?? createCollaborationRuntime({privateRoots:[dataDir]});
   const collaborationStore = new CollaborationStore(store, { workspace, mcpReaders, singleProjectVm: !options.collaborationRuntime, artifactDir: resolve(dataDir, 'collaboration-artifacts'),
     projectWorkAvailability: collaborationRuntime.projectWorkAvailability?.bind(collaborationRuntime) });
-  const collaborationEngine = new CollaborationEngine(collaborationStore, collaborationRuntime, { workspace, projectGitHub:options.projectGitHub });
-  const collaborationRoutes = collaborationHttp({ dataDir, store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, folderPicker: options.folderPicker ?? chooseProjectFolder, projectFilePicker:options.projectFilePicker ?? chooseInspectionFile, workspace, csrfToken, verifyCsrf, readJson, json });
+  const previews=new ProjectPreviews(cid=>collaborationStore.workbench.conversation(cid),collaborationRuntime.runProjectService?.bind(collaborationRuntime),resolve(dataDir,'project-services'));
+  const browser=new ProjectBrowser(collaborationStore,previews,resolve(dataDir,'browser-evidence'));
+  const collaborationEngine = new CollaborationEngine(collaborationStore, collaborationRuntime, { workspace, previews, browser, projectGitHub:options.projectGitHub });
+  const collaborationRoutes = collaborationHttp({ browser, previews, dataDir, store: collaborationStore, engine: collaborationEngine, runtime: collaborationRuntime, folderPicker: options.folderPicker ?? chooseProjectFolder, projectFilePicker:options.projectFilePicker ?? chooseInspectionFile, workspace, csrfToken, verifyCsrf, readJson, json });
   const streams = new Set<ServerResponse>();
   let closed = false; let listeningPort = port; let started = false; let leaseLost = false;
   function stopForLeaseLoss(): void {
@@ -189,14 +193,14 @@ export async function createApplication(options: ApplicationOptions = {}) {
       if (closed) throw new Error('Application is closed.');
       if (!started) {
         try { await new Promise<void>((resolveStart, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolveStart(); }); }); }
-        catch (error) { closed = true; clearInterval(heartbeat); await worker.stop(); await collaborationEngine.stop(); collaborationRoutes.close(); store.close(); throw error; }
+        catch (error) { closed = true; clearInterval(heartbeat); await worker.stop(); await collaborationEngine.stop(); await collaborationRoutes.close(); store.close(); throw error; }
         started = true; const address = server.address(); if (address && typeof address !== 'string') listeningPort = address.port; if (options.startWorker !== false) { worker.start(); collaborationEngine.start(); }
       }
       return { host, port: listeningPort, url: `http://${host}:${listeningPort}` };
     },
     async close() {
       if (closed) return; closed = true;
-      await worker.stop(); await collaborationEngine.stop(); collaborationRoutes.close(); clearInterval(heartbeat);
+      await worker.stop(); await collaborationEngine.stop(); await collaborationRoutes.close(); clearInterval(heartbeat);
       for (const stream of streams) stream.end();
       if (started) await new Promise<void>(resolveClose => { server.close(() => resolveClose()); server.closeAllConnections(); });
       store.close();

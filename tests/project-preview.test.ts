@@ -78,3 +78,41 @@ test('project preview binds the selected grant, rejects stale stops and closes o
     await assert.rejects(request(finalUrl,'/'));
   } finally { previews.close(); await rm(temp,{recursive:true,force:true}); }
 });
+
+test('service grants, dependency approval, stop and restart stay bound to the original instance',async t=>{
+  const temp=await mkdtemp(join(await realpath(tmpdir()),'service-'));
+  t.after(()=>rm(temp,{recursive:true,force:true}));
+  const root=join(temp,'project');await mkdir(root);
+  const info=await stat(root);
+  const c:Conversation={id:'c',title:'开发项目',memberIds:['codex'],defaultMemberId:'codex',createdAt:'',updatedAt:'',
+    workspaceGrant:{path:root,device:info.dev,inode:info.ino,mode:'read-only',authorizedAt:'t',revision:1}};
+  const journal=join(temp,'journal');let exits=0;
+  const previews=new ProjectPreviews(()=>c,async req=>{
+    req.verify();req.snapshot('one');
+    if(!await req.allowDownload('lock',['fixture'])) return;
+    if(!exits++) throw new Error('项目缺少 dev 脚本');
+    req.listening(async()=>({status:200,mime:'text/plain',body:'b2s='}));
+    await new Promise<void>(resolve=>req.signal.addEventListener('abort',()=>resolve(),{once:true}));
+  },journal);
+  t.after(()=>previews.close());
+  assert.throws(()=>previews.start('c',null,1,'service'));
+  c.workspaceGrant!.mode='project-work';
+  const first=previews.start('c',null,1,'service');
+  assert.equal(first.download?.count,1);
+  assert.throws(()=>previews.approveDownload('c',first.id,'stale'));
+  previews.approveDownload('c',first.id,'lock');
+  await until(()=>previews.state('c'),s=>s.status==='failed');
+  const next=previews.start('c',first.id,1,'service');
+  assert.throws(()=>previews.end('c',first.id));
+  previews.approveDownload('c',next.id,'lock');
+  await until(()=>previews.state('c'),s=>s.status==='running');
+  const again=new ProjectPreviews(()=>c,undefined,journal);
+  assert.equal(again.state('c').status,'failed');
+  await again.close();
+  c.workspaceGrant!.revision++;previews.reconcile('c');
+  assert.equal(previews.state('c').status,'stopped');
+  await previews.close();
+  const recovered=new ProjectPreviews(()=>c,undefined,journal);
+  assert.equal(recovered.state('c').status,'idle');
+  await recovered.close();
+});

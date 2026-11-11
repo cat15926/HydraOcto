@@ -32,6 +32,12 @@ export function CooperationPanel({ detail, members, command, refresh }: Props) {
   }
   return <section className="cc-monitor-section cc-cooperation-panel" aria-label="协作调度">
     <div className="cc-section-title"><h3>协作调度</h3><button disabled={busy || !detail.invocations.some(i => ['prepared', 'running', 'cancel_requested'].includes(i.status))} onClick={() => void act('/api/conversations/' + detail.conversation.id + '/cancel-all', {}, '已请求停止当前执行。成员暂缓 60 秒，新输入可解除对应目标的暂缓。')}>停止当前全部</button></div>
+    <div className="cc-room-follow"><div><strong>持续跟进委托</strong><p>成员可请同伴协助，并在结果回来后继续向你交付。</p></div>
+      <button type="button" role="switch" aria-label="持续跟进委托" aria-checked={detail.conversation.collaborationMode==='continuous'}
+        disabled={busy || !!detail.conversation.archivedAt || !!detail.conversation.deletedAt}
+        onClick={()=>{const mode=detail.conversation.collaborationMode??'legacy';void act('/api/conversations/'+detail.conversation.id+'/collaboration-mode',
+          {expectedMode:mode,mode:mode==='continuous'?'legacy':'continuous'},mode==='continuous'?'已关闭新委托跟进。':'已开启，仅对之后的委托生效。');}}>
+        {detail.conversation.collaborationMode==='continuous'?'已开启':'开启'}</button></div>
     {error && <p className="cc-operation-note cc-operation-error" role="alert">{error}</p>}
     {notice && <p className="cc-operation-note" role="status">{notice}</p>}
     <details><summary>来源队列 · {queue?.sources.length ?? 0}</summary>

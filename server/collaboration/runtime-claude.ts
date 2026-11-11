@@ -230,7 +230,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
   request.signal.addEventListener('abort', abort, { once: true });
   try {
     if (project) await project.ready;
-    if (proc.pid !== undefined) request.onEvent({ kind: 'prepared', detail: { processStarted: true, transport: 'stdio' } });
+    if (proc.pid !== undefined) request.onEvent({ kind: 'prepared', detail: { processStarted: true, transport: 'stdio', ...(!project && {pid:proc.pid}) } });
     request.signal.throwIfAborted();
     if (control && official) {
       await control.initialize(official.email);

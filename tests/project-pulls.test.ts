@@ -135,3 +135,40 @@ test('a PR update stays pending when GitHub still reports the approved predecess
   heads=['f'.repeat(40)];const superseded=await observe();
   assert.equal(superseded.state,'superseded');assert.equal(superseded.observedHead,'f'.repeat(40));
 });
+
+test('single member waiting for CI: user text and a superseded commit cannot wake it; the observed failure wakes once',async t=>{
+  const tmp=realpathSync(mkdtempSync(join(tmpdir(),'hydra-ci-'))), folder=join(tmp,'project');mkdirSync(folder);
+  const db=new Store(join(tmp,'db','test.sqlite'));t.after(()=>{db.close();rmSync(tmp,{recursive:true,force:true});});
+  const store=new CollaborationStore(db,{workspace:folder,projectWorkAvailability:()=>({available:true})});
+  const cid=store.create({title:'CI',memberIds:['codex'],defaultMemberId:'codex',requestId:randomUUID()}).conversation.id;
+  const grant=store.workbench.previewWorkspace(cid,{path:folder,mode:'project-work'});store.workbench.applyPreview({previewId:grant.id,requestId:randomUUID()},cid);
+  store.projects.submit(cid,{content:'@Codex 把改动提 PR，等 CI 结果告诉我，不要自动修复。',requestId:randomUUID()});
+  const run=store.admitNext()!.invocations[0]!;store.startInvocation(run.id);store.recordEvidence(run.id,{kind:'accepted',detail:{source:'fixture'}});
+  const tool=(id:string,name:string,args:Record<string,unknown>)=>(store.obligations.tool(id,name,args,randomUUID()) as any).obligation;
+  const root=tool(run.id,'obligation_open',{goal:'等 CI 返回真实结果'});
+  const prompt=store.interactions.wait(run.id,{operation:'project_git_deliver',kind:'approval',providerRequestId:'git:wait',nativeItemId:'wait',
+    gitDelivery:{...plan,pull:{...plan.pull!,repair:false}},payload:{grantRevision:store.contract(run.id).workspaceGrant!.revision}},'project-git',new AbortController().signal);
+  const card=store.interactions.list(cid)[0]!;
+  store.interactions.answer(card.id,{requestId:randomUUID(),expectedRevision:card.revision,payloadDigest:card.payloadDigest,decision:'allow_once'});await prompt;
+  store.recordEvidence(run.id,{kind:'tool',detail:{origin:'project_git',state:'completed',callId:'wait',commit}});
+  const {ciTargets}=await import('../server/collaboration/obligation-ci.js');
+  const target=ciTargets(store,run.id)[0]!;assert.equal(target.commit,commit);
+  const w=tool(run.id,'obligation_wait',{obligationId:root.id,condition:target.condition,deadline:new Date(Date.now()+60000).toISOString()});
+  store.recordEvidence(run.id,{kind:'process_exit',detail:{confirmed:true}});store.finish(run.id,'succeeded','等待检查。');
+  assert.throws(()=>store.obligations.signal(cid,root.id,{requestId:randomUUID(),waitId:w.wait.id,expectedRevision:w.revision,condition:target.condition,summary:'通过'}));
+  let head=other;const api:GitHubApi=async path=>{
+    const current={...pr(),head:{...pr().head,sha:head}};
+    if(path.includes('/pulls?'))return [current];if(path.endsWith('/pulls/8'))return current;
+    if(path.includes('/check-runs?'))return {total_count:1,check_runs:[{id:4,head_sha:commit,name:'test',status:'completed',conclusion:'failure'}]};
+    return {sha:commit,total_count:0,statuses:[]};
+  };
+  const monitor=new ProjectPullMonitor(store,async()=>api);t.after(()=>monitor.stop());monitor.tick();
+  for(let i=0;i<40&&!store.interactions.get(card.id).pullStatus?.number;i++)await delay(10);
+  store.obligations.reconcile();assert.equal(store.admitNext(),undefined);
+  head=commit;await monitor.refresh(card.id);store.obligations.reconcile();await monitor.refresh(card.id);store.obligations.reconcile();
+  const wakes=store.detail(cid).sources.filter(s=>s.kind==='job_result');assert.equal(wakes.length,1);assert.match(wakes[0]!.content,/CI 失败/);
+  const result=store.admitNext()!.invocations[0]!;assert.equal(result.memberId,'codex');store.startInvocation(result.id);
+  store.recordEvidence(result.id,{kind:'accepted',detail:{source:'fixture'}});tool(result.id,'obligation_deliver',{obligationId:root.id,summary:'CI 失败'});
+  store.recordEvidence(result.id,{kind:'process_exit',detail:{confirmed:true}});store.finish(result.id,'succeeded','CI 失败');
+  assert.equal(store.obligations.list(cid)[0]!.state,'delivered');assert.equal(store.admitNext(),undefined);
+});

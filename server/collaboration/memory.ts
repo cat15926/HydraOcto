@@ -3,7 +3,7 @@ import { setImmediate } from 'node:timers/promises';
 import type { MemoryEntry, MemoryVersion, MemoryLibraryDetail, MemorySnapshot, MessageExcerpt, MessageVisibility, SearchHit, SearchResult } from '../../shared/collaboration.js';
 import { AppError, now } from '../store.js';
 import type { CollaborationStore } from './store.js';
-import { privateScope, scopeAllows, scopeKey, textDigest } from './visibility.js';
+import { privateScope, scopeKey, textDigest } from './visibility.js';
 
 const text = (v: unknown, max = 200): string => { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new AppError(400, '记忆参数无效。'); return v.trim(); };
 const conflict = (): never => { throw new AppError(409, '记忆版本、授权或来源已变化，请刷新。', 'memory_conflict'); };
@@ -23,7 +23,9 @@ export class MemoryService {
     return i;
   }
   private eligible(e: MemoryEntry, cid: string, memberId?: string, executionScope?: string) {
-    if (e.revokedAt || this.store.visibility.conversation(e.conversationId).deletedAt || (e.scope !== 'library' && e.conversationId !== cid) || !scopeAllows(e.visibility, memberId)) return false;
+    if (e.revokedAt || this.store.visibility.conversation(e.conversationId).deletedAt || (e.scope !== 'library' && e.conversationId !== cid) || !this.store.visibility.allows(e.conversationId, e.visibility, memberId)) return false;
+    if (memberId && e.conversationId !== cid && privateScope(e.visibility) &&
+        (e.visibility!.memberGenerations || this.store.visibility.conversation(cid).collaborationMode === 'continuous')) return false;
     if (memberId && !this.store.visibility.conversation(e.conversationId).memberIds.includes(memberId)) return false;
     return executionScope === undefined || !privateScope(e.visibility) || scopeKey(e.visibility) === executionScope;
   }
@@ -33,7 +35,7 @@ export class MemoryService {
     for (const ref of refs) {
       const m = this.store.visibility.messages(cid).find(m => m.id === ref.messageId)!;
       const origin = this.store.visibility.messageScope(m);
-      if (privateScope(origin) && (!privateScope(visibility) || visibility!.memberIds.some(t => !origin!.memberIds.includes(t)))) throw new AppError(403, '记忆不能扩大来源可见范围；先显式公开源消息。');
+      if (privateScope(origin) && (!privateScope(visibility) || visibility!.memberIds.some(t => !this.store.visibility.allows(cid, origin, t)))) throw new AppError(403, '记忆不能扩大来源可见范围；先显式公开源消息。');
     }
   }
   propose(cid: string, input: Record<string, unknown>, invocationId?: string) {

@@ -53,6 +53,7 @@ export function withRuntimeInspection(base: CollaborationRuntime, options: { max
     probe: () => base.probe(),
     inspectProjectDomain: base.inspectProjectDomain?.bind(base),
     projectWorkAvailability: base.projectWorkAvailability?.bind(base),
+    runProjectService:base.runProjectService?.bind(base),
     runProjectReviewTest: base.runProjectReviewTest?.bind(base),
     ...(base.discoverAccount ? { discoverAccount: base.discoverAccount.bind(base) } : {}),
     ...(base.historyIdentity ? {historyIdentity:base.historyIdentity.bind(base)} : {}),

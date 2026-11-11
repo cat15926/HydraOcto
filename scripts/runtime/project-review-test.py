@@ -23,7 +23,7 @@ DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 RUNNER = "/opt/multi-agent/project-vm-runner.py"
 
 
-def snapshot(source_fd, destination):
+def snapshot(source_fd, destination=None):
     """Build a manifest of the exact bytes to be tested. Do not follow user-controlled links."""
     root_stat = os.fstat(source_fd)
     total = entries = 0
@@ -45,13 +45,13 @@ def snapshot(source_fd, destination):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             if info.st_dev != root_stat.st_dev:
                 continue
-            target = destination / path
             if stat.S_ISDIR(info.st_mode):
                 child = os.open(name, DIRECTORY, dir_fd=fd)
                 try:
                     if not os.path.samestat(info, os.fstat(child)):
                         raise ValueError("目录已变化")
-                    target.mkdir()
+                    if destination is not None:
+                        (destination / path).mkdir()
                     manifest.update(b"D" + os.fsencode(path) + b"\0")
                     visit(child, path)
                 finally:
@@ -70,9 +70,11 @@ def snapshot(source_fd, destination):
                             not os.path.samestat(last, os.stat(name, dir_fd=fd, follow_symlinks=False))):
                         raise ValueError("文件已变化")
                 total += len(data)
-                target.write_bytes(data)
                 executable = bool(first.st_mode & 0o111)
-                target.chmod(0o700 if executable else 0o600)
+                if destination is not None:
+                    target = destination / path
+                    target.write_bytes(data)
+                    target.chmod(0o700 if executable else 0o600)
                 manifest.update((b"X" if executable else b"F") + os.fsencode(path) + b"\0" + hashlib.sha256(data).digest())
         if before_dir.st_ctime_ns != os.fstat(fd).st_ctime_ns:
             raise ValueError("目录已变化")
@@ -91,7 +93,7 @@ def limits(seconds):
         resource.setrlimit(key, (count, count))
 
 
-def run_test(argv, stage, sandbox_policy, npm_private=None, install=False):
+def run_test(argv, stage, sandbox_policy, npm_private=None, install=False, service=False):
     # All project commands, including shell scripts and their descendants, run inside this namespace.
     # /inputs contains private copies only. No path in the sandbox points to the original project.
     launch = ("import os,shutil,sys;shutil.copytree('/inputs','/work',dirs_exist_ok=True);"
@@ -131,7 +133,7 @@ def run_test(argv, stage, sandbox_policy, npm_private=None, install=False):
              "--setenv", "LANG", "C.UTF-8", "--", "/usr/bin/python3", "-I", "-c", launch, *argv]
     env = {"PATH": "/usr/bin:/bin"}
     try:
-        child = subprocess.Popen(args, cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        child = subprocess.Popen(args, cwd="/", env=env, stdin=subprocess.PIPE if service else subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, pass_fds=(info_w, gate_r, filter_fd), preexec_fn=lambda: limits(seconds))
     finally:
         for fd in (info_w, gate_r, filter_fd):
@@ -150,6 +152,23 @@ def run_test(argv, stage, sandbox_policy, npm_private=None, install=False):
             init_pid = json.loads(report)["child-pid"]
             init_fd = os.pidfd_open(init_pid)
         os.write(gate_w, b"x")
+        if service:
+            # Relay only bounded preview requests. EOF closes the exact PID namespace in finally.
+            while child.poll() is None:
+                readable = select.select([sys.stdin, child.stdout], [], [], 1)[0]
+                if sys.stdin in readable:
+                    chunk = os.read(sys.stdin.fileno(), 16384)
+                    if not chunk:
+                        return {"exitCode": 0}
+                    child.stdin.write(chunk)
+                    child.stdin.flush()
+                if child.stdout in readable:
+                    chunk = os.read(child.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+            return {"exitCode": child.wait(timeout=3)}
         cutoff = time.monotonic() + seconds
         while True:
             left = cutoff - time.monotonic()
@@ -184,6 +203,8 @@ def run_test(argv, stage, sandbox_policy, npm_private=None, install=False):
             os.close(init_fd)
         os.close(gate_w)
         child.stdout.close()
+        if child.stdin:
+            child.stdin.close()
 
 
 def main():
@@ -212,8 +233,11 @@ def main():
                     not isinstance(arg, str) or "\x00" in arg for arg in argv) or not argv[0].strip():
                 raise ValueError("测试命令无效")
             if npm:
+                service = request.get("service") is True and "DEV_SERVICE_PROGRAM" in globals()
                 project_checks = request.get("projectNpmChecks") is True
-                script = npm_check_script(argv, project_checks)
+                script = "dev" if service else npm_check_script(argv, project_checks)
+                if service and not script_declared(Path(stage), "dev"):
+                    raise ValueError("package.json 中没有 dev 脚本")
                 if project_checks and not script_declared(Path(stage), script):
                     emit({"state": "skipped", "script": script})
                     return
@@ -226,7 +250,11 @@ def main():
                         reason = installed["output"].strip().splitlines()
                         raise ValueError("npm 离线安装失败 " + " ".join(reason[:2])[:95])
                     emit({"state": "testing"})
-                    result = run_test(argv, stage, policy["syscall_policy"], private)
+                    if service:
+                        result = run_test(["/usr/bin/python3", "-I", "-c", DEV_SERVICE_PROGRAM], stage,
+                                          policy["syscall_policy"], private, service=True)
+                    else:
+                        result = run_test(argv, stage, policy["syscall_policy"], private)
             else:
                 result = run_test(argv, stage, policy["syscall_policy"])
     finally:

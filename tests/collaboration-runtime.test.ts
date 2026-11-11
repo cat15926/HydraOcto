@@ -393,3 +393,29 @@ test('N5 Codex protocol: exact native question response and denied native writes
     assert.deepEqual(interactions.map(i => i.kind), ['approval', 'question']); assert.equal(interactions[1].nativeTurnId, 'turn-exact'); assert.equal(interactions[1].nativeItemId, 'question-1'); assert.ok(events.some(e => e.kind === 'session' && e.detail.nativeTurnId === 'turn-exact'));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('tracked review offers read and report only; old or private invocations reject tracked delegation', async () => {
+  const calls: unknown[] = [];
+  const scope = { paths: ['orders.ts'], grantRevision: 2, originalSourceId: 'user-request' };
+  for (const carrier of ['claude-cli','codex-app-server'] as const) {
+    const active = request(carrier, tmpdir(), [], calls, { toolPolicyVersion: 'cross-action-v1', obligationPolicy: true });
+    const author = { ...active, projectWork: true as const, mayRequestProjectReview: true as const };
+    const review = { ...active, projectReview: scope };
+    const spec = runtimeTools(author).find(t => t.name === 'collaboration_request')!;
+    assert.ok('projectReview' in spec.inputSchema.properties && 'delivery' in spec.inputSchema.properties);
+    assert.deepEqual(runtimeTools(review).map(t => t.name).sort(), ['obligation_list', 'obligation_report', 'project_review_read']);
+    const args = { obligationId: 'child', version: 'v2', outcome: 'blocked', summary: 'Review needs an authorized project test' };
+    await executeTool(review, 'obligation_report', args, 'review-call');
+    await assert.rejects(executeTool(review, 'obligation_deliver', {obligationId:'parent', summary:'done'}, 'wrong-owner'), /outside/);
+    const delivery = { targets:['peer'], content:'Verify', delivery:{obligationId:'parent',version:'v2',acceptance:'Passing test'} };
+    for (const old of [
+      {...active, obligationPolicy:undefined},
+      {...active, visibility:{ kind:'private' as const, memberIds:['member-1'] }},
+      {...active, toolPolicyVersion:'cooperation-v2' as const},
+    ]) {
+      assert.ok(!runtimeTools(old).some(t => t.name.startsWith('obligation_')));
+      await assert.rejects(executeTool(old, 'collaboration_request', delivery, 'forged'), /outside/);
+    }
+  }
+  assert.equal(calls.length, 2);
+});
