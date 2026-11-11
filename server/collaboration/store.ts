@@ -24,6 +24,8 @@ import { ArtifactService } from './artifacts.js';
 import { InteractionService } from './interactions.js';
 import { CooperationService, compareSources } from './cooperation.js';
 import { RoomMemberService } from './room-members.js';
+import { FactorService, migrateFactors } from './factors.js';
+import { freezeMemberContext, requiresFreshMemberContext, validateMemberContext } from './member-context.js';
 import { migrateObligations } from './obligations.js';
 import { OrdinaryTaskService } from './tasks.js';
 
@@ -40,6 +42,7 @@ import { ObligationService } from './obligations.js';
 import type { ObligationDelegation } from '../../shared/obligations.js';
 
 export class CollaborationStore {
+  readonly factors: FactorService;
   readonly obligations: ObligationService;
   readonly db;
   readonly roomMembers: RoomMemberService;
@@ -59,6 +62,7 @@ export class CollaborationStore {
   private emitted: CollaborationEvent[] | undefined;
   constructor(readonly owner: Store, readonly options: { mcpReaders?: McpReaders; workspace?: string; artifactDir?: string; singleProjectVm?: boolean; clock?: () => number; projectWorkAvailability?: (member: Member, account: CollaborationAccount, grant?: Conversation['workspaceGrant']) => { available: boolean; reason?: string } } = {}) {
     this.db = owner.db;
+    this.factors = new FactorService(this);
     this.roomMembers = new RoomMemberService(this.db);
     this.obligations = new ObligationService(this);
     this.tasks = new OrdinaryTaskService({ db: this.db, tx: fn => this.tx(fn), command: (key, input, fn) => this.command(key, input, fn),
@@ -143,15 +147,16 @@ export class CollaborationStore {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id),
         state TEXT NOT NULL, value TEXT NOT NULL
       ); CREATE INDEX IF NOT EXISTS cc_project_intents_pending ON cc_project_intents(conversation_id,state)`);
-      if (version > 15) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 16) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
       this.roomMembers.migrate(version < 14);
       migrateObligations(this.db);
+      migrateFactors(this.db);
       this.db.exec(`CREATE TABLE IF NOT EXISTS cc_obligation_wait_wakes(
         wait_id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES cc_obligations(id),
         source_id TEXT NOT NULL UNIQUE REFERENCES cc_sources(id), event_key TEXT NOT NULL, value TEXT NOT NULL)`);
-      if (version === 15) return;
-      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=15'); return; }
+      if (version === 16) return;
+      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=16'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -168,7 +173,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(15)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(16)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }
@@ -181,9 +186,12 @@ export class CollaborationStore {
   }
   private makeContract(i: CollaborationInvocation, batch: DispatchBatch, snapshotOrigin: ExecutionContractSnapshot['snapshotOrigin'] = 'admission'): ExecutionContractSnapshot {
     const detail = this.detail(i.conversationId); const source = detail.sources.find(s => s.id === batch.sourceId)!;
+    const roomMember = snapshotOrigin === 'admission' ? i.roomMember : undefined;
+    const memberContext = roomMember && source.memberContextPolicy && batch.factorCutoff !== undefined
+      ? freezeMemberContext(this, roomMember, source, batch.factorCutoff) : undefined;
     const consumed = new Set(detail.consumptions.filter(c => c.memberId === i.memberId).map(c => c.sourceId));
     const cutoff = batch.historyCutoff ?? this.messageCursor(i.conversationId);
-    const historySnapshot = this.visibility.history(i.conversationId, i.memberId, scopeKey(source.visibility)).filter(m => (m.sequence ?? 0) <= cutoff && m.sourceId !== source.id && (m.importedOrigin || m.branchOrigin || (m.responseId ? detail.responses.some(r => r.id === m.responseId && terminal.has(r.status)) : (snapshotOrigin === 'admission' && m.author === 'user') || !!m.sourceId && consumed.has(m.sourceId) && detail.sources.some(s => s.id === m.sourceId && s.sequence < source.sequence))));
+    const historySnapshot = memberContext?.mode === 'private' ? [] : this.visibility.history(i.conversationId, i.memberId, scopeKey(source.visibility), !source.memberContextPolicy).filter(m => (m.sequence ?? 0) <= cutoff && m.sourceId !== source.id && (m.importedOrigin || m.branchOrigin || (m.responseId ? detail.responses.some(r => r.id === m.responseId && terminal.has(r.status)) : (snapshotOrigin === 'admission' && m.author === 'user') || !!m.sourceId && consumed.has(m.sourceId) && detail.sources.some(s => s.id === m.sourceId && s.sequence < source.sequence))));
     const historyMessageIds = historySnapshot.map(m => m.id);
     const historySourceIds = new Set(historySnapshot.flatMap(m => m.sourceId ? [m.sourceId] : []));
     const historySourceSnapshots: NonNullable<ExecutionContractSnapshot['historySourceSnapshots']> = detail.sources.filter(s => historySourceIds.has(s.id)).map(s => ({
@@ -213,13 +221,12 @@ export class CollaborationStore {
       grant.memberBindings[i.memberId]===this.workbench.projectMemberBinding(i.memberId) &&
       this.invocation(source.parentInvocationId).conversationId===i.conversationId &&
       this.contract(source.parentInvocationId).projectBrowser && this.contract(source.parentInvocationId).workspaceGrant?.revision===grant.revision;
-    const roomMember = snapshotOrigin === 'admission' ? i.roomMember : undefined;
     const boundObligation = roomMember && this.obligations.isBoundSource(source.id);
     const obligationPolicy = roomMember && !source.visibility && !source.excerptRefs?.length && !detail.conversation.importedFor &&
       !source.crossRef && !source.actionRef && (!source.projectReview || boundObligation) &&
       (source.kind === 'user' || boundObligation || !!source.taskRef);
-    return { ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
-      ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
+    return { ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
+      ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: requiresFreshMemberContext(memberContext) ? [] : this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private verifyProjectWork(source: SourceWork, memberId: string, grant: Conversation['workspaceGrant']) {
     const conversation = this.workbench.conversation(source.conversationId);
@@ -444,7 +451,7 @@ export class CollaborationStore {
         if (visibility) routing = { id: id(), targets: visibility.memberIds, reason: input.excerptRefs?.length ? 'explicit_excerpt' : 'explicit_private', policyVersion: 'visible-routing-v2', historyCursor: this.messageCursor(conversationId), configurationRevision: this.configurationRevision() };
         if (project && !visibility) routing = structuredClone(project.routing);
         else if (!visibility && !input.resolveWhenIdle) { try { routing = this.previewRoute(conversationId, routingContent); } catch (e) { if (!(e instanceof AppError) || e.code !== 'no_routable_member') throw e; } }
-        const source = this.addSource({ conversationId, kind: 'user', content, visibility, excerptRefs: input.excerptRefs, requestedTargets: routing?.targets ?? [], depth: 0, ...(routing ? {} : { bindingState: 'unresolved' as const }) });
+        const source = this.addSource({ conversationId, kind: 'user', content, visibility, excerptRefs: input.excerptRefs, replyTo: input.replyTo, requestedTargets: routing?.targets ?? [], depth: 0, ...(routing ? {} : { bindingState: 'unresolved' as const }) });
         if (project?.work && !visibility) {
           source.projectWork = true; source.projectGrantRevision = c.workspaceGrant!.revision;
           if (requestsCiRepair(input.content)) source.allowCiRepair=true;
@@ -452,7 +459,7 @@ export class CollaborationStore {
         }
         if (project && !project.work) source.projectConsultation = true;
         if (project?.origin) source.projectFollowupOf = project.origin;
-        source.routingContent = routingContent; source.attachmentIds = input.attachmentIds; source.replyTo = input.replyTo; this.put('cc_sources', source);
+        source.routingContent = routingContent; source.attachmentIds = input.attachmentIds; this.put('cc_sources', source);
         if (routing) { routing.id = id(); routing.sourceId = source.id; source.routingDecisionId = routing.id;
         this.db.prepare('INSERT INTO cc_routing VALUES(?,?,?)').run(routing.id, source.id, JSON.stringify(routing)); this.put('cc_sources', source); }
         this.cooperation.bindContinuation(source, project && !project.work ? 'next_turn' : input.deliveryMode);
@@ -470,22 +477,26 @@ export class CollaborationStore {
     if (!value.visibility && value.responseId) value.visibility = this.contract(this.response(value.responseId).invocationId).visibility;
     const inserted = this.db.prepare('INSERT INTO cc_messages VALUES(?,?,?,?)').run(value.id, value.conversationId, value.responseId ?? null, JSON.stringify(value));
     value.sequence = Number(inserted.lastInsertRowid); this.put('cc_messages', value);
+    this.factors.recordMessage(value);
     const c = this.get<Conversation>('cc_conversations', value.conversationId); c.updatedAt = value.createdAt; this.put('cc_conversations', c);
   }
-  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'excerptRefs' | 'crossRef' | 'actionRef'>>): SourceWork {
+  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>>): SourceWork {
     const conversation = this.get<Conversation>('cc_conversations', input.conversationId);
     if ((!input.requestedTargets.length && !(input.bindingState === 'unresolved' && input.kind === 'user')) || input.requestedTargets.some(t => !conversation.memberIds.includes(t))) throw new AppError(400, 'Targets must belong to this conversation.');
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
     const parent = input.parentInvocationId ? this.invocation(input.parentInvocationId) : undefined;
     const instanceBound = parent?.conversationId === conversation.id ? !!parent.roomMember : conversation.collaborationMode === 'continuous';
     const continuation = instanceBound && (!parent || this.contract(parent.id).continuationPolicy === 'durable-v1');
-    const source: SourceWork = { ...input, ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
+    const personal = instanceBound && !conversation.importedFor && !input.crossRef && !input.actionRef &&
+      (!parent || parent.conversationId === conversation.id && this.visibility.primary(parent.id).memberContextPolicy === 'member-context-v1');
+    const source: SourceWork = { ...input, ...(personal && { memberContextPolicy: 'member-context-v1' as const }), ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
     this.db.prepare('INSERT INTO cc_sources VALUES(?,?,?,?)').run(source.id, source.conversationId, sequence, JSON.stringify(source));
     for (const memberId of source.requestedTargets) {
       const enabled = this.get<Member>('cc_members', memberId).enabled;
       const delivery: Delivery = { id: id(), sourceId: source.id, memberId, ...(instanceBound && { roomMember: this.roomMembers.resolve(conversation.id, memberId) }), status: enabled ? 'pending' : 'held', ...(enabled ? {} : { holdReason: '成员已禁用；需要显式恢复。' }), revision: 1 };
       this.db.prepare('INSERT INTO cc_deliveries VALUES(?,?,?,?,?,?)').run(delivery.id, source.id, memberId, null, delivery.status, JSON.stringify(delivery));
     }
+    this.factors.recordSource(source);
     this.cooperation.changed(source.conversationId); this.event(source.conversationId, 'source.admitted', { sourceId: source.id, kind: source.kind, targets: source.requestedTargets }); return source;
   }
   detail(conversationId: string): ConversationDetail {
@@ -599,7 +610,7 @@ export class CollaborationStore {
           if (this.cooperation.delayed(source.id) || targets.some(d => busy.has(d.memberId) || held.has(d.memberId) || this.cooperation.suppressed(conversation.id, d.memberId))) { for (const d of targets) held.add(d.memberId); continue; }
           const claimId = id(); const createdAt = now();
           this.db.prepare('INSERT INTO cc_claims VALUES(?,?,?,?,?)').run(claimId, source.id, source.revision, JSON.stringify(targets.map(d => d.memberId)), createdAt);
-          const batch: DispatchBatch = { id: id(), sourceId: source.id, targets: targets.map(d => d.memberId), mode: targets.length > 1 ? 'parallel' : 'serial', createdAt, historyCutoff: this.messageCursor(conversation.id) };
+          const batch: DispatchBatch = { ...(source.memberContextPolicy && { factorCutoff: this.factors.cutoff(conversation.id) }), id: id(), sourceId: source.id, targets: targets.map(d => d.memberId), mode: targets.length > 1 ? 'parallel' : 'serial', createdAt, historyCutoff: this.messageCursor(conversation.id) };
           this.db.prepare('INSERT INTO cc_batches VALUES(?,?,?,?)').run(batch.id, source.id, claimId, JSON.stringify(batch));
           const invocations: CollaborationInvocation[] = [];
           for (const delivery of targets) {
@@ -762,7 +773,7 @@ export class CollaborationStore {
       if (event.kind === 'session') { if (typeof event.detail.nativeSessionId === 'string') i.nativeSessionId = event.detail.nativeSessionId; if (typeof event.detail.nativeTurnId === 'string') i.nativeTurnId = event.detail.nativeTurnId; if (event.detail.continuity === 'fresh' || event.detail.continuity === 'resumed') i.continuity = event.detail.continuity; }
       if (event.kind === 'usage') i.usage = nativeUsage(event.detail) ?? i.usage;
       this.applySessionEvent(i, evidence);
-      this.saveInvocation(i); this.event(i.conversationId, 'invocation.evidence', { invocationId, evidenceId: evidence.id, kind: event.kind });
+      this.saveInvocation(i); this.factors.recordEvidence(i, evidence); this.event(i.conversationId, 'invocation.evidence', { invocationId, evidenceId: evidence.id, kind: event.kind });
       if (terminal.has(i.status) && i.teardown === 'confirmed' && i.acceptance === 'accepted') this.cooperation.observeTerminalEvidence(i);
       this.tasks.onInvocationChanged(i);
     });
@@ -814,6 +825,12 @@ export class CollaborationStore {
   private finishTransition(invocationId: string, status: 'succeeded' | 'failed' | 'interrupted' | 'cancelled', content: string, expectedRevision?: number, maxDepth = 8, recoveryId?: string, interruptionCause?: 'runtime_unknown'): void {
     this.tx(() => {
       const i = this.invocation(invocationId); const response = this.response(i.responseId);
+      const contract = this.contract(i.id);
+      if (status === 'succeeded') validateMemberContext(this, contract);
+      // A free-form response to personal material may repeat it. Store private observations and
+      // notes under their own revocable grants rather than copying them into shareable messages.
+      if (contract.memberContext?.mode === 'private') content = status === 'succeeded'
+        ? '成员已处理专属资料。' : '本次专属资料处理未完成。';
       if (recoveryId) {
         if (i.status !== 'interrupted' || !['service_restart', 'service_stop'].includes(i.interruptionCause ?? '') || i.recoveryState !== 'pending' || (i.cancelRevision ?? 0) !== 0) throw new AppError(409, '执行不允许修正终态，取消或既有结果不会被覆盖。', 'recovery_not_allowed');
         this.event(i.conversationId, 'recovery.previous_result', { invocationId, status: i.status, content: response.content, finishedAt: i.finishedAt, recoveryId });
@@ -837,7 +854,7 @@ export class CollaborationStore {
       if (recoveryId) {
         const message = this.rows<ConversationMessage>('cc_messages', 'WHERE response_id=?', [response.id])[0];
         if (!message) throw new AppError(409, '恢复结果缺少原回复记录。', 'recovery_message_missing');
-        message.content = content; message.revision = (message.revision ?? 1) + 1; this.put('cc_messages', message);
+        message.content = content; message.revision = (message.revision ?? 1) + 1; this.put('cc_messages', message); this.factors.recordMessage(message);
       } else this.addMessage({ conversationId: i.conversationId, author: 'member', memberId: i.memberId, responseId: response.id, content });
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (callers.size) this.addSource({ id: response.id, conversationId: i.conversationId, kind: 'a2a_failure', parentInvocationId: i.id, content: `成员 ${i.memberId} 的执行失败：${content}`, requestedTargets: [...callers], authorMemberId: i.memberId, depth: source.depth + 1 });
@@ -1014,6 +1031,7 @@ export class CollaborationStore {
   prepareInput(invocationId: string): { manifest: InputManifest; prompt: string } {
     return this.tx(() => {
       const i = this.invocation(invocationId); const c = this.contract(invocationId); this.validateContract(c); this.visibility.validateInvocation(invocationId); this.actions.validateInvocation(invocationId); this.memory.validateInvocation(invocationId);
+      validateMemberContext(this, c);
       const existing = this.input(invocationId);
       if (existing) {
         const response = this.response(i.responseId); const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
@@ -1024,7 +1042,7 @@ export class CollaborationStore {
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (source.revision !== c.sourceRevision || hash(source.content) !== c.sourceDigest) throw new AppError(409, '来源已变化，不能使用旧执行的输入。', 'inputs_changed');
       const response = this.response(i.responseId); const legacy = c.contextPolicyVersion === 'legacy-history-40-v1';
-      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
+      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, memberContext: c.memberContext, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
         history: (c.historySnapshot ?? []).map(m => ({ ...m, sequence: m.sequence! })), historySourceSnapshots: c.historySourceSnapshots,
         ...(source.parentInvocationId ? { caller: this.invocation(source.parentInvocationId) } : {}) });
       let assembly = legacy ? undefined : build([]);

@@ -96,12 +96,12 @@ export class CrossConversationService {
       transfer.sourceId=s.id; this.data.save('cc_cross_transfers',transfer,'cross.sent'); this.store.publishSource(s); this.port.event(to.conversationId,'cross.received',{ transferId:transfer.id,sourceId:s.id }); return transfer;
     }));
   }
-  material(s: SourceWork) {
+  material(s: SourceWork, includeOrigin = true) {
     if (!s.crossRef) return s.content;
     const t=this.data.get<CrossTransfer>('cc_cross_transfers',s.crossRef.transferId); this.valid(this.grant(t.grantId),t.grantRevision); this.checkOrigin(t.origin);
     if (t.invalidatedAt || s.id!==t.sourceId || s.conversationId!==t.to.conversationId || s.withdrawnAt) conflict('跨会话来源已失效。');
     this.refs(t.conversationId,t.refs);
-    return s.content+(t.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(t.conversationId,t.refs):'');
+    return s.content+(t.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(t.conversationId,t.refs,includeOrigin):'');
   }
   routes(cid: string, memberId: string) { return this.grants().filter(g => { try { this.valid(g); return [g.home,g.target].some(e=>e.conversationId===cid&&e.memberId===memberId); } catch {return false;} }); }
   detail(cid:string) { return {crossGrants:this.grants().filter(g=>[g.home,g.target].some(e=>e.conversationId===cid)),crossTransfers:this.transfers().filter(t=>[t.from,t.to].some(e=>e.conversationId===cid))}; }

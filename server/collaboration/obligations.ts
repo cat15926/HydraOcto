@@ -67,9 +67,10 @@ export class ObligationService {
     if (row.conversationId !== cid) throw new AppError(404, '找不到该责任。');
     return row;
   }
-  private save(o: Obligation, reason: string) {
+  private save(o: Obligation, reason: string, returnedChildId?: string) {
     o.revision++; o.updatedAt = now();
     this.store.artifacts.save('cc_obligations', o, 'obligation.' + reason);
+    this.store.factors.recordObligation(o, reason, returnedChildId);
     return o;
   }
   private link(source: string, id: string) {
@@ -359,7 +360,7 @@ export class ObligationService {
         (pass ? '\n独立核验通过，可决定向用户交付。' : '\n核验未通过，请安排复验或说明阻塞。'));
       parent.state = pass ? 'open' : 'blocked'; parent.reason = pass ? undefined : '子责任未通过，需要负责人处理。';
       parent.blockedReturnSourceId = pass ? undefined : parent.currentSourceId;
-      this.save(parent,'result_returned');
+      this.save(parent,'result_returned',child.id);
     } catch (e) { if (!(e instanceof AppError)) throw e; this.block(parent,'约定的接回成员不可用。'); }
   }
   private latestChild(o: Obligation) { return this.raw(o.conversationId).filter(child => child.parentId === o.id).at(-1); }

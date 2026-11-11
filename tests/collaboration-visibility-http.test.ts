@@ -51,7 +51,7 @@ test('memory library: owner administration is independent of selected conversati
 
 test('N8 HTTP: private -> exact tool boundaries -> refs-only selected share -> isolated public prompt with CSRF and metadata projection', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.30.0-hydra-c');
+    assert.equal(h.boot.version, '0.31.0-hydra-d');
     assert.equal((await h.api(h.path + '/messages', { requestId: rid(), content: '', excerptTargets: ['codex'], excerptRefs: [null] })).status, 400);
     assert.equal((await h.api(h.path + '/visibility-organize', { requestId: rid(), expectedRevision: 1, action: 'groups', groups: [null] })).status, 400);
     const input = { requestId: rid(), content: 'TEST_TOOL_BOUNDARY PRIVATE_UNSELECTED TOKEN_TO_SHARE', privateTo: ['codex'] };
@@ -104,5 +104,50 @@ test('N8 HTTP: group targeting, branch no implicit call, human read cursor, tras
     assert.equal((await h.api(h.path + '/messages', { requestId: rid(), content: 'not sent' })).status, 404);
     assert.equal((await h.api(h.path + '/visibility-organize', { requestId: rid(), expectedRevision: 3, action: 'undelete' })).status, 200);
     assert.equal(h.calls.length, 2);
+  } finally { await h.close(); }
+});
+
+test('stage D observer and member exports hide restricted source IDs even when a chosen excerpt is authorized', async () => {
+  const h = await setup();
+  try {
+    const original = 'VISIBLE_WORD and secret remainder';
+    await h.api(h.path + '/messages', { requestId: rid(), content: original, privateTo: ['codex'] });
+    await h.wait(1);
+    const m = h.app.collaborationStore.visibility.messages(h.c.id).find(m => m.author === 'user')!;
+    await h.api(h.path + '/messages', { requestId: rid(), content: '供参考', excerptTargets: ['claude'],
+      excerptRefs: [{messageId: m.id, revision: 1, start: 0, end: 12, digest: textDigest(original)}] });
+    await h.wait(2);
+    const projections = [h.calls[1]?.prompt, (await h.api(h.path + '?viewer=claude')).data,
+      (await h.api(h.path + '/export?viewer=claude')).data,
+      (await h.api('/api/collaboration/search?viewer=claude&q=VISIBLE_WORD&conversationId=' + h.c.id)).data];
+    for (const projection of projections) {
+      const result = JSON.stringify(projection);
+      assert.match(result, /VISIBLE_WORD/);
+      assert.ok(!result.includes(m.id) && !result.includes('secret remainder'));
+    }
+    const observer = (await h.api(h.path + '/observer')).data;
+    assert.deepEqual(observer.messages, []);
+    assert.deepEqual(observer.factors, []);
+    assert.equal((await h.api(h.path + '/observer?viewer=codex')).status, 400);
+  } finally { await h.close(); }
+});
+
+test('stage D operator issues and retracts scoped records with CSRF, bounded input and safe retries', async () => {
+  const h = await setup();
+  try {
+    const draft = {requestId: rid(), memberId: 'claude', content: '个人原文', publicExpression: '可用观点'};
+    assert.equal((await h.api(h.path + '/factors/issue',draft,'')).status,403);
+    assert.equal((await h.api(h.path + '/factors/issue',{...draft,issuer:'claude'})).status,400);
+    const sent = await h.api(h.path + '/factors/issue',draft);
+    assert.equal(sent.status,200);
+    assert.deepEqual((await h.api(h.path + '/factors/issue',draft)).data,sent.data);
+    assert.equal((await h.api(h.path + '/factors?issuedTo=claude')).data.length,2);
+    for (const route of ['/factors','/factors?viewer=codex','/factors?issuedTo=codex']) {
+      assert.deepEqual((await h.api(h.path + route)).data, []);
+    }
+    const undo = {requestId:rid(),factorId:sent.data.factorId};
+    assert.equal((await h.api(h.path + '/factors/revoke',undo)).status,200);
+    assert.equal((await h.api(h.path + '/factors/revoke',undo)).status,200);
+    assert.deepEqual((await h.api(h.path + '/factors?viewer=claude')).data,[]);
   } finally { await h.close(); }
 });

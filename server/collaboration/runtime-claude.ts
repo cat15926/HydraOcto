@@ -52,6 +52,12 @@ async function createClaudeBridge(request: RuntimeRequest) {
 }
 
 export async function invokeClaude(request: RuntimeRequest, command: string, project?: ProjectCli): Promise<RuntimeResult> {
+  if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') {
+    if (project || request.account.auth!=='api' || request.nativeSessionId) throw new Error('私密工作记录需要全新隔离的 Claude 执行。');
+    const cwd = await mkdtemp(join(await realpath(tmpdir()), 'hydra-private-member-'));
+    try { return await invokeClaudeProcess({...request,cwd},command); }
+    finally { await rm(cwd,{recursive:true,force:true}); }
+  }
   if (project && request.account.auth === 'cli') {
     const grant = request.workspaceGrant;
     if (!project.officialClaude || !request.projectWork || request.projectReview || request.visibility?.kind === 'private' ||
@@ -79,7 +85,14 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
     }
   }
   const env = official ? await officialProjectNetworkEnv(officialClaudeEnv()) : project ? {} as NodeJS.ProcessEnv : cliEnv();
-  if (request.projectReview) {
+  const personal = request.memberContextMode === 'private' || request.memberContextMode === 'writing';
+  if (personal) {
+    env.HOME = request.cwd;
+    env.CLAUDE_CONFIG_DIR = join(request.cwd,'.claude');
+    env.XDG_CONFIG_HOME = request.cwd;
+    env.XDG_CACHE_HOME = request.cwd;
+  }
+  if (request.projectReview || personal) {
     env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1';
     env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
     env.CLAUDE_CODE_DISABLE_ORG_MEMORY = '1';
@@ -106,7 +119,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
   const platformTools = runtimeTools(request).map(tool => 'mcp__platform__'+tool.name);
   if (official) platformTools.push('mcp__platform__project_command');
   const args = ['--print', '--output-format', 'stream-json', '--verbose', '--permission-mode', confirmFiles ? 'default' : 'dontAsk', '--tools', nativeToolsAllowed.join(','), '--disable-slash-commands', '--setting-sources', '', '--settings', confirmFiles ? '{"disableAllHooks":true,"permissions":{"ask":["Write","Bash"]}}' : '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', mcpConfig, '--allowedTools', ...nativeToolsAllowed.filter(tool => !confirmFiles || !['Write','Bash'].includes(tool)), ...platformTools, ...(request.member.model ? ['--model', request.member.model] : []), ...(request.member.effort ? ['--effort', request.member.effort] : []), ...(resumeId ? ['--resume', resumeId] : ['--session-id', requestedSessionId])];
-  if (request.projectReview) {
+  if (request.projectReview || personal) {
     args.push('--no-session-persistence');
     if (api) args.push('--bare');
   }
@@ -187,17 +200,17 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
       }
       if (api && message.model !== api.model) { failed = new Error('Claude CLI did not confirm the selected account model.'); proc.kill('SIGTERM'); return; }
       if (api && /oauth|claude[._ ]?ai|subscription/i.test(String(message.apiKeySource ?? ''))) { failed = new Error('Claude CLI reported a conflicting authentication source.'); proc.kill('SIGTERM'); return; }
-      if (request.projectReview && (api || request.projectReview.mode === 'project')) {
+      if (personal || request.projectReview && (api || request.projectReview.mode === 'project')) {
         const granted = platformTools.slice().sort();
         if (!Array.isArray(message.tools) || granted.length === 0 ||
             JSON.stringify(message.tools.slice().sort()) !== JSON.stringify(granted)) {
-          failed = new Error(request.projectReview.mode === 'project'
+          failed = new Error(personal ? 'Claude 未确认本轮仅启用个人记录工具。' : request.projectReview?.mode === 'project'
             ? 'Claude Code 未确认本轮只启用授权的项目查阅和测试工具，评审已停止。'
             : 'Claude Code 未确认本轮只启用指定文件读取工具，评审已停止。');
           proc.kill('SIGTERM');
           return;
         }
-        request.onEvent({kind:'diagnostic', detail:{observation:'project_review_tools', evidence:'system.init', nativeSessionId, tools:granted}});
+        request.onEvent({kind:'diagnostic', detail:{observation:request.memberContextMode === 'writing' ? 'member_expression_tools' : personal ? 'private_member_tools' : 'project_review_tools', evidence:'system.init', nativeSessionId, tools:granted}});
       }
       // --resume + an echoed ID alone does not prove history restoration.
       const apiKeySource = ['none', 'user', 'project', 'org', 'environment', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'apiKeyHelper'].includes(message.apiKeySource) ? message.apiKeySource as string : undefined;
@@ -247,7 +260,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
     if (failed || !terminal || terminal.is_error || terminal.subtype !== 'success' || proc.exitCode !== 0 || !nativeSessionId) throw new Error(terminal?.is_error ? 'Claude returned an unsuccessful result.' : failed?.message ?? 'Claude exited without a successful result.');
     if (!accepted) request.onEvent({ kind: 'accepted', detail: { nativeSessionId, evidence: 'successful result', resultId: terminal.uuid } });
     request.signal.throwIfAborted();
-    const rows = request.projectReview || official ? undefined : project
+    const rows = request.projectReview || personal || official ? undefined : project
       ? projectTranscript(project.treeExited && assistantUuid ? await project.history?.finish(nativeSessionId, assistantUuid) : undefined, nativeSessionId)
       : await claudeTranscript(request.cwd, nativeSessionId);
     request.signal.throwIfAborted();

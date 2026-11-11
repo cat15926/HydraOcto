@@ -3,6 +3,7 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 
 import type { Conversation, ConversationDetail, ConversationMessage, Member, MessageExcerpt, SearchResult } from '../shared/collaboration';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 import { Choices, KnowledgeIcon, KnowledgeEmpty } from './KnowledgeUI';
+import { MemberMaterials } from './MemberMaterials';
 import { MemorySection } from './MemoryPanel';
 import './knowledge.css';
 const rid = () => crypto.randomUUID();
@@ -148,9 +149,11 @@ export function KnowledgePanel({ detail, members, command, refresh, choose, onCl
           </div> : <KnowledgeEmpty title="让讨论中的信息随时可查" description="输入关键词，查找消息、文本资料、已收录记忆和成员回复。" />}
         </section>}
         {tab === 'memory' && <MemorySection scope="conversation" memories={detail.memories ?? []} versions={detail.memoryVersions ?? []} conversations={[c]} members={members} command={command} refresh={refresh} initialConversationId={c.id} targetVersion={locateMemory} pendingRequest={memoryFocus} visible={visible} openLibrary={() => openLibrary()} />}
-        {tab === 'visibility' && <section aria-label="可见范围">
-          <div className="cc-knowledge-section-intro"><h3>查看成员能读取的内容</h3><p>选择一位成员，预览其获权消息。</p></div>
+        {<section hidden={tab !== 'visibility'} aria-label="可见范围">
+          <div className="cc-knowledge-section-intro"><h3>查看成员能读取的内容</h3><p>选择成员，查看其获权资料与会话消息。</p><a className="cc-knowledge-link" href={'/?observe='+encodeURIComponent(c.id)} target="_blank" rel="noreferrer">打开公开旁观视图 ↗</a></div>
           <label className="cc-viewer-field">成员视角预览<select aria-label="成员视角预览" value={viewer} onChange={e => void preview(e.target.value)}><option value="">选择成员</option>{available.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+          {c.collaborationMode==='continuous' && available.map(m=><MemberMaterials key={c.id+':'+m.id} cid={c.id} memberId={m.id} name={m.name}
+            active={tab==='visibility' && viewer===m.id && visible} editable={!c.archivedAt&&!c.deletedAt&&!c.importedFor} command={command} />)}
           {viewLoading ? <p className="cc-knowledge-loading" role="status">正在读取可见消息…</p> : !viewer ? <KnowledgeEmpty icon="eye" title="每位成员都有自己的可见范围" description="公开消息与获权私聊会在这里展示。" /> : view && <><div className="cc-knowledge-results-heading"><strong>{view.messages.length} 条可见消息</strong><a href={`/api/conversations/${c.id}/export?viewer=${encodeURIComponent(viewer)}`} download>按此范围导出 ↗</a></div>{!view.messages.length && <KnowledgeEmpty icon="eye" title="暂无可见消息" description="该成员目前没有可读取的会话消息。" />}{view.messages.map(m => <article className="cc-view-message" key={m.id}><small>{m.memberId ? members.find(x => x.id === m.memberId)?.name ?? m.memberId : m.author === 'user' ? '你' : '协作记录'}</small><p>{m.content}</p></article>)}</>}
         </section>}
         {tab === 'groups' && <section aria-label="成员组">

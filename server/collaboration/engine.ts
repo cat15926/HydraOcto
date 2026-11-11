@@ -1,3 +1,4 @@
+import { validateMemberContext, memberContextTool, memberContextToolAllowed, runtimeMemberContextMode, requiresFreshMemberContext } from './member-context.js';
 import { ciTargets } from './obligation-ci.js';
 import type { ProjectBrowser } from './project-browser.js';
 import type { ProjectPreviews } from './project-preview.js';
@@ -76,7 +77,7 @@ export class CollaborationEngine {
       const frozen = this.store.contract(invocation.id);
       if (frozen.workspaceGrant) verifyWorkspace(frozen.workspaceGrant);
       let identity: NativeSessionIdentity;
-      try { identity = frozen.projectReview ? {supported:false, reason:'项目评审使用一次性工作目录。'} : frozen.projectWork && !frozen.projectContinuity ? { supported:false, reason:'原执行保留一次性项目环境。' } : frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
+      try { identity = requiresFreshMemberContext(frozen.memberContext) ? {supported:false, reason:'本轮按成员资料权限重建独立输入。'} : frozen.projectReview ? {supported:false, reason:'项目评审使用一次性工作目录。'} : frozen.projectWork && !frozen.projectContinuity ? { supported:false, reason:'原执行保留一次性项目环境。' } : frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
         ? await this.runtime.sessionIdentity({ member: frozen.memberSnapshot, account: frozen.accountMetadataSnapshot, cwd: frozen.workspaceScope || this.options.workspace, projectWork:frozen.projectWork, projectContinuity:frozen.projectContinuity, workspaceGrant:frozen.workspaceGrant })
         : { supported: false, reason: '承载未提供原生会话身份探测，保留新建行为。' }; }
       catch (error) {
@@ -101,8 +102,9 @@ export class CollaborationEngine {
       const images = this.store.runtimeImages(i.id, input.manifest);
       onEvent({ kind: 'exposed', detail: { source: 'platform_prompt', characters: prompt.length, manifestId: input.manifest.id, renderDigest: input.manifest.renderDigest, providerAcceptance: false } });
       if(contract.projectWork) await this.options.previews?.releaseForWriter(i.conversationId);
-      const result = await this.runtime.invoke({ invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, obligationPolicy: contract.obligationPolicy, continuationPolicy: contract.continuationPolicy, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch,projectPreview:contract.projectPreview,projectBrowser:contract.projectBrowser, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
-        onAppendReady: dispatcher => { if (['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
+      validateMemberContext(this.store, contract);
+      const result = await this.runtime.invoke({ memberContextMode: runtimeMemberContextMode(contract.memberContext), invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, obligationPolicy: contract.obligationPolicy, continuationPolicy: contract.continuationPolicy, sessionPlan: i.sessionPlan, nativeSessionId: i.sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch,projectPreview:contract.projectPreview,projectBrowser:contract.projectBrowser, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
+        onAppendReady: dispatcher => { if (!requiresFreshMemberContext(contract.memberContext) && ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
         onInputRead: observation => {
           const h = this.store.cooperation.handoffs(i.conversationId).find(h => h.invocationId === i.id && h.nativeDeliveryId === observation.nativeDeliveryId);
           if (h) this.store.cooperation.appendResult(h.id, observation);
@@ -112,14 +114,19 @@ export class CollaborationEngine {
         onNativePermissionLost: id => this.store.interactions.revokeReturn(i.id,id),
         onInteraction: request => {
           const raw = JSON.stringify(request), safe = redact(raw);
-          if (request.gitDelivery) return Promise.resolve({state:'declined'});
+          if (requiresFreshMemberContext(contract.memberContext) || request.gitDelivery) return Promise.resolve({state:'declined'});
           if ((request.fileChange || request.nativeCommand) && (raw !== safe || !this.store.checkNativeFilePermission(i.id))) return Promise.resolve({state:'declined'});
           return this.store.interactions.wait(i.id, JSON.parse(safe), i.member.carrier === 'claude-cli' ? 'claude' : 'codex', controller.signal);
         },
         onInteractionResolved: requestId => this.store.interactions.resolved(i.id, requestId),
         onToolCall: async (name, args, callId) => {
           const current = this.store.invocation(i.id); if (current.status !== 'running' || controller.signal.aborted) throw new AppError(409, 'Invocation no longer accepts callbacks.');
+          validateMemberContext(this.store, contract);
+          if (!memberContextToolAllowed(runtimeMemberContextMode(contract.memberContext), name)) throw new AppError(403, '本次执行无权使用此工具。');
           this.store.visibility.assertTool(i.id, name);
+          if (name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select') {
+            return memberContextTool(this.store, i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
+          }
           this.store.bindToolCall(i.id, name, args, callId);
           if (name.startsWith('project_web_')) return researchPublicWeb(this.store,i.id,name,args,callId,controller.signal,redact);
           if (name === 'project_git_deliver') {
@@ -196,6 +203,7 @@ export class CollaborationEngine {
       await this.appending.get(i.id);
       if (result.nativeSessionId) onEvent({ kind: 'session', detail: { nativeSessionId: result.nativeSessionId, nativeTurnId: result.nativeTurnId, continuity: result.continuity } });
       if(contract.obligationPolicy && !this.stopping && !controller.signal.aborted) await this.store.obligations.verifyDelivery(i.id,controller.signal);
+      validateMemberContext(this.store, contract);
       this.store.finish(i.id, this.stopping ? 'interrupted' : 'succeeded', this.stopping ? '服务停止，执行结果等待核查。' : redact(result.text), undefined, this.options.maxDepth);
     } catch (error) {
       try {

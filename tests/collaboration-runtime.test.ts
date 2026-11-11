@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, chmod, rm, symlink } from 'node:fs/promises';
+import { access, mkdtemp, writeFile, chmod, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -88,6 +88,37 @@ test('Claude API project reviewers must confirm the single file-reading tool bef
       await assert.rejects(review,/指定文件读取工具/);
       assert.ok(!events.some(e => e.kind === 'accepted' || e.detail.observation === 'native_terminal'));
     }
+  }
+});
+
+test('personal reading and approved public writing run in separate disposable Claude homes with exact native tool evidence', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'member-runtime-'));
+  const key = 'HYDRA_MEMBER_FIXTURE_KEY';
+  process.env[key]='fixture';
+  t.after(async()=>{delete process.env[key]; await rm(dir,{recursive:true,force:true});});
+  const homes = new Set<string>();
+  for (const mode of ['private','writing'] as const) {
+    const events:RuntimeEvent[] = [];
+    const req = request('claude-cli', dir, events, [], {memberContextMode:mode,
+      ...(mode==='private' && {visibility:{kind:'private',memberIds:['member-1']}})});
+    const tools = runtimeTools(req).map(t=>'mcp__platform__'+t.name);
+    req.account = {...req.account,auth:'api',apiKeyEnv:key,baseUrl:'http://127.0.0.1:1'};
+    const command = await script(dir,'fixture.cjs',`
+      const a=process.argv.slice(2), sid=a[a.indexOf('--session-id')+1];
+      const send=m=>console.log(JSON.stringify({...m,session_id:sid}));
+      const home=process.env.HOME;
+      if (home!==process.cwd() || process.env.CLAUDE_CONFIG_DIR!==home+'/.claude' ||
+        !a.includes('--bare') || !a.includes('--no-session-persistence') || a.includes('--resume') ||
+        a[a.indexOf('--tools')+1]!=='' || !a.includes('--strict-mcp-config')) process.exit(31);
+      process.stdin.resume(); process.stdin.on('end',()=>{
+        send({type:'system',subtype:'init',model:'test-model',apiKeySource:'ANTHROPIC_AUTH_TOKEN',tools:${JSON.stringify(tools)}});
+        send({type:'result',subtype:'success',result:home});
+      });`);
+    const result = await invokeClaude(req,command);
+    assert.ok(events.some(e=>e.detail.observation===(mode==='private' ? 'private_member_tools' : 'member_expression_tools')));
+    assert.ok(!homes.has(result.text));
+    homes.add(result.text);
+    await assert.rejects(access(result.text), {code:'ENOENT'});
   }
 });
 

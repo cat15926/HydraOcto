@@ -1,3 +1,4 @@
+import { requiresFreshMemberContext } from './member-context.js';
 import { randomUUID } from 'node:crypto';
 import type { AppendObservation, CollaborationInvocation, Consumption, Conversation, Delivery, InputExposure, InputHandoff, MentionGroup, QueueState, SourceWork } from '../../shared/collaboration.js';
 import { AppError, now } from '../store.js';
@@ -101,6 +102,12 @@ export class CooperationService {
     if (this.store.obligations.isBoundSource(s.id) || this.store.obligations.isBoundSource(primary.id)) return false;
     if (this.store.workbench.imageReferences(i.conversationId, primary.attachmentIds).length) return false;
     const contract = this.store.contract(i.id);
+    if (requiresFreshMemberContext(contract.memberContext)) return false;
+    // A new personal request must freeze its own authorized record and tool set at admission.
+    if (s.memberContextPolicy && i.roomMember && !s.projectWork && !s.projectReview) {
+      const scope = s.visibility?.kind === 'private' && !s.visibility.revealedAt ? 'private' : 'public';
+      if (this.store.factors.snapshot(s.conversationId, i.roomMember, scope).length) return false;
+    }
     if (contract.projectReview || s.projectReview || s.projectRepair || s.projectCiRepair || s.allowCiRepair || s.allowReviewRevision) return false;
     if (contract.projectWork && (primary.projectRepair || primary.projectCiRepair || primary.allowCiRepair || primary.allowReviewRevision)) return false;
     return contract.projectWork === s.projectWork && (!s.projectWork || contract.workspaceGrant?.revision === s.projectGrantRevision);

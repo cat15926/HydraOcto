@@ -112,7 +112,7 @@ export class VisibilityService {
     }
     return visibility;
   }
-  resolveRefs(cid: string, refs: MessageExcerpt[]): string {
+  resolveRefs(cid: string, refs: MessageExcerpt[], includeOrigin = true): string {
     this.assertConversation(cid);
     if (!Array.isArray(refs) || !refs.length || refs.length > 8) throw new AppError(400, '选段列表无效。');
     let bytes = 0;
@@ -127,7 +127,7 @@ export class VisibilityService {
       for (const n of [ref.start, ref.end]) if (n > 0 && n < m!.content.length && /[\uD800-\uDBFF]/.test(m!.content[n - 1]!) && /[\uDC00-\uDFFF]/.test(m!.content[n]!)) throw new AppError(400, '选段不能截断 Unicode 字符。');
       const selected = m!.content.slice(ref.start, ref.end); bytes += Buffer.byteLength(selected);
       if (bytes > 32000) throw new AppError(413, '选段总量超过 32,000 字节。');
-      return JSON.stringify({ selectedText: selected, sourceMessageId: m!.id, start: ref.start, end: ref.end });
+      return JSON.stringify(includeOrigin ? { selectedText: selected, sourceMessageId: m!.id, start: ref.start, end: ref.end } : { selectedText: selected });
     }).join('\n');
   }
   admissionReason(s: SourceWork): string | undefined {
@@ -142,29 +142,41 @@ export class VisibilityService {
     if (privateScope(origin) && (!privateScope(visibility) || visibility!.memberIds.some(id => !this.allows(cid, origin, id)))) conflict('被引用消息仍是私聊，请先公开原消息或只分享选定正文。');
     return `\n<reply-context messageId=${JSON.stringify(m!.id)} author=${JSON.stringify(m!.memberId ?? m!.author)}>\n${m!.content.slice(0, 8000)}${m!.content.length > 8000 ? '\n[引用超过 8,000 字符，余文未包含]' : ''}\n</reply-context>`;
   }
-  sourceContent(s: SourceWork, visibility = s.visibility): string {
+  sourceContent(s: SourceWork, visibility = s.visibility, includeOrigin = !s.memberContextPolicy): string {
     if (s.replyTo) this.replyContent(s.conversationId, s.replyTo, visibility);
-    if (s.crossRef) return this.store.cross.material(s);
-    if (s.actionRef) return this.store.actions.material(s);
-    return s.excerptRefs?.length ? `${s.content}\n用户明确分享的准确选段（仅这些片段获授权）：\n${this.resolveRefs(s.conversationId, s.excerptRefs)}` : s.content;
+    if (s.crossRef) return this.store.cross.material(s, includeOrigin);
+    if (s.actionRef) return this.store.actions.material(s, includeOrigin);
+    return s.excerptRefs?.length ? `${s.content}\n用户明确分享的准确选段（仅这些片段获授权）：\n${this.resolveRefs(s.conversationId, s.excerptRefs, includeOrigin)}` : s.content;
   }
-  projectedMessage(m: ConversationMessage): ConversationMessage {
+  projectedMessage(m: ConversationMessage, includeOrigin = true): ConversationMessage {
     let content = m.content;
     if (m.excerptRefs?.length) {
-      try { content += '\n' + this.resolveRefs(m.excerptConversationId ?? m.conversationId, m.excerptRefs); }
+      try { content += '\n' + this.resolveRefs(m.excerptConversationId ?? m.conversationId, m.excerptRefs, includeOrigin); }
       catch { content += '\n[选段来源已失效，不再提供缓存正文]'; }
     }
     const replyTo = m.replyTo && this.messages(m.conversationId).some(x => x.id === m.replyTo && !x.deletedAt) ? m.replyTo : undefined;
     return { ...m, replyTo, content, visibility: this.messageScope(m) };
   }
-  history(cid: string, memberId: string, scope: string) {
+  scopedMessage(m: ConversationMessage): ConversationMessage {
+    const { id, conversationId, memberId, author, content, createdAt, attachmentIds } = this.projectedMessage(m, false);
+    return { id, conversationId, memberId, author, content, createdAt, ...(attachmentIds?.length && { attachmentIds }) };
+  }
+  observer(cid: string) {
+    const { id, title } = this.assertConversation(cid);
+    const messages = this.readable(cid).filter(m => !privateScope(this.messageScope(m))).map(m => {
+      const { id, memberId, author, content, createdAt } = this.scopedMessage(m);
+      return { id, memberId, author, content, createdAt };
+    });
+    return { conversation: { id, title }, messages, factors: this.store.factors.list(cid) };
+  }
+  history(cid: string, memberId: string, scope: string, includeOrigin = true) {
     return this.readable(cid, memberId, scope).map(m => {
       const s = m.sourceId && this.data.get<SourceWork>('cc_sources', m.sourceId);
       if (s && (s.crossRef || s.actionRef || m.attachmentIds?.length || m.replyTo || m.excerptRefs?.length)) {
-        try { return { ...m, visibility: this.messageScope(m), content: this.sourceContent(s, this.messageScope(m)) }; }
+        try { return { ...m, visibility: this.messageScope(m), content: this.sourceContent(s, this.messageScope(m), includeOrigin) }; }
         catch { return undefined; }
       }
-      if (m.excerptRefs?.length) { try { return { ...m, visibility: this.messageScope(m), content: m.content + '\n' + this.resolveRefs(m.excerptConversationId ?? cid, m.excerptRefs) }; } catch { return undefined; } }
+      if (m.excerptRefs?.length) { try { return { ...m, visibility: this.messageScope(m), content: m.content + '\n' + this.resolveRefs(m.excerptConversationId ?? cid, m.excerptRefs, includeOrigin) }; } catch { return undefined; } }
       if (m.replyTo) { try { return { ...m, visibility: this.messageScope(m), content: m.content + '\n' + this.replyContent(cid, m.replyTo, this.messageScope(m)) }; } catch { return undefined; } }
       return { ...m, visibility: this.messageScope(m) };
     }).filter((m): m is ConversationMessage & { visibility: MessageVisibility | undefined } => !!m);
@@ -196,7 +208,7 @@ export class VisibilityService {
         if (m!.replyTo) this.replyContent(cid, m!.replyTo);
         m!.visibility = { ...this.messageScope(m!)!, revealedAt: now() };
       } else m!.deletedAt = now();
-      m!.revision = (m!.revision ?? 1) + 1; this.put('cc_messages', m!);
+      m!.revision = (m!.revision ?? 1) + 1; this.put('cc_messages', m!); this.store.factors.recordMessage(m!);
       if (m!.sourceId && input.action === 'delete') {
         const s = this.data.get<SourceWork>('cc_sources', m!.sourceId);
         if (!s.withdrawnAt) this.store.cooperation.withdraw(s.id, { requestId: `delete:${mid}`, expectedRevision: s.revision });
@@ -239,7 +251,7 @@ export class VisibilityService {
   export(cid: string, memberId?: string, messageIds?: string[]) {
     const c = this.assertConversation(cid, memberId); let messages = this.readable(cid, memberId);
     if (messageIds) { if (!messageIds.length || messageIds.length > 1000 || new Set(messageIds).size !== messageIds.length || messageIds.some(id => !messages.some(m => m.id === id))) throw new AppError(404, '选定消息不可访问。'); messages = messages.filter(m => messageIds.includes(m.id)); }
-    return { format: 'conversation-json-v1', title: c.title, conversationId: cid, exportedAt: now(), scope: memberId ? `member:${memberId}` : 'local-owner', messages: messages.map(m => this.projectedMessage(m)) };
+    return { format: 'conversation-json-v1', title: c.title, conversationId: cid, exportedAt: now(), scope: memberId ? `member:${memberId}` : 'local-owner', messages: messages.map(m => memberId ? this.scopedMessage(m) : this.projectedMessage(m)) };
   }
   branch(cid: string, input: Record<string, unknown>) {
     return this.port.tx(() => this.port.command(`branch:${cid}:${text(input.requestId)}`, input, () => {
@@ -270,7 +282,7 @@ export class VisibilityService {
   }
   /** Member projection deliberately contains no owner-only audit objects or global event stream. */
   view(cid: string, memberId: string) {
-    const c = this.assertConversation(cid, memberId), messages = this.readable(cid, memberId).map(m => this.projectedMessage(m));
+    const c = this.assertConversation(cid, memberId), messages = this.readable(cid, memberId).map(m => this.scopedMessage(m));
     const attachmentIds = new Set(messages.flatMap(m => m.attachmentIds ?? []));
     return { conversation: { id: c.id, title: c.title, memberIds: c.memberIds }, messages, attachments: this.store.workbench.attachments(cid).filter(a => attachmentIds.has(a.id)) };
   }

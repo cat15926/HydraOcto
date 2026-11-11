@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ExecutionContractSnapshot, NativeSessionIdentity, RuntimeUsage } from '../../shared/collaboration.js';
+import { requiresFreshMemberContext } from './member-context.js';
 import { canonical } from '../store.js';
 
 export const digest = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
@@ -7,6 +8,10 @@ export function sessionFingerprint(contract: ExecutionContractSnapshot, identity
   const m = contract.memberSnapshot, a = contract.accountMetadataSnapshot;
   return digest({ carrier: m.carrier, account: a, model: m.model, effort: m.effort, instructions: m.instructions,
     ...(contract.roomMember && {roomMemberId:contract.roomMember.id}),
+    ...(contract.memberContext && requiresFreshMemberContext(contract.memberContext) && {memberContext:{
+      policy:'member-context-v1', mode:contract.memberContext.mode, instance:contract.memberContext.instanceId,
+      generation:contract.memberContext.generation, factors:digest(contract.memberContext.factors)
+    }}),
     ...(contract.obligationPolicy && {obligationPolicy:true}),
     ...(contract.continuationPolicy && {continuationPolicy:contract.continuationPolicy}),
     ...(imageInvocationId ? { imageInvocationId } : {}),

@@ -108,7 +108,7 @@ export function collaborationHttp(deps: HttpDependencies) {
       }
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.30.0-hydra-c', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.31.0-hydra-d', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
@@ -116,6 +116,27 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'GET' && path === '/api/collaboration/memory-library') {
         if ([...url.searchParams.keys()].length) throw new AppError(400, '记忆库管理仅供本地用户使用，不接受成员视角参数。');
         json(response, 200, store.memory.library()); return true;
+      }
+      const factorRead = /^\/api\/conversations\/([^/]+)\/(observer|factors)$/.exec(path);
+      if (request.method === 'GET' && factorRead) {
+        const cid = factorRead[1]!;
+        store.visibility.assertConversation(cid);
+        const params = [...url.searchParams.keys()];
+        if (factorRead[2] === 'observer') {
+          if (params.length) throw new AppError(400, '旁观视图仅提供公开内容。');
+          json(response, 200, store.visibility.observer(cid));
+        } else {
+          if (params.length > 1 || params.some(k => k !== 'viewer' && k !== 'issuedTo')) throw new AppError(400, '资料查看范围无效。');
+          if (!params.length) json(response, 200, store.factors.list(cid));
+          else {
+            const memberId = id(url.searchParams.get(params[0]!));
+            store.visibility.assertConversation(cid, memberId);
+            const member = store.roomMembers.resolve(cid, memberId);
+            const items = params[0] === 'issuedTo' ? store.factors.operatorList(cid).filter(f => f.memberId === memberId) : store.factors.list(cid, member);
+            json(response, 200, items);
+          }
+        }
+        return true;
       }
       const conversation = /^\/api\/conversations\/([^/]+)$/.exec(path);
       if (request.method === 'GET' && conversation) {
@@ -174,6 +195,23 @@ export function collaborationHttp(deps: HttpDependencies) {
       if (request.method === 'POST') {
         deps.verifyCsrf(request); const uploadLimit = /^\/api\/conversations\/[^/]+\/attachments$/.test(path) ? imageUploadJsonLimit : undefined;
         const body = object(await deps.readJson(request, uploadLimit));
+        const factorWrite = /^\/api\/conversations\/([^/]+)\/factors\/(issue|revoke)$/.exec(path);
+        if (factorWrite) {
+          const cid = factorWrite[1]!, issue = factorWrite[2] === 'issue';
+          const keys = issue ? ['requestId','memberId','content','publicExpression','expressionOptions'] : ['requestId','factorId'];
+          if (Object.keys(body).some(k => !keys.includes(k))) throw new AppError(400, '资料操作包含未知字段。');
+          const requestId = id(body.requestId);
+          const choices = body.expressionOptions;
+          if (choices !== undefined && (!Array.isArray(choices) || choices.length < 2 || choices.length > 8 ||
+              choices.some(x => typeof x !== 'string') || body.publicExpression !== undefined)) throw new AppError(400, '请选择一种表达方式，备选观点需有 2 至 8 项。');
+          const result = issue
+            ? store.factors.issue(cid, { requestId, memberId: id(body.memberId), content: field(body.content, '专属资料', 4000),
+                ...(choices !== undefined && { expressionOptions: choices.map(x => field(x, '备选观点', 1000)) }),
+                ...(body.publicExpression !== undefined && { publicExpression: field(body.publicExpression, '可公开表达', 1000) }) })
+            : store.factors.revoke(cid, { requestId, factorId: id(body.factorId) });
+          json(response, 200, result);
+          return true;
+        }
         const modeRoute = /^\/api\/conversations\/([^/]+)\/collaboration-mode$/.exec(path);
         if (modeRoute) {
           if (body.mode !== 'legacy' && body.mode !== 'continuous') throw new AppError(400,'请选择有效的协作模式。');

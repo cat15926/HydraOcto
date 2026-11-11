@@ -63,7 +63,18 @@ export interface ProjectReviewCheck {
   checkedAt: string;
   files: { path: string; status: 'unchanged' | 'changed' | 'unavailable' | 'unread'; sha256?: string; currentSha256?: string }[];
 }
+export type MemberContextMode = 'private' | 'public';
+export type RuntimeMemberContextMode = MemberContextMode | 'writing';
+export interface MemberContextSnapshot {
+  mode: MemberContextMode;
+  instanceId: string;
+  generation: number;
+  cutoff: number;
+  factors: Pick<import('./factors.js').FactorView, 'id' | 'version' | 'kind' | 'content' | 'parentIds' | 'sourceRef' | 'issuer' | 'expressionOptions'>[];
+  obligations: {id:string; revision:number; goal:string; state:string; wait?:string}[];
+}
 export interface SourceWork {
+  memberContextPolicy?: 'member-context-v1';
   continuationPolicy?: 'durable-v1';
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
@@ -144,6 +155,7 @@ export interface Delivery {
   handoffId?: string;
 }
 export interface DispatchBatch {
+  factorCutoff?: number;
   id: string; sourceId: string; targets: string[]; mode: ExecutionMode; createdAt: string; historyCutoff?: number;
 }
 export interface CollaborationInvocation {
@@ -372,6 +384,7 @@ export interface HistorySourceResponsibility {
   }[];
 }
 export interface ExecutionContractSnapshot {
+  memberContext?: MemberContextSnapshot;
   roomMember?: RoomMemberInstance;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
@@ -451,6 +464,7 @@ export interface RuntimeEvent {
   detail: Record<string, unknown>;
 }
 export interface RuntimeRequest {
+  memberContextMode?: RuntimeMemberContextMode;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
   images?: RuntimeImageInput[];

@@ -172,3 +172,12 @@
   .cc-library-heading p { font-size: 11px; }
   .cc-library-heading > button { font-size: 11px; }
 }
+
+.cc-member-materials { margin:1rem 0; border-top:1px solid var(--cc-line,#dce2d7); padding-top:.6rem }
+.cc-member-materials textarea { width:100%; min-height:4rem; resize:vertical }
+.cc-member-materials p,.cc-observer p { overflow-wrap:anywhere; white-space:pre-wrap }
+.cc-observer { max-width:48rem; margin:auto; padding:clamp(1rem,4vw,3rem); color:#293d34; font-family:inherit }
+.cc-observer header { border-bottom:1px solid #dce2d7; padding-bottom:.75rem }
+.cc-observer ol { list-style:none; padding:0 }
+.cc-observer li { padding:1rem 0; border-bottom:1px solid #e0e5dd }
+.cc-observer small,.cc-observer time { color:#5a6c62 }

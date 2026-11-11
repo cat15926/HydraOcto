@@ -27,7 +27,7 @@ export class ActionService {
   }
   saveTask(t:OrdinaryTask,type:string){t.revision++;t.updatedAt=now();this.store.visibility.put('cc_ordinary_tasks',t);this.port.event(t.conversationId,type,{taskId:t.id,delegationId:t.delegationId,ownerRevision:t.ownerRevision});}
   authorized(a:ActionRecord){this.cross.valid(this.cross.grant(a.grantId),a.grantRevision);this.cross.checkOrigin(a.origin);this.cross.refs(a.conversationId,a.refs);this.cross.endpoint(a.holder);if(!ended.has(a.state))this.task(a);}
-  material(s:SourceWork){if(!s.actionRef)return s.content;const a=this.get(s.actionRef.actionId);this.authorized(a);if(s.withdrawnAt)conflict('Action 来源已撤回。');return s.content+(a.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(a.conversationId,a.refs):'');}
+  material(s:SourceWork, includeOrigin = true){if(!s.actionRef)return s.content;const a=this.get(s.actionRef.actionId);this.authorized(a);if(s.withdrawnAt)conflict('Action 来源已撤回。');return s.content+(a.refs.length?'\n获准公开选段：\n'+this.store.visibility.resolveRefs(a.conversationId,a.refs,includeOrigin):'');}
   admissionReason(s:SourceWork):string|undefined{
     if(!s.actionRef)return;
     try{const a=this.get(s.actionRef.actionId);this.authorized(a);if(a.generation!==s.actionRef.generation||a.currentSourceId!==s.id||a.state!=='queued'||a.executionId||s.requestedTargets.length!==1||s.requestedTargets[0]!==a.holder.memberId||s.conversationId!==a.holder.conversationId)conflict('Action 来源代次或执行位置已变化。');}
