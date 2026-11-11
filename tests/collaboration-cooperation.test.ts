@@ -470,3 +470,23 @@ test('late provider teardown before the deadline seals the result even if the ne
     assert(read().contract?.wakeSourceId);
   } finally {h.close();}
 });
+
+
+test('a deadline fences an admitted participant whose provider has not launched', () => {
+  const h=setup();
+  try {
+    const host=h.run();
+    const {obligation}=h.s.obligations.tool(host.id,'obligation_open',{goal:'等两份意见'},rid()) as {obligation:Obligation};
+    const {group}=h.s.cooperation.createGroup(h.c.id,{targets:['claude','reviewer'],question:'检查资料',timeoutMs:1000,requestId:rid(),obligationId:obligation.id},host.id);
+    h.end(host);
+    const prepared=h.admit().invocations;
+    h.advance(1000); h.s.cooperation.groupTick();
+    const closed=h.s.cooperation.groups(h.c.id).find(g=>g.id===group.id)!;
+    assert.equal(closed.state,'timeout'); assert.equal(closed.results!.length,0);
+    for (const i of prepared) {
+      assert.equal(h.s.invocation(i.id).dispatchStarted,false);
+      assert.equal(h.s.invocation(i.id).status,'cancelled');
+      assert.throws(()=>h.s.startInvocation(i.id));
+    }
+  } finally {h.close();}
+});

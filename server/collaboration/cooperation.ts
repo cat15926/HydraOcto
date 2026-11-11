@@ -232,9 +232,9 @@ export class CooperationService {
       else if (this.clock() >= Date.parse(g.deadline)) g.state = 'timeout';
       else return;
     }
-    if (g.state !== 'done' && !source.withdrawnAt) {
-      // Fence queued targets only. Already running late replies remain in their original execution history.
-      this.withdraw(source.id, {requestId:'settled:'+g.id, expectedRevision:source.revision});
+    if (g.state !== 'done') {
+      // Suppress work that has not started. Any already running late reply stays in its own history.
+      if (!source.withdrawnAt) this.withdraw(source.id, {requestId:'settled:'+g.id, expectedRevision:source.revision});
       for (const run of this.store.invocations(g.conversationId)) {
         if (run.status === 'prepared' && !run.dispatchStarted && this.store.contract(run.id).primarySourceId === source.id) {
           this.store.cancel(run.id);
