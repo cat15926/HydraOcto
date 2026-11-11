@@ -53,6 +53,8 @@ try {
     if(d.invocations.length && d.invocations.every(i=>i.status==='succeeded') && !d.deliveries.some(x=>x.status==='pending')) {
       assert.equal(root?.state,'delivered','No final delivery or autonomous continuation');
       const shifts=store.tasks.handoffs(cid);
+      assert(root.taskId && shifts.every(h=>h.taskId===root.taskId && h.offer?.obligationId===root.id),'The signed handoffs must transfer the ORIGINAL user commitment');
+      assert(shifts.every(h=>d.invocations.some(i=>i.id===h.offer?.decision?.invocationId && i.roomMember?.id===h.offer.candidate.id)), 'Missing candidate signature');
       assert.deepEqual(shifts.map(h=>h.offer?.decision?.choice),rejectFirst?['decline','accept']:['accept']);
       assert.deepEqual(shifts.map(h=>h.state),rejectFirst?['refused','applied']:['applied']);
       assert.equal(root.owner.memberId,rejectFirst?'standby':'evening');

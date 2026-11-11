@@ -281,7 +281,7 @@ export class ObligationService {
   }
   tool(id: string, name: string, args: Record<string,unknown>, callId: string) {
     this.actor(id);
-    const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary'],obligation_wait:['obligationId','condition','deadline','kind']};
+    const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_handoff:['obligationId','targetMemberId','reason'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary'],obligation_wait:['obligationId','condition','deadline','kind']};
     if (!keys[name] || Object.keys(args).some(k => !keys[name]!.includes(k))) throw new AppError(400,'责任工具参数无效；身份与执行只能由平台提供。');
     if (name === 'obligation_list') {
       const obligations = this.context(id);
@@ -292,6 +292,16 @@ export class ObligationService {
     }
     const key = value(callId,'调用编号',160);
     return this.port.tx(() => this.port.command('obligation-tool:' + id + ':' + key,{name,args},() => {
+      if (name === 'obligation_handoff') {
+        if (this.store.contract(id).handoffPolicy !== 'consent-v2') throw new AppError(403,'本轮冻结的工具契约不支持按委托交班。');
+        const {o} = this.authorize(id,args.obligationId);
+        if (o.parentId || !o.taskId || o.state !== 'open') conflict('仅开放的主委托可发起整项交班。');
+        const t = this.store.tasks.getTask(o.taskId);
+        const {handoff} = this.store.tasks.handoff(t.id,{requestId:randomUUID(),expectedRevision:t.revision,expectedOwnerRevision:o.ownerRevision!,
+          targetMemberId:value(args.targetMemberId,'候选成员',100),reason:value(args.reason,'交班说明')},id);
+        if (handoff.offer?.obligationId !== o.id) conflict('交班邀请未与原委托绑定。');
+        return {obligation:o,handoff};
+      }
       let obligation: Obligation;
       switch (name) {
         case 'obligation_open': obligation = this.open(id,args,key); break;

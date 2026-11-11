@@ -96,6 +96,8 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'handoffPolicy' | 'ma
         },
       };
     }
+    if (t.name === 'task_handoff' && request.handoffPolicy === 'consent-v2') return {...t,
+      description:t.description+' For a registered commitment, call obligation_handoff with its obligationId. Creating and handing off a separate task will not transfer that commitment.'};
     if (t.name === 'task_handoff' && request.handoffPolicy === 'consent-v1') return {...t,
       description:t.description+' For an open ongoing commitment, this offers the whole task. Remain responsible until the candidate accepts and your execution exits. A decline returns to you.'};
     if (t.name !== 'collaboration_request') return t;

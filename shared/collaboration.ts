@@ -1,3 +1,4 @@
+export type HandoffPolicy = 'consent-v1' | 'consent-v2' | 'candidate-v1';
 /** Independently implemented continuous-collaboration protocol, round 1. */
 export const carrierNames = {
   'codex-app-server': 'Codex CLI', 'claude-cli': 'Claude Code CLI', 'hermes-agent': 'Hermes Agent',
@@ -78,7 +79,7 @@ export interface SourceWork {
   publicStatement?: true;
   memberContextPolicy?: 'member-context-v1';
   continuationPolicy?: 'durable-v1';
-  handoffPolicy?: 'consent-v1' | 'candidate-v1';
+  handoffPolicy?: HandoffPolicy;
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
@@ -396,7 +397,7 @@ export interface ExecutionContractSnapshot {
   roomMember?: RoomMemberInstance;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
-  handoffPolicy?: 'consent-v1' | 'candidate-v1';
+  handoffPolicy?: HandoffPolicy;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -477,7 +478,7 @@ export interface RuntimeRequest {
   memberContextMode?: RuntimeMemberContextMode;
   obligationPolicy?: boolean;
   continuationPolicy?: 'durable-v1';
-  handoffPolicy?: 'consent-v1' | 'candidate-v1';
+  handoffPolicy?: HandoffPolicy;
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;
