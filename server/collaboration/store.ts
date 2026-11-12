@@ -1,3 +1,4 @@
+import { MAX_ROOM_MEMBERS } from '../../shared/room-limits.js';
 import { externalTargets } from './external-operations.js';
 import { requestsCiRepair, validateCiRepair } from './project-pulls.js';
 import type { McpReaders } from './mcp-reader.js';
@@ -377,7 +378,7 @@ export class CollaborationStore {
   create(input: CreateConversation): { conversation: Conversation; replayed: boolean } {
     checkText(input.title, 'title', 200);
     if (input.collaborationMode !== undefined && !['continuous','legacy'].includes(input.collaborationMode)) throw new AppError(400, '协作模式无效。');
-    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 13 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
+    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > MAX_ROOM_MEMBERS || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
     return this.tx(() => {
       const result = this.command(`conversation:${input.requestId}`, input, () => {
         for (const memberId of input.memberIds) if (!this.get<Member>('cc_members', memberId).enabled) throw new AppError(400, 'Member disabled.');
@@ -427,7 +428,7 @@ export class CollaborationStore {
     }).result);
   }
   updateConversation(conversationId: string, input: { memberIds: string[]; defaultMemberId: string; preferredMemberIds?: string[]; routingMode?: 'normal' | 'concierge' }): Conversation {
-    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 13 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
+    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > MAX_ROOM_MEMBERS || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
     return this.tx(() => {
       const detail = this.detail(conversationId);
       if (input.preferredMemberIds && (new Set(input.preferredMemberIds).size !== input.preferredMemberIds.length || input.preferredMemberIds.some(m => !input.memberIds.includes(m)))) throw new AppError(400, '偏好成员必须属于会话且不重复。');

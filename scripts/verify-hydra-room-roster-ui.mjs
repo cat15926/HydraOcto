@@ -100,4 +100,3 @@ finally{
   await writeFile(join(dir,'result.json'),JSON.stringify(result,null,2)+'\n',{flag:'wx',mode:0o600});
   console.log(result.passed?'passed':'failed',join(dir,'result.json'));
 }
-
