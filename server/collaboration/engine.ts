@@ -14,13 +14,16 @@ import { verifyWorkspace } from './workbench.js';
 import { AppError } from '../store.js';
 import { CollaborationStore } from './store.js';
 
+const maxAccountExecutions=4;
+const maxRoomAccountExecutions=3;
+
 /** Provider work happens outside SQLite; the exact persisted invocation is always retained. */
 export class CollaborationEngine {
   private started = false;
   private stopping = false;
   private draining = false;
   private timer?: ReturnType<typeof setInterval>;
-  private executions = new Map<string, { controller: AbortController; done: Promise<void> }>();
+  private executions = new Map<string, { controller: AbortController; done: Promise<void>; accountId:string; conversationId:string }>();
   private appenders = new Map<string, AppendDispatcher>();
   private appending = new Map<string, Promise<void>>();
   readonly pulls:ProjectPullMonitor;
@@ -54,11 +57,17 @@ export class CollaborationEngine {
     finally { this.draining = false; }
   }
   private launch(invocation: CollaborationInvocation): void {
-    if (this.executions.has(invocation.id) || !this.store.cooperation.canLaunch(invocation) || !this.store.projectWriterReady(invocation)) return;
+    if (this.executions.has(invocation.id)) return;
+    // Admission already froze the resolved account on this member snapshot. Keep the exact prepared
+    // invocation while it waits, including across restarts; a cancel request alone releases no slot.
+    const accountId=invocation.member.accountId;
+    const accountRuns=[...this.executions.values()].filter(run=>run.accountId===accountId);
+    if (accountRuns.length>=maxAccountExecutions || accountRuns.filter(run=>run.conversationId===invocation.conversationId).length>=maxRoomAccountExecutions) return;
+    if (!this.store.cooperation.canLaunch(invocation) || !this.store.projectWriterReady(invocation)) return;
     const controller = new AbortController();
     // Register before running async provider/callbacks, including synchronous fake runtimes.
     const done = Promise.resolve().then(() => this.execute(invocation, controller)).finally(() => { this.appenders.delete(invocation.id); this.executions.delete(invocation.id); this.kick(); });
-    this.executions.set(invocation.id, { controller, done });
+    this.executions.set(invocation.id, { controller, done, accountId, conversationId:invocation.conversationId });
   }
   private sanitize(value: string, accountId?: string): string {
     let result = redactRuntimeImages(value);
