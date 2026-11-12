@@ -80,7 +80,7 @@ export class ObligationService {
       throw new AppError(400,'外部操作只接受当前委托及工具声明的字段。');
     const prepare=this.port.tx(()=>{
       this.store.visibility.assertTool(id,name);
-      const {o}=this.authorize(id,args.obligationId);
+      const {o}=this.authorize(id,args.obligationId,true);
       const c=this.store.contract(id);
       if(!c.externalScope || c.snapshotOrigin!=='admission' || c.externalScope.instanceId!==o.owner.instanceId || o.parentId)
         conflict('本次执行没有外部操作权限。');
@@ -125,7 +125,7 @@ export class ObligationService {
         await call.adapter.issue(call.scope,call.target,operation.id);
     } catch { /* Until a receipt can be read, both a transport error and an absent record remain unknown. */ }
     return this.port.tx(()=>{
-      const {o}=this.authorize(id,call.obligationId), current=o.externalOperation;
+      const {o}=this.authorize(id,call.obligationId,true), current=o.externalOperation;
       if(!current || current.id!==operation.id) conflict('外部操作已变化。');
       if(current.stage==='unknown' && result?.operationId===current.id && result.targetId===current.target.id &&
         typeof result.receipt==='string' && result.receipt.trim() && result.receipt.length<=500) {
@@ -226,10 +226,12 @@ export class ObligationService {
       return o.currentSourceId === source.id && same(o.owner, member);
     }));
   }
-  authorize(id: string, key: unknown) {
+  authorize(id: string, key: unknown, externalTool=false) {
     const {run, source, member} = this.actor(id);
     const o = this.owner(this.row(run.conversationId, value(key, '责任编号', 100)));
     if (ended(o) || o.currentSourceId !== source.id || !same(o.owner, member)) conflict('此执行没有当前责任的交付权。');
+    if(o.externalOperation && o.externalOperation.stage!=='recorded' && !externalTool)
+      conflict('此委托正在等待外部操作的授权或核查，不能更换等待事项。写入回执缺失时请结束本轮，平台会安排负责人查询原编号。');
     if (o.taskId) {
       const t = this.store.tasks.getTask(o.taskId);
       if (t.pendingHandoffId || t.disposition || t.status === 'done' || t.status === 'blocked' || t.ownerMemberId !== run.memberId ||
@@ -419,7 +421,7 @@ export class ObligationService {
       if (name === 'obligation_handoff') {
         if (this.store.contract(id).handoffPolicy !== 'consent-v2') throw new AppError(403,'本轮冻结的工具契约不支持按委托交班。');
         const {o} = this.authorize(id,args.obligationId);
-        if (o.externalOperation || o.parentId || !o.taskId || o.state !== 'open') conflict('仅开放的主委托可发起整项交班。');
+        if (o.parentId || !o.taskId || o.state !== 'open') conflict('仅开放的主委托可发起整项交班。');
         const t = this.store.tasks.getTask(o.taskId);
         const {handoff} = this.store.tasks.handoff(t.id,{requestId:randomUUID(),expectedRevision:t.revision,expectedOwnerRevision:o.ownerRevision!,
           targetMemberId:value(args.targetMemberId,'候选成员',100),reason:value(args.reason,'交班说明')},id);
@@ -872,6 +874,9 @@ export class ObligationService {
             const t = this.store.tasks.getTask(o.taskId);
             if (t.disposition || t.status === 'done' || t.status === 'blocked') conflict('关联任务已终结或阻塞，责任尚未交付。');
             if (t.pendingHandoffId) continue;
+          }
+          if(o.externalOperation?.stage==='unknown' && o.state==='waiting' && o.wait) {
+            delete o.wait;o.state='open';this.save(o,'external_query_restored');
           }
           if(o.state==='waiting' && o.externalOperation?.stage==='approval')continue;
           if(o.decisionRoundId) this.opinions.reconcile(o);

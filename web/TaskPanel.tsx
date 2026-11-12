@@ -58,14 +58,17 @@ export function TaskPanel({ detail, members, command, refresh, targetId, visible
     {!tasks.length && <p className="cc-panel-empty">本会话尚无普通任务。</p>}
     {tasks.map(t => {
       const projection = detail.responsibility?.find(r => r.taskId === t.id), handoffs = detail.taskHandoffs?.filter(h => h.taskId === t.id) ?? [];
+      const externalPending=detail.obligations?.some(o=>o.taskId===t.id && !['delivered','cancelled'].includes(o.state) &&
+        o.externalOperation && o.externalOperation.stage!=='recorded');
       const waiting = handoffs.find(h => h.id === t.pendingHandoffId);
       return <details className="cc-task-card" key={t.id} data-task-id={t.id} open={targetId ? true : undefined}>
         <summary><strong>{t.title}</strong><span className={`cc-task-state cc-task-${t.status}`}>{t.disposition ? endings[t.disposition.kind] : states[t.status]}</span></summary>
         <div className="cc-task-body"><p>{t.description || '无补充描述'}</p><dl><dt>负责人</dt><dd>{name(t.ownerMemberId)} · 第 {t.ownerRevision} 版</dd><dt>当前执行者</dt><dd>{t.executionRef ? `${name(t.executionRef.memberId)} · ${t.executionRef.invocationId.slice(0, 8)}` : t.delegationId ? '委托执行，见专用责任面板' : '当前无执行绑定'}</dd>
           {waiting && <><dt>拟接任成员</dt><dd>{name(waiting.toMemberId)} · {handoffStatus(waiting)}</dd></>}
           <dt>责任状态</dt><dd>{waiting?.offer ? '交接生效前仍由原负责人负责' : projection?.reason ?? '等待读取状态'}{projection?.diagnostic && <strong className="cc-task-diagnostic">{projection.diagnostic}</strong>}</dd>
+          {externalPending && <><dt>外部操作</dt><dd>等待原负责人核实回执后可转交</dd></>}
           {t.statusReason && <><dt>状态说明</dt><dd>{t.statusReason}</dd></>}
-        </dl><div className="cc-task-actions"><button onClick={() => open({ kind: 'update', task: t })}>更新状态</button>{t.pendingHandoffId ? <button onClick={() => open({ kind: 'cancel-handoff', task: t })}>撤销交接</button> : t.status !== 'done' && !t.disposition && <button onClick={() => open({ kind: 'handoff', task: t })}>{t.ownerMemberId ? '正式转交' : '指派成员'}</button>}</div>
+        </dl><div className="cc-task-actions"><button onClick={() => open({ kind: 'update', task: t })}>更新状态</button>{t.pendingHandoffId ? <button onClick={() => open({ kind: 'cancel-handoff', task: t })}>撤销交接</button> : !externalPending && t.status !== 'done' && !t.disposition && <button onClick={() => open({ kind: 'handoff', task: t })}>{t.ownerMemberId ? '正式转交' : '指派成员'}</button>}</div>
           {handoffs.length > 0 && <details className="cc-task-history"><summary>交接记录 · {handoffs.length}</summary>{handoffs.map(h => <p key={h.id}>{name(h.fromMemberId)} → {name(h.toMemberId)}<br /><strong>{handoffStatus(h)}</strong> · {h.reason}<br /><small>来源 {h.sourceId.slice(0, 8)} · {h.stopRequested ? '已请求停止旧执行' : '等待自然结束'}</small></p>)}</details>}
           {!targetId && onOpenTarget && <button onClick={() => onOpenTarget({ kind: 'task', conversationId: detail.conversation.id, taskId: t.id })}>在工作台打开任务</button>}
           {targetId && onOpenTarget && <section className="cc-workspace-related"><h3>相关产物</h3>{(detail.artifactVersions ?? []).filter(v => v.origin.task?.id === t.id).map(v => <button key={v.id} onClick={() => onOpenTarget({ kind: 'artifact', conversationId: detail.conversation.id, artifactId: v.artifactId, versionId: v.id })}>{detail.artifacts?.find(a => a.id === v.artifactId)?.name ?? '产物'} · v{v.number}</button>)}{!detail.artifactVersions?.some(v => v.origin.task?.id === t.id) && <p className="cc-note">此任务尚无明确关联的产物。</p>}{t.executionRef && <button onClick={() => onOpenTarget({ kind: 'invocation', conversationId: detail.conversation.id, invocationId: t.executionRef!.invocationId })}>查看准确执行</button>}</section>}

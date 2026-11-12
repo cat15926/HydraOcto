@@ -205,6 +205,9 @@ export class OrdinaryTaskService {
         if (t.status === 'done' || t.disposition || t.pendingHandoffId || t.ownerMemberId === input.targetMemberId) fail('任务已结束、正在交接或目标仍是原负责人。');
         const h: TaskHandoff = { id: randomUUID(), taskId, conversationId: t.conversationId, expectedOwnerRevision: t.ownerRevision, fromMemberId: t.ownerMemberId, toMemberId: input.targetMemberId, actor,
           executionRef: structuredClone(t.executionRef), sourceId: '', sourceRevision: 1, sourceDigest: '', state: 'waiting', reason: text(input.reason, '交接说明', 2000), revision: 1, stopRequested: actor.kind === 'user' && input.stopCurrent === true, createdAt: now(), updatedAt: now() };
+        const root=this.rows<Obligation>('cc_obligations','WHERE conversation_id=?',[t.conversationId])
+          .find(o=>o.taskId===t.id && !o.parentId && !['delivered','cancelled'].includes(o.state));
+        if(root?.externalOperation && root.externalOperation.stage!=='recorded') fail('原负责人仍需核实外部操作，暂时无法交班。');
         const policy = actor.kind === 'agent' && this.port.contract(actor.invocationId).handoffPolicy;
         if (actor.kind === 'agent' && (policy === 'consent-v1' || policy === 'consent-v2')) {
           if (policy === 'consent-v2' && this.port.db.prepare(`SELECT 1 FROM cc_obligation_sources s JOIN cc_obligations o ON o.id=s.obligation_id
@@ -213,7 +216,6 @@ export class OrdinaryTaskService {
             AND json_extract(o.value,'$.state') NOT IN ('delivered','cancelled') LIMIT 1`).get(actor.sourceId,t.conversationId,t.id,actor.memberId)) {
             fail('这次执行已登记主委托，请用 obligation_handoff 和原 obligationId 整体交班。独立任务仍可单独跟进，需要同伴协助时使用 collaboration_request。');
           }
-          const root = this.rows<Obligation>('cc_obligations','WHERE conversation_id=?',[t.conversationId]).find(o => o.taskId === t.id && !o.parentId && !['delivered','cancelled'].includes(o.state));
           if (root) {
             if (root.state !== 'open' || root.currentSourceId !== actor.sourceId || root.ownerRevision !== t.ownerRevision ||
                 root.owner.memberId !== actor.memberId || !this.port.isCurrent(this.port.invocation(actor.invocationId).roomMember!))

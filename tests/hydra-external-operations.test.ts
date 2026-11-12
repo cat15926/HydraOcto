@@ -71,11 +71,15 @@ for(const drop of [false,true]) test('E09 single explicit grant and exact extern
     let final=writer;
     if(drop) {
       assert.equal(read().externalOperation?.stage,'unknown');assert.throws(()=>deliver(writer,'已成功'));
+      assert.throws(()=>store.obligations.tool(writer,'obligation_wait',{obligationId:root.id,kind:'timer',deadline:new Date(Date.now()+86400000).toISOString(),condition:'稍后查看'},randomUUID()),/不能更换等待/);
       finish(writer);startOver();
       const reader=start();await assert.rejects(tool(reader,'lookup',{operationId:randomUUID()}));
       assert.equal((await tool(reader,'execute')).operation.stage,'unknown');assert.equal(writes(),1);
       await tool(reader,'lookup',{operationId:operation.id});await tool(reader,'lookup',{operationId:operation.id});assert.equal(writes(),1);finish(reader,'仍未知');
       assert.equal(read().state,'blocked');assert.equal(read().owner.instanceId,root.owner.instanceId);
+      assert.deepEqual(store.obligations.operatorList(cid)[0]?.recovery?.handoffTargets,[]);
+      const task=store.tasks.getTask(root.taskId!);
+      assert.throws(()=>store.tasks.handoff(task.id,{requestId:randomUUID(),expectedRevision:task.revision,expectedOwnerRevision:task.ownerRevision,targetMemberId:'claude',reason:'转交其他成员'}),/原负责人仍需核实/);
       startOver();store.obligations.reconcile();assert.equal(read().state,'blocked');
       assert.equal(store.admitNext(),undefined);
       unavailable=false;
