@@ -68,17 +68,18 @@ function assess(d) {
     assert(pkg?.edition && pkg.obligationId===root.id && pkg.parts.length===3);
     assert(pkg.parts.every(p=>p.state==='accepted' && pkg.edition.parts.some(item=>item.key===p.key && item.versionId===p.versionId && item.reviewId===p.evidenceId)));
     const finalVenue=scenario==='relocation' ? revisedVenue : venue;
-    const location=pkg.materials.find(m=>m.content===finalVenue);
+    const location=pkg.materials.find(m=>m.content.includes(finalVenue));
     assert(location?.versionId,'Expected the requested venue as a readable immutable input');
     const usesVenue=pkg.parts.filter(p=>p.basis?.some(b=>b.key===location.key && b.versionId===location.versionId));
     assert.equal(usesVenue.length,2,'Both the notice and the route must cite the exact venue version they use');
     assert(usesVenue.every(p=>p.content.includes(finalVenue)),'The two submitted texts must also contain the current venue');
-    const standalone=pkg.parts.filter(p=>p.dependsOn?.length===0 && p.basis?.length===0);
+    const standalone=pkg.parts.filter(p=>Array.isArray(p.dependsOn) && Array.isArray(p.basis) && !p.dependsOn.includes(location.key) && !p.basis.some(b=>b.key===location.key));
     assert.equal(standalone.length,1,'Only the guest biography was requested as independent of the venue');
     assert(standalone[0].content.includes('青林') && standalone[0].content.includes('摄影师'));
     if(scenario==='relocation') {
       assert.equal(evidence.venueChanges,1); assert(afterChange);
-      const changed=before.parts.filter(p=>p.dependsOn?.length),independent=before.parts.filter(p=>p.dependsOn?.length===0);
+      const changed=before.parts.filter(p=>p.dependsOn?.includes(location.key));
+      const independent=before.parts.filter(p=>p.dependsOn && !p.dependsOn.includes(location.key));
       assert.equal(changed.length,2);assert.equal(independent.length,1);
       for(const old of changed) {
         const part=pkg.parts.find(p=>p.key===old.key);
