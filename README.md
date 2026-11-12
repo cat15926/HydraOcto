@@ -20,7 +20,7 @@ HydraOcto 是一个本地多 Agent 持续协作平台。「多头」指各有专
 
 ## 当前能力
 
-阶段 E 正在开发。候选版本在原委托下支持一次性外部操作授权与原编号查账；领域工具负责核对合法行动或独立记账，实际投递、等待和接回仍由平台负责。矩阵各项的证据及未验证范围见[阶段进度](docs/implementation-progress.md#hydraocto-collaboration-progress)。
+阶段 E 正在开发。候选版本在原委托下支持一次性外部操作授权与原编号查账；领域工具负责核对合法行动或独立记账，实际投递、等待和接回仍由平台负责。成员较多时，可以在新会话的「成员」里挑选参与者和默认接收人；同一账户有多项工作时，其余执行会排队。矩阵各项的证据及未验证范围见[阶段进度](docs/implementation-progress.md#hydraocto-collaboration-progress)。
 
 当前产品为 **0.31.0**，本地服务版本为 `0.31.0-hydra-d`，数据库 schema 为 16。已交付 N0–N9 的协作能力、N10-A 本机 CLI 会话导入和 N10-B Hermes 成员接入，涵盖持续协作内核、Codex/Claude Code 接入、冻结输入与执行核查、原生会话延续、可选任务交接、产物审批与评审、来源调度和多人征询、日常工作台与成员账户、私聊与历史分支、记忆治理及词法检索，以及跨会话授权、专用责任和条件等待。[正式规则](docs/implementation-guide.md) · [实施进度](docs/implementation-progress.md)
 
