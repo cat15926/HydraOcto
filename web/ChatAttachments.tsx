@@ -53,7 +53,7 @@ function ImageButton({ url, name, sent = false }: { url: string; name: string; s
 }
 
 export function DraftFile({ attachment, disabled, remove }: { attachment: DraftAttachment; disabled: boolean; remove: () => void }) {
-  const file = 'file' in attachment ? attachment.file : undefined;
+  const file = 'file' in attachment && imageType(attachment.file) ? attachment.file : undefined;
   const [url, setUrl] = useState('');
   useEffect(() => {
     if (!file) return;

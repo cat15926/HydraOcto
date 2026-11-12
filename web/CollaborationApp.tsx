@@ -1,5 +1,6 @@
 import { CitedReply } from './ProjectWebSources';
 import { ProjectPreviewPanel } from './ProjectPreviewPanel';
+import { MAX_ROOM_MEMBERS } from '../shared/room-limits';
 import { carrierNames, supportsAccount } from '../shared/collaboration';
 import { isNpmDownload } from './ProjectNpmActivity';
 import { ObligationReceipt } from './ObligationReceipt';
@@ -300,12 +301,14 @@ function ExecutionPanel({ detail, members, command, refresh, cancelling, operati
   </div>;
 }
 
-function ConversationSettings({ conversation, members, onSave, onClose }: { conversation: Conversation; members: Member[]; onSave: (memberIds: string[], defaultMemberId: string) => Promise<void>; onClose: () => void }) {
+type RoomRoster = Pick<Conversation, 'memberIds' | 'defaultMemberId'>;
+
+function ConversationSettings({ conversation, members, onSave, onClose }: { conversation: RoomRoster; members: Member[]; onSave: (memberIds: string[], defaultMemberId: string) => Promise<void>; onClose: () => void }) {
   const [selected, setSelected] = useState(conversation.memberIds);
   const [defaultMember, setDefaultMember] = useState(conversation.defaultMemberId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const available = members.filter(member => member.enabled || selected.includes(member.id));
+  const available = members.filter(member => member.enabled && !member.deletedAt || selected.includes(member.id));
   const toggle = (id: string) => {
     const next = selected.includes(id) ? selected.filter(value => value !== id) : [...selected, id];
     setSelected(next); if (!next.includes(defaultMember)) setDefaultMember(next[0] ?? '');
@@ -314,7 +317,23 @@ function ConversationSettings({ conversation, members, onSave, onClose }: { conv
     event.preventDefault(); setBusy(true); setError('');
     try { await onSave(selected, defaultMember); onClose(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
-  return <Modal title="会话成员" onClose={onClose}><form className="cc-conversation-settings" onSubmit={save}><p className="cc-note">设置一次，之后直接发送消息。未指定对象时会延续合法的会话历史，默认成员用于兜底；@成员可明确邀请参与者。</p><fieldset><legend>参与本会话的成员</legend>{available.map(member => <label className="cc-checkbox" key={member.id}><input type="checkbox" checked={selected.includes(member.id)} onChange={() => toggle(member.id)} /><Avatar member={member} small /><span>{member.name}{!member.enabled && <small> · 已停用</small>}</span></label>)}</fieldset><label>默认接收成员<select value={defaultMember} onChange={e => setDefaultMember(e.target.value)} required>{!selected.length && <option value="">请先选择一位成员</option>}{members.filter(member => selected.includes(member.id)).map(member => <option key={member.id} value={member.id}>{member.name}</option>)}</select></label>{error && <p className="cc-form-error" role="alert">{error}</p>}<footer><button type="button" onClick={onClose} disabled={busy}>取消</button><button className="cc-button-primary" disabled={busy || !selected.length}>{busy ? '保存中…' : '保存会话设置'}</button></footer></form></Modal>;
+  return <Modal title="会话成员" onClose={busy ? () => {} : onClose}>
+    <form className="cc-conversation-settings" onSubmit={save}>
+      <fieldset><legend>参与成员 · 已选 {selected.length} / {MAX_ROOM_MEMBERS}</legend>
+        {available.map(member => <label className="cc-checkbox" key={member.id}>
+          <input type="checkbox" checked={selected.includes(member.id)} disabled={busy || !selected.includes(member.id) && selected.length >= MAX_ROOM_MEMBERS} onChange={() => toggle(member.id)} />
+          <Avatar member={member} small /><span>{member.name}{!member.enabled && <small> · 已停用</small>}</span>
+        </label>)}
+      </fieldset>
+      <label>默认接收成员<select value={defaultMember} onChange={e => setDefaultMember(e.target.value)} required disabled={busy}>
+        {!selected.length && <option value="">请先选择一位成员</option>}
+        {members.filter(member => selected.includes(member.id)).map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
+      </select></label>
+      <p className="cc-note">直接发送即可开始协作。还没有可延续的对话时，由默认成员先接手。</p>
+      {error && <p className="cc-form-error" role="alert">{error}</p>}
+      <footer><button type="button" onClick={onClose} disabled={busy}>取消</button>
+        <button className="cc-button-primary" disabled={busy || !selected.length || selected.length > MAX_ROOM_MEMBERS}>{busy ? '保存中…' : '保存会话设置'}</button></footer>
+    </form></Modal>;
 }
 
 export default function CollaborationApp() {
@@ -338,6 +357,7 @@ export default function CollaborationApp() {
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState(false);
   const [conversationSettings, setConversationSettings] = useState(false);
+  const [draftRoster, setDraftRoster] = useState<RoomRoster>();
   const [sidebar, setSidebar] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false), [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceRequest>();
   const workspaceSequence = useRef(0);
@@ -446,11 +466,17 @@ export default function CollaborationApp() {
       pendingMessages.current.set(id, pending);
     }
     try {
+      if (privateTo.some(target => !availableMembers.some(member => member.id===target)))
+        throw new Error('私聊收件成员已变化，请先核对收件人。');
       if (!id) {
-        savedDrafts.current.delete(undefined);
-        const members = data.members.filter(m => m.enabled); if (!members.length) throw new Error('请先在「成员与运行时」启用一名成员。');
-        const result = await command<{ conversation: Conversation }>(`${API}/conversations`, { title: pending.privateTo.length ? '协作会话' : content.slice(0, 60) || '附件协作', memberIds: members.map(m => m.id), defaultMemberId: members[0].id, requestId: pending.createId });
-        id = result.conversation.id; pendingMessages.current.delete(undefined); pendingMessages.current.set(id, pending); selectedRef.current = id; selectionMade.current = true; setSelected(id); setDetail(undefined);
+        if (!newRoster.memberIds.length) throw new Error('请先在「成员与运行时」启用一名成员。');
+        const result = await command<{ conversation: Conversation }>(`${API}/conversations`, { title: pending.privateTo.length ? '协作会话' : content.slice(0, 60) || '附件协作', ...newRoster, requestId: pending.createId });
+        id = result.conversation.id;
+        pendingMessages.current.delete(undefined); pendingMessages.current.set(id, pending);
+        const saved=savedDrafts.current.get(undefined);
+        if(saved) savedDrafts.current.set(id,saved);
+        savedDrafts.current.delete(undefined); setDraftRoster(undefined);
+        if(!selectedRef.current) {selectedRef.current=id;selectionMade.current=true;setSelected(id);setDetail(undefined);}
       }
       const attachmentIds: string[] = [];
       for (const attachment of attachments) {
@@ -460,7 +486,11 @@ export default function CollaborationApp() {
         } else attachmentIds.push(attachment.id);
       }
       await command(`${API}/conversations/${encodeURIComponent(id)}/messages`, { content, requestId: pending.requestId, attachmentIds, replyTo: pending.replyTo, ...(pending.privateTo.length ? { privateTo: pending.privateTo } : {}) } satisfies SendMessage);
-      pendingMessages.current.delete(id); setDraft(''); setAttachments([]); setReplyTo(undefined); setMentions(false); atBottom.current = true; await refresh(); textarea.current?.focus();
+      pendingMessages.current.delete(id); savedDrafts.current.delete(id);
+      if(selectedRef.current===id) {
+        setDraft(''); setAttachments([]); setReplyTo(undefined); setMentions(false); atBottom.current=true;
+      }
+      await refresh(); if(selectedRef.current===id) textarea.current?.focus();
     } catch (e) { setError((e as Error).message); } finally { busyComposer.current = false; setSending(false); }
   }
   async function uploadFile(cid: string, file: File, requestId: string, mediaType: string) {
@@ -477,15 +507,10 @@ export default function CollaborationApp() {
       if (attachments.length + files.length > 4) throw new Error('每条消息最多添加 4 个附件。');
       files.forEach(validateFile);
       selectionMade.current = true;
-      let cid = selectedRef.current;
-      if (!cid && files.some(file => !imageType(file))) {
-        const members = data.members.filter(m => m.enabled && !m.deletedAt); if (!members.length) throw new Error('请先启用协作成员。');
-        const result = await command<{ conversation: Conversation }>('/api/conversations', { title: privateTo.length ? '附件协作' : draft.trim().slice(0, 60) || files[0].name, memberIds: members.map(m => m.id), defaultMemberId: members[0].id, requestId: crypto.randomUUID() });
-        cid = result.conversation.id; selectedRef.current = cid; selectionMade.current = true; setSelected(cid); setDetail(undefined);
-      }
+      const cid = selectedRef.current;
       for (const file of files) {
         const mediaType = imageType(file), id = crypto.randomUUID();
-        const item = mediaType ? { id, name:file.name, bytes:file.size, mediaType, file } : await uploadFile(cid!, file, id, file.type);
+        const item = mediaType || !cid ? { id, name:file.name, bytes:file.size, mediaType:mediaType || file.type, file } : await uploadFile(cid, file, id, file.type);
         setAttachments(old => [...old, item]);
       }
       if (cid) await refresh();
@@ -497,7 +522,11 @@ export default function CollaborationApp() {
   async function saveMember(member: Member) { setSaving(true); try { await command(`${API}/members`, { ...member, expectedRevision: member.revision ?? 0, requestId: crypto.randomUUID() }); await refresh(); } finally { setSaving(false); } }
   async function saveAccount(account: CollaborationAccount) { setSaving(true); try { await command(`${API}/accounts`, { ...account, expectedRevision: account.revision ?? 0, requestId: crypto.randomUUID() }); await refresh(); } finally { setSaving(false); } }
   async function saveConversation(memberIds: string[], defaultMemberId: string) {
-    if (!selectedRef.current) return;
+    if (privateTo.some(id=>!memberIds.includes(id))) throw new Error('请先在输入框的「私聊」中调整收件成员，再将其移出会话。');
+    if (!selectedRef.current) {
+      if(memberIds.some(id=>!eligibleMembers.some(m=>m.id===id))) throw new Error('成员可用状态已变化，请重新选择。');
+      setDraftRoster({memberIds,defaultMemberId}); pendingMessages.current.delete(undefined); return;
+    }
     await command(`${API}/conversations/${encodeURIComponent(selectedRef.current)}/settings`, { memberIds, defaultMemberId }); await refresh();
   }
   async function cancel(id: string) { setCancelling(id); setError(''); try { await command(`${API}/invocations/${encodeURIComponent(id)}/cancel`, {}); await refresh(); } catch (e) { setError((e as Error).message); } finally { setCancelling(undefined); } }
@@ -541,8 +570,13 @@ export default function CollaborationApp() {
   }
 
   const members = data?.members ?? [];
-  const availableMembers = members.filter(m => m.enabled && !m.deletedAt && (detail ? detail.conversation.memberIds.includes(m.id) : true));
-  const defaultMember = members.find(m => m.id === detail?.conversation.defaultMemberId) ?? availableMembers[0];
+  const eligibleMembers = members.filter(m=>m.enabled && !m.deletedAt);
+  const defaults = eligibleMembers.length > MAX_ROOM_MEMBERS ? eligibleMembers.slice(0,1) : eligibleMembers;
+  const draftIds = draftRoster?.memberIds.filter(id=>eligibleMembers.some(m=>m.id===id)) ?? defaults.map(m=>m.id);
+  const newRoster:RoomRoster = {memberIds:draftIds,defaultMemberId:draftRoster && draftIds.includes(draftRoster.defaultMemberId) ? draftRoster.defaultMemberId : draftIds[0] ?? ''};
+  const roster = selected ? detail?.conversation ?? data?.conversations.find(c=>c.id===selected) : newRoster;
+  const availableMembers = eligibleMembers.filter(m=>roster?.memberIds.includes(m.id));
+  const defaultMember = members.find(m => m.id === roster?.defaultMemberId) ?? availableMembers[0];
   const currentPreview = routePreview && routePreview.conversationId === selected && routePreview.content === draft.trim() ? routePreview : undefined;
   const running = detail?.invocations.filter(active) ?? [];
   const waiting = detail?.deliveries.filter(d => d.status === 'pending' || d.status === 'held') ?? [];
@@ -579,7 +613,8 @@ export default function CollaborationApp() {
     {importing && <HistoryImportDialog initialPath={detail?.conversation.workspaceGrant?.path} command={command} close={dismissImport} open={id=>{setImporting(false);choose(id);void refresh();}}/>}
     {sidebar && <button className="cc-mobile-scrim" onClick={() => setSidebar(false)} aria-label="关闭会话列表" />}
     <aside className={`cc-sidebar ${sidebar ? 'cc-open' : ''}`}><a className="cc-brand" href="/" aria-label="协作工坊首页"><span className="cc-brand-mark"><i /><i /><i /></span><span>协作工坊<small>CONTINUOUS COLLABORATION</small></span></a><button className="cc-new-button" onClick={() => choose()} disabled={sending}><Icon name="plus" size={17} />新的协作<span>＋</span></button><button ref={importTrigger} className="cc-import-entry" disabled={!data || sending} onClick={()=>setImporting(true)}>导入本机会话</button><button className={`cc-library-nav ${library ? 'selected' : ''}`} onClick={() => openLibrary()} aria-current={library ? 'page' : undefined}><KnowledgeIcon name="book" />记忆库<span>长期共识</span></button><div className="cc-sidebar-heading"><span>会话</span><span>{data?.conversations.length ?? 0}</span></div><label className="cc-search"><span className="cc-visually-hidden">搜索会话</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索会话…" /></label><div className="cc-list-filters"><button className="cc-archive-filter" aria-pressed={showArchived && !showDeleted} onClick={() => { setShowDeleted(false); setShowArchived(!showArchived); }}>{showArchived ? '返回进行中的会话' : '查看归档会话'}</button><button className="cc-archive-filter" aria-pressed={showDeleted} onClick={() => { setShowArchived(false); setShowDeleted(!showDeleted); }}>{showDeleted ? '返回会话列表' : '回收站'}</button></div><ConversationList rows={filtered} selected={library ? undefined : selected} disabled={sending} query={query} choose={choose} command={command} refresh={refresh} date={date} /><div className="cc-sidebar-bottom"><button onClick={() => setSettings(true)} disabled={!data}><Icon name="settings" />成员与运行时<Icon name="chevron" size={13} /></button><div className="cc-local-status"><span className={online ? 'connected' : ''} />{online ? '本地服务已连接' : data ? '快照同步中' : '正在连接本地服务'}<small>v{data?.version.split('-')[0] ?? '0.5.0'}</small></div></div></aside>
-    <main className="cc-main"><header className="cc-topbar"><button className="cc-icon-button cc-mobile-menu" onClick={() => setSidebar(true)} aria-label="打开会话列表"><Icon name="menu" /></button><div className="cc-conversation-heading"><span>工作空间 <span>/</span> {!library && detail?.conversation.workspaceGrant?.mode === 'project-work' ? detail.conversation.workspaceGrant.path.split(/[\\/]/).filter(Boolean).at(-1) : '持续协作'}</span><div className="cc-conversation-title-row"><h1>{library ? '记忆库' : conversationTitle}</h1>{!library && unread > 0 && <span className="cc-conversation-unread">{unread} 条未读</span>}</div></div><div className={`cc-topbar-actions ${library ? 'cc-page-hidden' : ''}`}><span className="cc-topbar-members">{availableMembers.slice(0, 4).map(m => <span key={m.id} title={m.name}><Avatar member={m} small /></span>)}</span>{detail && <button className={`cc-workspace-toggle ${workspaceOpen ? 'selected' : ''}`} onClick={() => workspaceOpen ? closeWorkspace() : openWorkspace()} aria-label="工作台" aria-expanded={workspaceOpen} aria-controls="cc-workspace"><WorkspaceButtonIcon /><span>工作台</span>{workspaceAttention(detail).length > 0 && <b aria-label="待处理事项">{workspaceAttention(detail).length}</b>}</button>}</div></header>
+    <main className="cc-main"><header className="cc-topbar"><button className="cc-icon-button cc-mobile-menu" onClick={() => setSidebar(true)} aria-label="打开会话列表"><Icon name="menu" /></button><div className="cc-conversation-heading"><span>工作空间 <span>/</span> {!library && detail?.conversation.workspaceGrant?.mode === 'project-work' ? detail.conversation.workspaceGrant.path.split(/[\\/]/).filter(Boolean).at(-1) : '持续协作'}</span><div className="cc-conversation-title-row"><h1>{library ? '记忆库' : conversationTitle}</h1>{!library && unread > 0 && <span className="cc-conversation-unread">{unread} 条未读</span>}</div></div><div className={`cc-topbar-actions ${library ? 'cc-page-hidden' : ''}`}><span className="cc-topbar-members">{availableMembers.slice(0, 4).map(m => <span key={m.id} title={m.name}><Avatar member={m} small /></span>)}</span>{!selected && <button className="cc-workspace-toggle" disabled={sending || !eligibleMembers.length}
+        aria-label="选择新会话成员与默认成员" onClick={()=>setConversationSettings(true)}><Icon name="settings" size={16} />成员 · {draftIds.length}</button>}{detail && <button className={`cc-workspace-toggle ${workspaceOpen ? 'selected' : ''}`} onClick={() => workspaceOpen ? closeWorkspace() : openWorkspace()} aria-label="工作台" aria-expanded={workspaceOpen} aria-controls="cc-workspace"><WorkspaceButtonIcon /><span>工作台</span>{workspaceAttention(detail).length > 0 && <b aria-label="待处理事项">{workspaceAttention(detail).length}</b>}</button>}</div></header>
       {error && <div className="cc-error-banner" role="alert"><span>{error}</span><button className="cc-icon-button" onClick={() => setError('')} aria-label="关闭提示"><Icon name="close" size={15} /></button></div>}
       {operationResult && <div className="cc-result-banner" role="status"><span>{operationResult}</span><button className="cc-icon-button" onClick={() => setOperationResult('')} aria-label="关闭操作结果"><Icon name="close" size={15} /></button></div>}
       <div className={`cc-main-content ${library ? 'cc-page-hidden' : ''}`}><div className="cc-chat-column">{memoryPending > 0 && <button className="cc-memory-notice" onClick={() => openWorkspace('knowledge', 'pending-memory')}><KnowledgeIcon name="book" /><span>有 {memoryPending} 条记忆待确认</span><span>查看 <Icon name="chevron" size={13} /></span></button>}<div className="cc-chat-scroll" ref={log} onScroll={() => { const element = log.current; if (element) atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }}>
@@ -619,6 +654,6 @@ export default function CollaborationApp() {
             {page === 'activity' && <ExecutionPanel command={command} refresh={refresh} detail={detail} members={members} visible={viewActive} focusInvocationId={target.kind === 'invocation' ? target.invocationId : undefined} cancelling={cancelling} operating={operating} notices={notices} onCancel={id => { void cancel(id); }} onReconcile={run => { void reconcile(run); }} onRecheck={delivery => { void recheck(delivery); }} />}
           </>;
         }} />
-      </div>{library && <MemoryLibrary members={members} command={command} refresh={refresh} initialConversationId={selected} eventCursor={data?.eventCursor ?? 0} targetVersion={libraryTarget} choose={choose} onBack={() => setLibrary(false)} />}</main>{conversationSettings && detail && <ConversationSettings conversation={detail.conversation} members={members} onSave={saveConversation} onClose={() => setConversationSettings(false)} />}{settings && data && <Settings data={data} command={command} saving={saving} onSaveMember={saveMember} onSaveAccount={saveAccount} onRefresh={refresh} onClose={() => setSettings(false)} />}
+      </div>{library && <MemoryLibrary members={members} command={command} refresh={refresh} initialConversationId={selected} eventCursor={data?.eventCursor ?? 0} targetVersion={libraryTarget} choose={choose} onBack={() => setLibrary(false)} />}</main>{conversationSettings && roster && <ConversationSettings conversation={roster} members={members} onSave={saveConversation} onClose={() => setConversationSettings(false)} />}{settings && data && <Settings data={data} command={command} saving={saving} onSaveMember={saveMember} onSaveAccount={saveAccount} onRefresh={refresh} onClose={() => setSettings(false)} />}
   </div>;
 }
