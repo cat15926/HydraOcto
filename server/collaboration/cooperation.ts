@@ -1,3 +1,4 @@
+import { collectionWindow } from './room-rules.js';
 import { requiresFreshMemberContext } from './member-context.js';
 import { randomUUID } from 'node:crypto';
 import type { AppendObservation, CollaborationInvocation, Consumption, Conversation, Delivery, InputExposure, InputHandoff, MentionGroup, QueueState, SourceWork } from '../../shared/collaboration.js';
@@ -166,7 +167,9 @@ export class CooperationService {
         if (this.groups(cid).filter(g => g.state === 'collecting').length >= 20) conflict('本会话活动征询组达到上限。');
         const question = stringField(input.question, '问题', 10000), context = input.context === undefined ? '' : String(input.context);
         if (context.length > 10000) throw new AppError(400, '上下文过长。');
-        const ttl = input.timeoutMs ?? 120000; if (!Number.isSafeInteger(ttl) || Number(ttl) < 1000 || Number(ttl) > 600000) throw new AppError(400, '征询期限须为 1–600 秒。');
+        const window = collectionWindow(targets.length,authorization);
+        const ttl = input.timeoutMs ?? window.defaultMs;
+        if (!Number.isSafeInteger(ttl) || Number(ttl) < 1000 || Number(ttl) > window.maximumMs) throw new AppError(400, '征询期限须为 1–'+window.maximumMs/1000+' 秒。');
         const g: MentionGroup = { id: randomUUID(), conversationId: cid, sourceId: '', targets, question, context, state: 'collecting', createdAt: now(), deadline: new Date(this.clock() + Number(ttl)).toISOString(), revision: 1, ...(i ? { callerInvocationId: i.id, callbackTo: i.memberId } : {}) };
         if (input.obligationId !== undefined) {
           const contract = this.store.obligations.beginGroup(invocationId!, input.obligationId, g);

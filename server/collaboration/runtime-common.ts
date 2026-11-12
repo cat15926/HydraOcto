@@ -1,5 +1,6 @@
 import { opinionTools } from './opinion-tools.js';
 import { versionPackageTools } from './version-package-tools.js';
+import { authorizedCollectionMaxMs } from './room-rules.js';
 import { gameTools } from './werewolf.js';
 import { memberContextTools } from './member-context.js';
 import { obligationDeliverySchema, obligationTools, supportsContinuation } from './obligation-tools.js';
@@ -93,10 +94,10 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'ro
     if (t.name === 'multi_mention' && supportsContinuation(request) && !request.projectWork) {
       return {
         ...t,
-        description: 'Collect replies to a question from other room members (normally 2–8; an active room rule may authorize its eligible roster). To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
+        description: 'Collect replies to a question from other room members (normally 2–8; an active room rule may authorize its eligible roster). Omit timeoutMs to use the room default scaled to the authorized collection size. To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
         inputSchema: {
           ...t.inputSchema,
-          properties: { ...t.inputSchema.properties, ...(request.roomRuleTurn?.kind === 'host' && {targets:{type:'array',items:{type:'string'},minItems:1,maxItems:12}}), obligationId: { type: 'string', minLength: 1 } },
+          properties: { ...t.inputSchema.properties, ...(request.roomRuleTurn?.kind === 'host' && {targets:{type:'array',items:{type:'string'},minItems:1,maxItems:12},timeoutMs:{type:'integer',minimum:1000,maximum:authorizedCollectionMaxMs}}), obligationId: { type: 'string', minLength: 1 } },
         },
       };
     }

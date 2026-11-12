@@ -87,7 +87,10 @@ test('Frozen room authorizations protect old sources, collector, public projecti
   assert.throws(()=>group(ids));assert.throws(()=>group(ids,root.id));
   store.werewolf.tool(host.id,'game_open',{obligationId:root.id});
   assert.throws(()=>store.obligations.tool(host.id,'obligation_deliver',{obligationId:root.id,summary:'结束'},'early'));
-  const g=group(ids,root.id).group;assert.equal(g.targets.length,12);end(host.id);
+  const g=group(ids,root.id).group;assert.equal(g.targets.length,12);
+  const ttl=Date.parse(g.deadline)-Date.parse(g.createdAt);
+  assert(ttl>=24*60_000&&ttl<=24*60_000+100);
+  end(host.id);
   const runs=start(),game=store.werewolf.get(root.id,cid)!;
   const seer=game.players.find(s=>s.role==='seer')!,s=runs.find(i=>i.memberId===seer.memberId)!;
   const target=game.players.find(p=>p!==seer)!.memberId;
