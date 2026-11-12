@@ -103,6 +103,46 @@ test('Frozen room authorizations protect old sources, collector, public projecti
   assert.throws(()=>store.werewolf.tool(other.id,'game_settle',{epoch:1}));
   assert.throws(()=>store.visibility.assertTool(s.id,'collaboration_request'));
   for(const kind of ['diagnostic','tool'] as const)store.recordEvidence(s.id,{kind,detail:{text:mark,args:{secret:mark}}});
-  end(s.id,mark);assert(!JSON.stringify(store.detail(cid)).includes(mark));
+  // The seer signed before its process failed. Only the original immutable choice
+  // may be acknowledged on a new accepted execution; the old response remains failed.
+  store.recordEvidence(s.id,{kind:'process_exit',detail:{confirmed:true,code:143}});
+  store.finish(s.id,'failed',mark);
+  for(const run of runs.filter(i=>i.id!==s.id)){
+   const p=game.players.find(p=>p.memberId===run.memberId)!;
+   const target=p.role==='wolf'?game.players.find(s=>s.role!=='wolf')!.memberId:undefined;
+   store.werewolf.tool(run.id,'game_act',{epoch:1,...(target&&{target})});
+   end(run.id);
+  }
+  store.cooperation.groupTick();
+  assert(!JSON.stringify(store.detail(cid)).includes(mark));
+  const resumed=start()[0]!;
+  const state=store.werewolf.tool(resumed.id,'game_read',{obligationId:root.id});
+  assert('missing' in state);assert.deepEqual(state.missing,[seer.memberId]);
+  assert.throws(()=>store.werewolf.tool(resumed.id,'game_settle',{obligationId:root.id,epoch:1}));
+  const repair=(targets:string[])=>store.cooperation.createGroup(cid,{requestId:randomUUID(),question:'核实本席原先决定',targets,obligationId:root.id},resumed.id);
+  assert.throws(()=>repair([other.memberId]));
+  assert.deepEqual(repair([seer.memberId]).group.targets,[seer.memberId]);end(resumed.id);
+  const retry=start()[0]!,view=store.werewolf.tool(retry.id,'game_read',{});
+  assert('reaffirm' in view&&view.reaffirm);
+  const different=game.players.find(p=>p.memberId!==seer.memberId&&p.memberId!==target)!.memberId;
+  assert.throws(()=>store.werewolf.tool(retry.id,'game_act',{epoch:1,target:different}));
+  for(let replay=0;replay<2;replay++)store.werewolf.tool(retry.id,'game_act',{epoch:1,confirmPrior:true});
+  end(retry.id);store.cooperation.groupTick();
+  const judge=start()[0]!;
+  store.werewolf.tool(judge.id,'game_settle',{epoch:1,obligationId:root.id});
+  const final=store.werewolf.get(root.id,cid)!;
+  assert.equal(final.investigations.length,1);assert.equal(final.investigations[0]!.seal,mark);
+  assert.equal(final.actions.filter(a=>a.epoch===1).length,12);
+  const entry=final.actions.find(a=>a.by===seer.memberId)!;
+  assert.equal(entry.invocation,retry.id);assert.deepEqual(entry.previousInvocations,[s.id]);
+  assert.equal(store.invocation(s.id).status,'failed');
+  const responsibility=store.obligations.list(cid)[0]!;
+  responsibility.groupCount=32;
+  store.db.prepare('UPDATE cc_obligations SET value=? WHERE id=?').run(JSON.stringify(responsibility),root.id);
+  const dayTargets=final.players.filter(s=>s.alive).map(s=>s.memberId);
+  assert.throws(()=>store.cooperation.createGroup(cid,{requestId:randomUUID(),question:'获取白天意见',obligationId:root.id,targets:dayTargets},judge.id));
+  const blocked=store.obligations.list(cid)[0]!;
+  assert.equal(blocked.state,'blocked');assert.equal(blocked.owner.instanceId,root.owner.instanceId);
+  assert.equal(store.cooperation.groups(cid).length,2);assert.equal(store.admitNext(),undefined);
  }finally{owner.close();rmSync(path,{recursive:true,force:true});}
 });

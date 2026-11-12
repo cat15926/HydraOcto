@@ -13,7 +13,7 @@ type Stance='suspect'|'defend'|'uncertain'|'claim_good'|'claim_wolf';
 const labels:Record<Stance,string>={suspect:'怀疑',defend:'倾向相信',uncertain:'希望再观察',claim_good:'声称查验为好人',claim_wolf:'声称查验为狼人'};
 type Action={target?:string;stance?:Stance;saveIf?:string[];poison?:string;shoot?:string};
 interface Seat { memberId:string; instance:string; role:Role; alive:boolean; revealed?:boolean }
-interface PhaseActions { epoch:number; by:string; invocation:string; action:Action; publicText:string }
+interface PhaseActions { epoch:number; by:string; invocation:string; previousInvocations?:string[]; action:Action; publicText:string }
 export interface Game {
  id:string; room:string; host:string; hostInstance:string; players:Seat[]; phase:Phase; day:number; epoch:number; antidote:boolean; poison:boolean;
  actions:PhaseActions[]; history:string[]; investigations:{seer:string;target:string;wolf:boolean;seal:string;epoch:number}[]; winner?:string;
@@ -26,7 +26,7 @@ export function newGame(id:string,room:string,host:string,hostInstance:string,pl
  return {id,room,host,hostInstance,players:players.map((s,i)=>({...s,alive:true,role:roles[i]!})),day:1,epoch:1,phase:'night',antidote:true,poison:true,actions:[],investigations:[],history:['标准局开局。']};
 }
 function living(g:Game){return g.players.filter(s=>s.alive);}
-function needed(g:Game){return living(g).filter(s=>g.phase!=='vote'||!s.revealed);}
+function needed(g:Game){return g.phase==='finished'?[]:living(g).filter(s=>g.phase!=='vote'||!s.revealed);}
 function current(g:Game){return g.actions.filter(a=>a.epoch===g.epoch);}
 function publicState(g:Game){return {gameId:g.id,epoch:g.epoch,phase:g.phase,day:g.day,rules,alive:living(g).map(s=>s.memberId),eligible:needed(g).map(s=>s.memberId),history:g.history,...(g.winner&&{winner:g.winner})};}
 function privateState(g:Game,s:Seat){
@@ -106,13 +106,13 @@ export function gameTools(kind:RoomRuleTurn['kind']) {
  const field={type:'string',minLength:1},epoch={type:'integer',minimum:1};
  const spec=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}});
  if(kind==='host')return [
-  spec('game_open','Open or recover a standard twelve-seat game on your own existing main obligation. Only public facts are returned. The referee manages invitations through multi_mention, passing obligationId and eligible members, then ends the turn until replies arrive.',{obligationId:field},['obligationId']),
-  spec('game_read','Read public game history, current epoch, and eligible or missing participants on your own obligation.',{obligationId:field},['obligationId']),
+  spec('game_open','Open or recover a standard twelve-seat game on your own existing main obligation. Only public facts are returned. The referee manages invitations through multi_mention, passing obligationId and the missing members, then ends the turn until replies arrive.',{obligationId:field},['obligationId']),
+  spec('game_read','Read public history and current epoch. Invite only missing members (one is allowed for a repair); pendingConfirmation awaits a terminal receipt. If both lists are empty, settle the epoch.',{obligationId:field},['obligationId']),
   spec('game_settle','Confirm the current epoch only after the actual signed decisions and terminal executions are available. Returns the public result, next epoch, eligible players and any winner. You decide on the next invitation or final delivery. Include the returned winner label verbatim in the final summary.',{obligationId:field,epoch},['obligationId','epoch'])
  ];
  return [
   spec('game_read','Read your seat, role, permitted observations, public history and current epoch. No input is needed.',{},[]),
-  spec('game_act','Register your own choice in the epoch from game_read. Send only applicable fields: at night wolf/seer must choose target, witch may send saveIf (list excluding self) or poison, hunter may preselect shoot, others send only epoch. During discuss send target and stance; during vote send target (hunter may also send shoot). Use exact living member IDs, exclude yourself. A successful receipt commits your action: end your turn.',{epoch,target:field,stance:{type:'string',enum:Object.keys(labels)},saveIf:{type:'array',items:field,maxItems:11},poison:field,shoot:field},['epoch'])
+  spec('game_act','Register your own choice in the epoch from game_read. If your read returns reaffirm:true, send only epoch and confirmPrior:true to re-sign your immutable choice (no new vote). Otherwise send only applicable fields: at night wolf/seer must choose target, witch may send saveIf (list excluding self) or poison, hunter may preselect shoot, others send only epoch. During discuss send target and stance; during vote send target (hunter may also send shoot). Use exact living member IDs, exclude yourself. A successful receipt commits your action: end your turn.',{epoch,confirmPrior:{type:'boolean',enum:[true]},target:field,stance:{type:'string',enum:Object.keys(labels)},saveIf:{type:'array',items:field,maxItems:11},poison:field,shoot:field},['epoch'])
  ];
 }
 
@@ -136,10 +136,26 @@ export class WerewolfRules {
   const row=this.store.db.prepare('SELECT value FROM cc_werewolf WHERE id=? AND conversation_id=?').get(id,cid) as {value:string}|undefined;
   return row?JSON.parse(row.value) as Game:undefined;
  }
+ private receipt(action:PhaseActions) {
+  const prior=this.store.invocation(action.invocation);
+  if(prior.teardown!=='confirmed')return 'pending';
+  if(prior.status==='succeeded'&&prior.acceptance==='accepted'&&!prior.cancelRevision)return 'accepted';
+  return ['failed','cancelled','interrupted'].includes(prior.status)?'retry':'pending';
+ }
+ private outstanding(g:Game) {
+  const missing:string[]=[],pendingConfirmation:string[]=[];
+  for(const seat of needed(g)){
+   const action=current(g).find(a=>a.by===seat.memberId);
+   const receipt=action&&this.receipt(action);
+   if(!receipt||receipt==='retry')missing.push(seat.memberId);
+   else if(receipt==='pending')pendingConfirmation.push(seat.memberId);
+  }
+  return {missing,pendingConfirmation};
+ }
  collection(id:unknown,cid:string,member:string):RoomCollectionAuthorization|undefined {
   if(typeof id!=='string')return;
   const g=this.get(id,cid);
-  if(g&&g.host===member&&g.phase!=='finished')return {turn:{kind:'player',gameId:g.id,epoch:g.epoch},members:needed(g).map(s=>s.memberId),maxCollections:32};
+  if(g&&g.host===member)return {turn:{kind:'player',gameId:g.id,epoch:g.epoch},members:this.outstanding(g).missing,maxCollections:32};
  }
  assertDelivery(id:string,cid:string,summary:unknown){
   const g=this.get(id,cid);
@@ -164,15 +180,23 @@ export class WerewolfRules {
     const o=this.store.obligations.list(cid).find(o=>o.id===g.id);
     const seat=g.players.find(s=>s.memberId===i.memberId&&s.instance===c.roomMember!.id);
     if(!seat||!seat.alive||o?.state!=='waiting'||o.activeGroupId!==this.store.visibility.primary(id).groupId||o.owner.instanceId!==g.hostInstance)return bad('本席不具备当前行动权。');
-    if(name==='game_read')return privateState(g,seat);
-    if(name!=='game_act')return bad('本席不可执行该操作。');
     const previous=current(g).find(a=>a.by===seat.memberId);
-    if(previous&&previous.invocation!==id){
-      const old=this.store.invocation(previous.invocation);
-      if(old.status==='succeeded'||old.teardown!=='confirmed')return bad('先前行动已有执行，不能代签。');
-      previous.invocation=id;
+    const reaffirm=!!previous&&previous.invocation!==id&&this.receipt(previous)==='retry';
+    if(name==='game_read')return {...privateState(g,seat),reaffirm};
+    if(name!=='game_act')return bad('本席不可执行该操作。');
+    if(previous&&previous.invocation!==id&&!reaffirm)return bad('原先的执行仍待核实或已经签收。');
+    let choice=args;
+    if(args.confirmPrior!==undefined){
+     if(args.confirmPrior!==true||!previous||(!reaffirm&&!previous.previousInvocations?.length)||Object.keys(args).length!==2)
+      return bad('只能确认本席已登记的原决定。');
+     choice={epoch:args.epoch,...previous.action};
     }
-    const result=registerAction(g,seat,id,args);this.save(g);return result;
+    const result=registerAction(g,seat,id,choice);
+    if(previous&&reaffirm){
+     (previous.previousInvocations??=[]).push(previous.invocation);
+     previous.invocation=id;
+    }
+    this.save(g);return result;
    }
    const {o}=this.store.obligations.authorize(id,args.obligationId);
    if(o.parentId||!(o.state==='open'||(o.state==='blocked'&&name==='game_read')))bad('本局须由原主委托负责人管理。');
@@ -182,12 +206,13 @@ export class WerewolfRules {
     g=newGame(o.id,cid,i.memberId,c.roomMember!.id,players);this.save(g);
    }
    if(!g||g.hostInstance!==c.roomMember!.id)return bad('本局与当前负责人不匹配。');
+   if(name==='game_settle'&&(!Number.isSafeInteger(args.epoch)||Number(args.epoch)<1))return bad('请指定可核对的阶段。');
    if(name==='game_settle'&&args.epoch===g.epoch){
-    if(current(g).some(a=>{const run=this.store.invocation(a.invocation);return run.status!=='succeeded'||run.teardown!=='confirmed'||run.cancelRevision;}))bad('尚有行动未确认成功退出。');
+    if(current(g).some(a=>this.receipt(a)!=='accepted'))return bad('尚有行动未确认成功退出。');
     settlePhase(g);this.save(g);
    }else if(name==='game_settle'&&args.epoch!==g.epoch-1)bad('请检查当前阶段。');
    else if(!['game_settle','game_read','game_open'].includes(name))bad('本轮不能调用该规则工具。');
-   return {...publicState(g),missing:needed(g).filter(s=>!current(g!).some(a=>a.by===s.memberId)).map(s=>s.memberId)};
+   return {...publicState(g),...this.outstanding(g)};
   });
  }
 }
