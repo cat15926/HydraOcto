@@ -50,7 +50,7 @@ async function exercise(width) {
     await page.click(pick);
     const selected=await page.$$eval(checks,(items,limit)=>{
       for(const box of items)if(!box.checked && !box.disabled && items.filter(i=>i.checked).length<limit)box.click();
-      return items.filter(i=>i.checked).map(i=>i.closest('label').textContent.trim());
+      return items.filter(i=>i.checked).map(i=>i.closest('label').lastElementChild.textContent.trim());
     },MAX_ROOM_MEMBERS);
     assert.equal(selected.length,MAX_ROOM_MEMBERS);
     await check(s=>[...document.querySelectorAll(s)].filter(c=>!c.checked).every(c=>c.disabled),checks);
@@ -80,6 +80,16 @@ async function exercise(width) {
     assert(room.memberIds.includes(message.visibility.memberIds[0]));
     assert.deepEqual(room.memberIds.map(id=>store.members().find(m=>m.id===id).name).toSorted(),selected.toSorted());
     await page.click('button[aria-label="工作台"]');
+    await page.click('.cc-workspace-add');await page.click('[data-workspace-tool="project"]');
+    const existing='button[aria-label="设置会话成员与默认成员"]';
+    await page.click(existing);await page.waitForSelector(form);
+    assert.equal(await page.$$eval(checks,items=>items.filter(i=>i.checked).length),MAX_ROOM_MEMBERS);
+    assert(await page.$$eval(checks,items=>items.filter(i=>!i.checked).every(i=>i.disabled)));
+    const changeDefault=room.memberIds.find(id=>id!==defaultId);
+    await page.select(form+' select',changeDefault);await page.click(form+' button.cc-button-primary');
+    await check(s=>!document.querySelector(s),form);
+    assert.equal(store.list()[0].defaultMemberId,changeDefault);
+    await page.click('.cc-workspace-header button[aria-label="关闭工作台"]');
     // Return to a new draft from the sidebar; the old roster doesn't become the next room's default.
     if(width<760)await page.click('button[aria-label="打开会话列表"]');
     const next=await check(()=>[...document.querySelectorAll('aside button')].find(b=>b.textContent.includes('新的协作')));
@@ -89,7 +99,7 @@ async function exercise(width) {
     assert.equal(await page.$('.cc-draft-file'),null);
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     assert.deepEqual(errors,[]);
-    runs.push({width,selection:room.memberIds.length,defaultId,userMessages:1,privateRecipients:1,textAttachments:1,cancel:true,retried:true,reset:true});
+    runs.push({width,selection:room.memberIds.length,defaultId,userMessages:1,privateRecipients:1,textAttachments:1,cancel:true,retried:true,reset:true,existingSettings:true});
   }finally{await page.close();await app.close();}
 }
 let failure;
