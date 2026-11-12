@@ -1,3 +1,4 @@
+import { expandDeliveryReply } from './delivery-reply.js';
 import { OpinionService } from './opinions.js';
 import type { OpinionRound } from '../../shared/opinions.js';
 import { userAcceptanceQuote } from './user-acceptance.js';
@@ -290,7 +291,10 @@ export class ObligationService {
     if (last && (last.state !== 'delivered' || last.report?.outcome !== 'passed')) conflict('子委托未通过，不能完成最终交付。');
     this.opinions.assertDelivery(o);
     const packageEdition = this.store.versionPackages.deliveryProof(o.id);
-    o.delivery = {invocationId:id,summary:value(args.summary,'最终交付'),...(packageEdition && {packageEdition})}; o.state = 'delivery_pending';
+    const c = this.store.contract(id);
+    const finalReplyMarker = packageEdition && c.coordinationPolicy && c.packageReplyReceipt
+      ? '[delivery:' + randomUUID() + ']' : undefined;
+    o.delivery = {invocationId:id,summary:value(args.summary,'最终交付'),...(packageEdition && {packageEdition}),...(finalReplyMarker && {finalReplyMarker})}; o.state = 'delivery_pending';
     return this.save(o,'delivery_submitted');
   }
   private wait(id: string, args: Record<string,unknown>) {
@@ -343,6 +347,11 @@ export class ObligationService {
         case 'obligation_wait': obligation = this.wait(id,args); break;
         default: throw new AppError(400,'未知责任工具。');
       }
+      if (name === 'obligation_deliver' && obligation.delivery?.finalReplyMarker) return {
+        finalReplyMarker:obligation.delivery.finalReplyMarker,
+        instruction:'把 finalReplyMarker 原样放在本轮最终公开答复的独立一行。平台将其展开为已登记的交付原文。可在其他行补充说明。',
+        obligation,
+      };
       return {obligation};
     }).result);
   }
@@ -523,12 +532,18 @@ export class ObligationService {
       if (o.delivery?.invocationId === run.id) {
         const raw = this.store.db.prepare('SELECT value FROM cc_messages WHERE response_id=? AND conversation_id=?').get(run.responseId,run.conversationId) as {value:string} | undefined;
         const message: ConversationMessage | undefined = raw && JSON.parse(raw.value);
-        if (!message || message.author !== 'member' || message.memberId !== run.memberId || message.visibility || !message.content.includes(o.delivery.summary)) conflict('公开回复未包含登记的交付内容。');
+        if (!message || message.author !== 'member' || message.memberId !== run.memberId || message.visibility || message.deletedAt ||
+            message.excerptRefs?.length || message.importedOrigin || message.branchOrigin) conflict('公开回复未包含登记的交付内容。');
         const child = this.latestChild(o);
         if (child?.projectReview && !this.proofs(run.id).some(e => e.kind === 'tool' && e.detail.origin === 'obligation_delivery' &&
             e.detail.state === 'verified' && e.detail.obligationId === o.id && e.detail.revision === o.revision && e.detail.childId === child.id && e.detail.version === child.version)) conflict('缺少最终交付时的项目版本核对。');
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
+        const marker = o.delivery.finalReplyMarker;
+        const content = marker && o.delivery.packageEdition && this.store.contract(run.id).packageReplyReceipt
+          ? expandDeliveryReply(message.content,marker,o.delivery.summary) : message.content;
+        if (!content.includes(o.delivery.summary)) conflict('公开回复未包含登记的交付内容。');
+        if (content !== message.content) this.store.recordDeliveryReply(message,content);
         o.delivery.messageId = message.id;
         if (o.acceptBy === 'delivery') this.finishTask(o);
         o.state = o.acceptBy === 'user' ? 'awaiting_acceptance' : 'delivered';

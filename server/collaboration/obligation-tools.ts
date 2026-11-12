@@ -48,6 +48,7 @@ const ordinary = [
 interface ObligationToolScope {
   handoffPolicy?: HandoffPolicy;
   obligationPolicy?: boolean;
+  packageReplyReceipt?: true;
   continuationPolicy?: 'durable-v1';
   toolPolicyVersion?: string;
   visibility?: MessageVisibility;
@@ -72,6 +73,10 @@ export function obligationTools(scope: ObligationToolScope) {
       kind: { type: 'string', enum: ['event', 'timer'] },
     }, ['obligationId', 'condition', 'deadline']),
   });
+  if (scope.packageReplyReceipt) {
+    const index = tools.findIndex(tool => tool.name === 'obligation_deliver');
+    tools[index] = { ...tools[index]!, description: 'Submit your final delivery after verification. When the result contains finalReplyMarker, paste it exactly on its own plain line in your final public reply in this turn. You may add notes above or below. It expands into your registered summary. Otherwise repeat summary verbatim; a concise summary is easiest to reproduce.' };
+  }
   if (scope.handoffPolicy === 'consent-v2' && !scope.projectWork) tools.push({
     name:'obligation_handoff',
     description:'Offer your whole open commitment to a candidate using its obligationId from obligation_open or obligation_list. The platform binds the existing task and asks the candidate to accept or decline. Stop this turn after the offer. You remain responsible until acceptance and release. For help on only part of the work, use collaboration_request with delivery.',

@@ -82,6 +82,7 @@ export interface SourceWork {
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
+  packageReplyReceipt?: true;
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
@@ -179,6 +180,8 @@ export interface CollaborationInvocation {
 }
 export interface CollaborationResponse {
   id: string; invocationId: string; conversationId: string; memberId: string;
+  /** Original carrier output digest when an explicit package receipt expanded in this reply. */
+  carrierContentDigest?: string;
   status: InvocationStatus; content: string; inputSourceIds: string[]; inputRevision: number;
   createdAt: string; finishedAt?: string;
 }
@@ -403,6 +406,7 @@ export interface ExecutionContractSnapshot {
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
+  packageReplyReceipt?: true;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -485,6 +489,7 @@ export interface RuntimeRequest {
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
+  packageReplyReceipt?: true;
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;

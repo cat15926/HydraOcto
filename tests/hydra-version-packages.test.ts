@@ -9,14 +9,15 @@ import type { VersionPackageView } from '../shared/version-packages.js';
 import { CollaborationStore } from '../server/collaboration/store.js';
 import { Store } from '../server/store.js';
 
-function fixture(userAccept=false) {
+function fixture(userAccept=false,preReceipt=false) {
   const dir=mkdtempSync(join(tmpdir(),'versions-')),db=new Store(join(dir,'room.sqlite')),store=new CollaborationStore(db,{workspace:dir});
   const room=store.create({requestId:randomUUID(),title:'资料室',defaultMemberId:'codex',memberIds:['codex','claude']}).conversation;
   const run=()=>{
     const i=store.admitNext()!.invocations[0]!;store.startInvocation(i.id);store.recordEvidence(i.id,{kind:'accepted',detail:{source:'synthetic'}});return i.id;
   };
   const finish=(id:string,reply:string)=>{store.recordEvidence(id,{kind:'process_exit',detail:{confirmed:true}});store.finish(id,'succeeded',reply);};
-  store.send(room.id,{requestId:randomUUID(),content:'准备活动资料。'+(userAccept?'最终由我确认。':'')});
+  const source=store.send(room.id,{requestId:randomUUID(),content:'准备活动资料。'+(userAccept?'最终由我确认。':'')}).source;
+  if(preReceipt) { delete source.packageReplyReceipt; store.visibility.put('cc_sources',source); }
   const id=run(),ob=(store.obligations.tool(id,'obligation_open',{goal:'形成资料包',...(userAccept&&{acceptance:'user'})},'root') as {obligation:Obligation}).obligation;
   const invoke=(tool:string,args:Record<string,unknown>,who=id,callId:string=randomUUID())=>store.versionPackages.tool(who,tool,args,callId) as VersionPackageView;
   const open=(parts:object[],materials:object[]=[{key:'venue',name:'地点',content:'西馆'}])=>invoke('package_open',{obligationId:ob.id,title:'活动资料',parts,materials});
@@ -293,3 +294,110 @@ for (const when of ['still-readable','before-plan','before-dispatch'] as const) 
     }finally{f.close();}
   });
 }
+
+const receiptSummary = '资料“东馆”的“路线”和“日程”已复核，预算为 $&。';
+
+function signedPackage(f: ReturnType<typeof fixture>) {
+  let p = f.open([{key:'map',label:'地图',dependsOn:['venue']}]);
+  p = f.submit(p,'map','西馆路线',[{key:'venue',versionId:p.materials[0]!.versionId}]);
+  return f.publish(f.sign(p,'map'));
+}
+function requestReceipt(f: ReturnType<typeof fixture>) {
+  return f.store.obligations.tool(f.id,'obligation_deliver',{obligationId:f.ob.id,summary:receiptSummary},'submit-final') as {
+    finalReplyMarker?:string;obligation:Obligation;
+  };
+}
+
+test('one exact receipt line publishes the registered wording in the message, response and final factor ancestry',()=>{
+  for (const variant of ['alone','notes','already literal'] as const) {
+    const f=fixture();try {
+      const p=signedPackage(f),result=requestReceipt(f);
+      const mark=result.finalReplyMarker;
+      assert(mark && mark===result.obligation.delivery?.finalReplyMarker);
+      assert.equal(result.obligation.delivery?.packageEdition,p.edition!.id);
+      assert.deepEqual(requestReceipt(f),result);
+      const raw=variant==='alone' ? mark : variant==='notes' ? '附注在上\r\n'+mark+'\r\n附注在下' : receiptSummary+'\n'+mark;
+      const expected=variant==='notes' ? '附注在上\r\n'+receiptSummary+'\r\n附注在下' : receiptSummary;
+      f.finish(f.id,raw);
+      const root=f.store.obligations.list(f.room.id)[0]!;
+      assert.equal(root.state,'delivered');
+      const m=f.store.detail(f.room.id).messages.find(m=>m.id===root.delivery?.messageId)!;
+      assert.equal(m.content,expected);assert.equal(f.store.response(m.responseId!).content,expected);
+      assert(f.store.response(m.responseId!).carrierContentDigest);
+      const parent=f.store.db.prepare("SELECT 1 FROM cc_factor_parents p JOIN cc_factors a ON a.id=p.child JOIN cc_factors b ON b.id=p.parent WHERE a.ref_kind='obligation' AND a.ref_id=? AND a.version=? AND b.ref_kind='message' AND b.ref_id=? AND b.version=?").get(root.id,root.revision,m.id,m.revision!);
+      assert(parent);
+      f.store.finish(f.id,'succeeded',raw);
+      assert.throws(()=>f.store.finish(f.id,'succeeded',expected),/replay/);
+    }finally{f.close();}
+  }
+});
+
+test('quoting, embedding, duplicating or guessing a receipt never substitutes materially different text',()=>{
+  for (const template of [
+    (m:string)=>'例：'+m, (m:string)=>'> '+m, (m:string)=>'    '+m,
+    (m:string)=>['~~~text',m,'~~~'].join('\n'), (m:string)=>['> 引用',m].join('\n'),
+    (m:string)=>['<blockquote>',m,'</blockquote>'].join('\n'),
+    (m:string)=>m+'\n'+m,(m:string)=>m.replace('delivery:','deliver:'),
+    ()=>receiptSummary.replace(/[“”]/g,'"'),
+  ]) {
+    const f=fixture();try {
+      signedPackage(f);const mark=requestReceipt(f).finalReplyMarker!;
+      const raw=template(mark);f.finish(f.id,raw);
+      const root=f.store.obligations.list(f.room.id)[0]!;
+      assert.equal(root.state,'blocked');assert.equal(root.delivery?.messageId,undefined);
+      assert.equal(f.store.response(f.store.invocation(f.id).responseId).content,raw);
+    }finally{f.close();}
+  }
+});
+
+test('receipt waits for a confirmed exit and revalidates public message and exact edition on reconciliation',()=>{
+  for(const scenario of ['valid','edition changed','message withdrawn','cancelled'] as const){
+    const f=fixture();try {
+      const p=signedPackage(f),mark=requestReceipt(f).finalReplyMarker!;
+      if(scenario==='cancelled') {
+        f.store.cancel(f.id);f.store.recordEvidence(f.id,{kind:'process_exit',detail:{confirmed:true}});f.store.finish(f.id,'cancelled',mark);
+      } else {
+        if(scenario==='edition changed') f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,expectedMaterialVersionId:p.materials[0]!.versionId,key:'venue',content:'东馆'});
+        f.store.finish(f.id,'succeeded',mark);
+        assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivery_pending');
+        f.store.recordEvidence(f.id,{kind:'process_exit',detail:{confirmed:true}});
+        if(scenario==='message withdrawn') {
+          const m=f.store.detail(f.room.id).messages.find(m=>m.responseId===f.store.invocation(f.id).responseId)!;
+          f.store.visibility.messageCommand(f.room.id,m.id,{action:'delete',expectedRevision:m.revision,requestId:randomUUID()});
+        }
+        f.store.obligations.reconcile();
+      }
+      const root=f.store.obligations.list(f.room.id)[0]!,r=f.store.response(f.store.invocation(f.id).responseId);
+      assert.equal(root.state,scenario==='valid'?'delivered':'blocked');
+      assert.equal(r.content===receiptSummary,scenario==='valid');
+    }finally{f.close();}
+  }
+});
+
+test('a receipt cannot be used from a different request, member, room or private execution',()=>{
+  const f=fixture();try {
+    signedPackage(f);const marker=requestReceipt(f).finalReplyMarker!;
+    const other=f.store.create({requestId:randomUUID(),title:'旁支',defaultMemberId:'codex',memberIds:['codex','claude']}).conversation;
+    for (const [room,member,privateTo] of [[other.id,'codex',undefined],[f.room.id,'claude',undefined],[other.id,'claude',['claude']]] as const) {
+      f.store.send(room,{requestId:randomUUID(),content:'@'+member+' 查看回执',...(privateTo&&{privateTo:[...privateTo]})});
+      const run=f.run();f.finish(run,marker);
+      assert.notEqual(f.store.response(f.store.invocation(run).responseId).content,receiptSummary);
+      assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivery_pending');
+    }
+    f.finish(f.id,marker);assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivered');
+  }finally{f.close();}
+});
+
+test('an older frozen execution or a root without a package keeps the literal-only delivery contract',()=>{
+  for (const frozen of [true,false]) {
+    const f=fixture(false,frozen);try {
+      if(frozen) signedPackage(f);
+      assert.equal(f.store.prompt(f.id).includes('finalReplyMarker'),!frozen);
+      assert.equal(f.store.prepareInput(f.id).manifest.renderVersion,frozen?'room-decision-material-v1':'room-package-reply-v1');
+      const result=requestReceipt(f);assert.equal(result.finalReplyMarker,undefined);
+      f.finish(f.id,receiptSummary);
+      assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivered');
+      assert.equal(f.store.response(f.store.invocation(f.id).responseId).carrierContentDigest,undefined);
+    }finally{f.close();}
+  }
+});
