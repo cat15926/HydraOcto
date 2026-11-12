@@ -382,10 +382,17 @@ export class ObligationService {
     this.opinions.assertDelivery(o);
     const packageEdition = this.store.versionPackages.deliveryProof(o.id);
     const c = this.store.contract(id);
-    const finalReplyMarker = packageEdition && c.coordinationPolicy && c.packageReplyReceipt
+    if(args.publication!==undefined && (args.publication!=='exact' || c.finalTextPolicy!=='registered-v1'))
+      conflict('本次冻结的执行契约不支持指定交付正文。');
+    const exact=args.publication==='exact';
+    const finalReplyMarker = !exact && packageEdition && c.coordinationPolicy && c.packageReplyReceipt
       ? '[delivery:' + randomUUID() + ']' : undefined;
-    o.delivery = {invocationId:id,summary:value(args.summary,'最终交付'),...(packageEdition && {packageEdition}),...(finalReplyMarker && {finalReplyMarker})}; o.state = 'delivery_pending';
+    o.delivery = {invocationId:id,summary:exact ? this.publicText(args.summary) : value(args.summary,'最终交付'),...(exact && {publication:'exact' as const}),...(packageEdition && {packageEdition}),...(finalReplyMarker && {finalReplyMarker})}; o.state = 'delivery_pending';
     return this.save(o,'delivery_submitted');
+  }
+  private publicText(input:unknown) {
+    if(typeof input!=='string' || !input.trim() || input.length>20000) throw new AppError(400,'交付正文需在 1–20000 个字符内。');
+    return input; // Whitespace is significant in directly usable deliverables.
   }
   private wait(id: string, args: Record<string,unknown>) {
     const {o} = this.authorize(id,args.obligationId);
@@ -408,7 +415,7 @@ export class ObligationService {
   }
   tool(id: string, name: string, args: Record<string,unknown>, callId: string) {
     this.actor(id);
-    const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_handoff:['obligationId','targetMemberId','reason'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary'],obligation_wait:['obligationId','condition','deadline','kind']};
+    const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_handoff:['obligationId','targetMemberId','reason'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary','publication'],obligation_wait:['obligationId','condition','deadline','kind']};
     if (!keys[name] || Object.keys(args).some(k => !keys[name]!.includes(k))) throw new AppError(400,'责任工具参数无效；身份与执行只能由平台提供。');
     if (name === 'obligation_list') {
       const obligations = this.context(id);
@@ -441,6 +448,9 @@ export class ObligationService {
         case 'obligation_wait': obligation = this.wait(id,args); break;
         default: throw new AppError(400,'未知责任工具。');
       }
+      if(name==='obligation_deliver' && obligation.delivery?.publication==='exact') return {
+        obligation, publication:'exact', instruction:'已登记你指定的最终公开正文。请结束本次执行；实际退出和验收条件满足后才会公开交付。'
+      };
       if (name === 'obligation_deliver' && obligation.delivery?.finalReplyMarker) return {
         finalReplyMarker:obligation.delivery.finalReplyMarker,
         instruction:'把 finalReplyMarker 原样放在本轮最终公开答复的独立一行。平台将其展开为已登记的交付原文。可在其他行补充说明。',
@@ -643,7 +653,8 @@ export class ObligationService {
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
         const marker = o.delivery.finalReplyMarker;
-        const content = marker && o.delivery.packageEdition && this.store.contract(run.id).packageReplyReceipt
+        const content = o.delivery.publication==='exact' && this.store.contract(run.id).finalTextPolicy==='registered-v1'
+          ? o.delivery.summary : marker && o.delivery.packageEdition && this.store.contract(run.id).packageReplyReceipt
           ? expandDeliveryReply(message.content,marker,o.delivery.summary) : message.content;
         if (!content.includes(o.delivery.summary)) conflict('公开回复未包含登记的交付内容。');
         if (content !== message.content) this.store.recordDeliveryReply(message,content);

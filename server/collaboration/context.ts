@@ -27,6 +27,7 @@ export interface ContextInput {
   roomRuleTurn?: import('../../shared/collaboration.js').RoomRuleTurn;
   coordinationPolicy?: import('../../shared/collaboration.js').CoordinationPolicy;
   packageReplyReceipt?: true;
+  finalTextPolicy?: 'registered-v1';
   deliveryEvidencePolicy?: import('../../shared/collaboration.js').RuntimeRequest['deliveryEvidencePolicy'];
   externalScope?: import('../../shared/obligations.js').ExternalScope;
   handoffPolicy?: HandoffPolicy;
@@ -81,7 +82,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   }
   const items: ContextItem[] = [{ kind: 'identity', reference: `member:${invocation.memberId}`, representation: 'full', characters: invocation.member.instructions.length, complete: true }];
   const obligationScope = {
-    obligationPolicy: input.obligationPolicy, deliveryEvidencePolicy:input.deliveryEvidencePolicy, externalScope:input.externalScope, packageReplyReceipt:input.packageReplyReceipt, handoffPolicy:input.handoffPolicy, continuationPolicy: input.continuationPolicy, visibility: input.visibility, projectReview: source.projectReview,
+    obligationPolicy: input.obligationPolicy, deliveryEvidencePolicy:input.deliveryEvidencePolicy, finalTextPolicy:input.finalTextPolicy, externalScope:input.externalScope, packageReplyReceipt:input.packageReplyReceipt, handoffPolicy:input.handoffPolicy, continuationPolicy: input.continuationPolicy, visibility: input.visibility, projectReview: source.projectReview,
     toolPolicyVersion: input.crossPolicy ? 'cross-action-v1' : undefined, projectWork: input.projectWork,
   };
   const personalMode = runtimeMemberContextMode(input.memberContext);
@@ -153,6 +154,8 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   const evidenceHint=input.deliveryEvidencePolicy==='source-grounded-v1'
     ? '\n综合多份材料或同伴回报时，区分原件直接支持的事实、成员的判断和仍缺的证据。说明关键结论依据哪份材料或谁的回报。对相互冲突的部分，只陈述共同可证实的范围，指出分歧和待核实之处。若正式批准或新版原件明确覆盖某个对象和用途，可以在该范围给出肯定结论，说明覆盖范围或已替代的旧依据。备选方案写明成立条件，缺少依据时注明待核实；材料没有提到限制，授权仍未知。只有取得对应操作的回执才报告已执行。交付摘要和最终答复中的补充说明都遵循这些边界。\n'
     : '';
+  const exactTextHint=input.finalTextPolicy && obligations.includes('obligation_deliver')
+    ? '\n向用户交付可直接使用的清单、表格或限定格式的正文时，在 obligation_deliver 中设 publication=exact，把完整、最终可发布的内容填入 summary。逐项提供用户要求的依据；没有依据就说明缺口。平台在本次执行成功退出、核验完成后原样交付，成员无需再抄写或添加说明。\n' : '';
   const coordinationHint = input.coordinationPolicy
     ? '\n多人意见有最低人数、截止时间或异议核查约定时，从原委托调用 opinion_open。受邀评审用 opinion_submit 登记意见，负责人用 opinion_read 核对意见版本并锁定，按约定核查异议后决定；达到人数不能自动结案。制作依赖多份资料的交付时，用 package_ 工具将原委托、实际使用的资料版本和交付验收关联起来。资料改版时只重验受影响的产物，然后再汇编交付。\n' + (input.packageReplyReceipt ? '资料包交付时，若 obligation_deliver 返回 finalReplyMarker，优先把它原样放在最终公开答复的独立一行，可在上下行补充说明。平台会当场展开已登记的 summary。也可直接逐字贴回摘要，宜写简短。\n' : '') : '';
   const handoffHint = obligations.includes('obligation_handoff')
@@ -180,7 +183,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     ...messages.map(m => JSON.stringify({messageId:m.id, sourceId:m.sourceId, author:m.author, memberId:m.memberId, ...backgroundResponsibility(m), content:m.content})),
     '本次准确请求：' + JSON.stringify({sourceId:source.id, revision:source.revision, content:source.content}),
   ].join('\n');
-  const render = (messages: ContextInput['history']) => isolated ? renderPersonal(messages) : (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + evidenceHint + externalHint + coordinationHint + handoffHint + waitHint + publicStatementHint + workRecord + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
+  const render = (messages: ContextInput['history']) => isolated ? renderPersonal(messages) : (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + evidenceHint + exactTextHint + externalHint + coordinationHint + handoffHint + waitHint + publicStatementHint + workRecord + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
   if (estimate(render([])) > limit) throw new AppError(422, personal ? '本轮请求与必须完整提供的成员资料超出上下文预算。请缩短请求或撤回不再需要的资料后重试。' : '本次完整请求及必要身份超过上下文预算；请缩短请求或调整预算，平台未静默裁剪请求。', 'context_budget_exceeded');
   const candidates: ContextInput['history'] = [];
   const seen = new Set<string>();
@@ -205,5 +208,5 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   }
   items.push({ kind: 'request', reference: `source:${source.id}@${source.revision}`, representation: 'full', characters: source.content.length, complete: true });
   const prompt = render(selected);
-  return { prompt, renderDigest: digest(prompt), renderVersion: evidenceHint ? 'room-grounded-delivery-v1' : input.packageReplyReceipt && coordinationHint ? 'room-package-reply-v1' : coordinationHint ? 'room-decision-material-v1' : handoffHint ? 'room-obligation-handoff-v2' : personal ? 'room-member-context-v1' : continuation ? 'room-continuation-input-v1' : obligations.length ? 'room-obligations-input-v1' : input.memorySnapshot ? 'platform-visible-input-v5' : input.cooperationPolicy ? 'platform-input-json-cooperation-v4' : input.artifactPolicy ? 'platform-input-json-artifacts-v3' : input.taskPolicy ? 'platform-input-json-tasks-v2' : CONTEXT_RENDER_VERSION, policyVersion: input.memorySnapshot ? 'bounded-visible-context-v5' : input.cooperationPolicy ? 'bounded-public-context-cooperation-v4' : input.artifactPolicy ? 'bounded-public-context-artifacts-v3' : input.taskPolicy ? 'bounded-public-context-tasks-v2' : CONTEXT_POLICY_VERSION, digestStage: 'platform_prompt', items, budget: { maxEstimatedTokens: limit, usedEstimatedTokens: estimate(prompt), method: CONTEXT_BUDGET_METHOD }, ...(caller ? { caller } : {}) };
+  return { prompt, renderDigest: digest(prompt), renderVersion: exactTextHint ? 'room-exact-delivery-v1' : evidenceHint ? 'room-grounded-delivery-v1' : input.packageReplyReceipt && coordinationHint ? 'room-package-reply-v1' : coordinationHint ? 'room-decision-material-v1' : handoffHint ? 'room-obligation-handoff-v2' : personal ? 'room-member-context-v1' : continuation ? 'room-continuation-input-v1' : obligations.length ? 'room-obligations-input-v1' : input.memorySnapshot ? 'platform-visible-input-v5' : input.cooperationPolicy ? 'platform-input-json-cooperation-v4' : input.artifactPolicy ? 'platform-input-json-artifacts-v3' : input.taskPolicy ? 'platform-input-json-tasks-v2' : CONTEXT_RENDER_VERSION, policyVersion: input.memorySnapshot ? 'bounded-visible-context-v5' : input.cooperationPolicy ? 'bounded-public-context-cooperation-v4' : input.artifactPolicy ? 'bounded-public-context-artifacts-v3' : input.taskPolicy ? 'bounded-public-context-tasks-v2' : CONTEXT_POLICY_VERSION, digestStage: 'platform_prompt', items, budget: { maxEstimatedTokens: limit, usedEstimatedTokens: estimate(prompt), method: CONTEXT_BUDGET_METHOD }, ...(caller ? { caller } : {}) };
 }

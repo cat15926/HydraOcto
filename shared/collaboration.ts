@@ -86,6 +86,7 @@ export interface SourceWork {
   roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
   deliveryEvidencePolicy?: 'source-grounded-v1';
+  finalTextPolicy?: 'registered-v1';
   externalScope?: import('./obligations.js').ExternalScope;
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
@@ -413,6 +414,7 @@ export interface ExecutionContractSnapshot {
   roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
   deliveryEvidencePolicy?: 'source-grounded-v1';
+  finalTextPolicy?: 'registered-v1';
   externalScope?: import('./obligations.js').ExternalScope;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
@@ -499,6 +501,7 @@ export interface RuntimeRequest {
   roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
   deliveryEvidencePolicy?: 'source-grounded-v1';
+  finalTextPolicy?: 'registered-v1';
   externalScope?: import('./obligations.js').ExternalScope;
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;

@@ -393,7 +393,7 @@ test('an older frozen execution or a root without a package keeps the literal-on
     const f=fixture(false,frozen);try {
       if(frozen) signedPackage(f);
       assert.equal(f.store.prompt(f.id).includes('finalReplyMarker'),!frozen);
-      assert.equal(f.store.prepareInput(f.id).manifest.renderVersion,frozen?'room-decision-material-v1':'room-grounded-delivery-v1');
+      assert.equal(f.store.prepareInput(f.id).manifest.renderVersion,frozen?'room-decision-material-v1':'room-exact-delivery-v1');
       const result=requestReceipt(f);assert.equal(result.finalReplyMarker,undefined);
       f.finish(f.id,receiptSummary);
       assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivered');

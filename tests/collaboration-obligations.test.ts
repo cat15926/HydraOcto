@@ -81,7 +81,7 @@ for(const legacy of [false,true])test('grounded delivery distinguishes signed op
    }
    const writer=start(),policy=legacy?undefined:'source-grounded-v1';
    assert.equal(writer.contract.deliveryEvidencePolicy,policy);
-   assert.equal(writer.input.manifest.renderVersion,legacy?'room-package-reply-v1':'room-grounded-delivery-v1');
+   assert.equal(writer.input.manifest.renderVersion,legacy?'room-package-reply-v1':'room-exact-delivery-v1');
    assert.equal(writer.input.prompt.includes('原件直接支持的事实'),!legacy);
    assert.equal(writer.input.prompt.includes('可以在该范围给出肯定结论'),!legacy);
    assert(writer.input.prompt.includes('新版签批仅适用于 A 项目'));
@@ -418,4 +418,47 @@ test('reassignment retires only the old unclaimed wake when its owner is disable
     assert.deepEqual(h.store.obligations.context(next).map(o=>o.id),[root.id]);
     assert.equal(h.store.admitNext(),undefined);
   } finally { h.owner.close(); }
+});
+
+test('the exact public body is the member-authored receipt, published once after confirmed exit', () => {
+  const h=setup();
+  try {
+    const run=h.ask('按原样给我可直接使用的清单，交我验收。'),root=h.tool(run,'obligation_open',{goal:'可直接使用的清单'});
+    const body='[\n  {"item":"甲","status":"待确认","refs":["原件4"]}\n]\n';
+    const args={obligationId:root.id,summary:body,publication:'exact'};
+    assert.deepEqual(h.tool(run,'obligation_deliver',args,'publish'),h.tool(run,'obligation_deliver',args,'publish'));
+    const carrier='已准备好清单。';
+    h.store.finish(run,'succeeded',carrier);assert.equal(h.read(root).state,'delivery_pending');
+    h.store.recordEvidence(run,{kind:'process_exit',detail:{confirmed:true,code:0}});h.store.obligations.reconcile();
+    assert.equal(h.read(root).state,'awaiting_acceptance');
+    const msg=h.store.detail(h.cid).messages.find(m=>m.id===h.read(root).delivery?.messageId)!;
+    assert.equal(msg.memberId,'codex');assert.equal(msg.content,body);
+    const res=h.store.response(msg.responseId!);assert.equal(res.content,body);
+    assert.equal(res.carrierContentDigest,createHash('sha256').update(JSON.stringify(carrier)).digest('hex'));
+    h.store.finish(run,'succeeded',carrier);h.store.obligations.reconcile();
+    assert.equal(h.store.detail(h.cid).messages.filter(m=>m.responseId===res.id).length,1);
+  }finally{h.owner.close();}
+});
+
+test('exact publication is opt-in, frozen to the source, and cannot close a cancelled delivery', () => {
+  for(const mode of ['ordinary','legacy','cancel'] as const) {
+    const h=setup();try {
+      const source=h.store.send(h.cid,{requestId:randomUUID(),content:'交付正文。'}).source;
+      if(mode==='legacy'){delete source.finalTextPolicy;h.store.visibility.put('cc_sources',source);}
+      const run=h.run(),root=h.tool(run,'obligation_open',{goal:'交付正文'}),args={obligationId:root.id,summary:'登记的正文'};
+      if(mode==='legacy') {
+        assert.throws(()=>h.tool(run,'obligation_deliver',{...args,publication:'exact'}),/冻结/);
+        const spec=runtimeTools(h.store.contract(run)).find(t=>t.name==='obligation_deliver')!;
+        assert(!('publication' in spec.inputSchema.properties));continue;
+      }
+      if(mode==='ordinary'){h.tool(run,'obligation_deliver',args);h.finish(run,'不同的正文');}
+      else {
+        h.tool(run,'obligation_deliver',{...args,publication:'exact'});
+        h.store.cancel(run);h.store.recordEvidence(run,{kind:'process_exit',detail:{confirmed:true}});
+        h.store.finish(run,'cancelled','终止');
+      }
+      assert.equal(h.read(root).state,'blocked');assert.equal(h.read(root).delivery?.messageId,undefined);
+      assert(!h.store.detail(h.cid).messages.some(m=>m.content===args.summary));
+    }finally{h.owner.close();}
+  }
 });

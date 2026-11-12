@@ -50,6 +50,7 @@ interface ObligationToolScope {
   handoffPolicy?: HandoffPolicy;
   obligationPolicy?: boolean;
   packageReplyReceipt?: true;
+  finalTextPolicy?: 'registered-v1';
   deliveryEvidencePolicy?: import('../../shared/collaboration.js').RuntimeRequest['deliveryEvidencePolicy'];
   continuationPolicy?: 'durable-v1';
   toolPolicyVersion?: string;
@@ -83,6 +84,12 @@ export function obligationTools(scope: ObligationToolScope) {
   if (scope.packageReplyReceipt) {
     const index = tools.findIndex(tool => tool.name === 'obligation_deliver');
     tools[index] = { ...tools[index]!, description: 'Submit your final delivery after verification. When the result contains finalReplyMarker, paste it exactly on its own plain line in your final public reply in this turn. You may add notes above or below. It expands into your registered summary. Otherwise repeat summary verbatim; a concise summary is easiest to reproduce.' };
+  }
+  if (scope.finalTextPolicy==='registered-v1') {
+    const index=tools.findIndex(t=>t.name==='obligation_deliver');
+    const deliver=tools[index]!;
+    tools[index]={...deliver,description:deliver.description+' For a requested directly usable deliverable or exact output format, set publication to exact and put the ENTIRE final public text, including any required evidence, in summary. On verified successful exit the platform publishes that text verbatim with your authorship. The closing model utterance is not part of this exact delivery.',
+      inputSchema:object({obligationId:text,summary:text,publication:{type:'string',enum:['exact']}},['obligationId','summary'])};
   }
   if(scope.deliveryEvidencePolicy==='source-grounded-v1') {
     for(const [i,tool] of tools.entries()) {
