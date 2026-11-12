@@ -378,6 +378,7 @@ export class ObligationService {
       !value(args.summary,'最终交付').includes(o.externalOperation.receipt))) conflict('交付需要核实的外部回执，并在摘要中列出回执编号。');
     const last = this.raw(o.conversationId).filter(x => x.parentId === o.id).at(-1);
     if (last && (last.state !== 'delivered' || last.report?.outcome !== 'passed')) conflict('子委托未通过，不能完成最终交付。');
+    this.store.roomRules.assertDelivery(o.id,o.conversationId,args.summary);
     this.opinions.assertDelivery(o);
     const packageEdition = this.store.versionPackages.deliveryProof(o.id);
     const c = this.store.contract(id);
@@ -463,8 +464,9 @@ export class ObligationService {
       conflict('仅当前负责的开放或待复核主委托可登记持续征询。');
     }
     const participants = group.targets.map(memberId => this.endpoint(o.conversationId, memberId));
-    if ((o.groupCount ?? 0) >= 16) {
-      const reason = '此委托的 16 次持续征询额度已用尽；请依据已有结果交付或由用户复核。';
+    const groupLimit = this.store.roomRules.collection(o.id,o.conversationId,o.owner.memberId)?.maxCollections ?? 16;
+    if ((o.groupCount ?? 0) >= groupLimit) {
+      const reason = '此委托的 '+groupLimit+' 次持续征询额度已用尽；请依据已有结果交付或由用户复核。';
       this.block(o, reason);
       return reason;
     }
@@ -633,6 +635,7 @@ export class ObligationService {
         const child = this.latestChild(o);
         if (child?.projectReview && !this.proofs(run.id).some(e => e.kind === 'tool' && e.detail.origin === 'obligation_delivery' &&
             e.detail.state === 'verified' && e.detail.obligationId === o.id && e.detail.revision === o.revision && e.detail.childId === child.id && e.detail.version === child.version)) conflict('缺少最终交付时的项目版本核对。');
+        this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
         const marker = o.delivery.finalReplyMarker;
@@ -829,6 +832,7 @@ export class ObligationService {
       if (o.parentId || ended(o)) conflict('责任已终结或不属于用户交付。');
       if (input.decision === 'accept') {
         if (o.state !== 'awaiting_acceptance' || !o.delivery?.messageId) conflict('当前没有待确认的最终交付。');
+        this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
         this.endpoint(cid,o.owner.memberId); this.finishTask(o); o.state = 'delivered';

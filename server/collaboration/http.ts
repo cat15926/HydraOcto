@@ -29,8 +29,8 @@ function id(value: unknown): string {
   return result;
 }
 function revision(value: unknown, label: string, minimum = 0): number { if (!Number.isSafeInteger(value) || (value as number) < minimum) throw new AppError(400, `${label} 需要有效版本号。`, 'invalid_revision'); return value as number; }
-function memberIds(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.length || value.length > 10) throw new AppError(400, '请选择 1–10 名成员。');
+function memberIds(value: unknown, limit=10): string[] {
+  if (!Array.isArray(value) || !value.length || value.length > limit) throw new AppError(400, '请选择 1–'+limit+' 名成员。');
   const ids = value.map(id);
   if (new Set(ids).size !== ids.length) throw new AppError(400, '成员不能重复。');
   return ids;
@@ -461,7 +461,7 @@ export function collaborationHttp(deps: HttpDependencies) {
           engine.kick(); json(response, 200, result); return true;
         }
         if (path === '/api/conversations') {
-          const result = store.create({ title: field(body.title, '会话名称', 200), memberIds: memberIds(body.memberIds), defaultMemberId: id(body.defaultMemberId), requestId: field(body.requestId, '请求标识', 200) });
+          const result = store.create({ title: field(body.title, '会话名称', 200), memberIds: memberIds(body.memberIds,13), defaultMemberId: id(body.defaultMemberId), requestId: field(body.requestId, '请求标识', 200) });
           json(response, result.replayed ? 200 : 201, result); return true;
         }
         const send = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path);
@@ -488,7 +488,7 @@ export function collaborationHttp(deps: HttpDependencies) {
         const settings = /^\/api\/conversations\/([^/]+)\/settings$/.exec(path);
         if (settings) {
           if (body.routingMode !== undefined && !['normal', 'concierge'].includes(String(body.routingMode))) throw new AppError(400, '路由模式无效。');
-          json(response, 200, { conversation: store.updateConversation(settings[1]!, { memberIds: memberIds(body.memberIds), defaultMemberId: id(body.defaultMemberId), ...(body.preferredMemberIds !== undefined ? { preferredMemberIds: Array.isArray(body.preferredMemberIds) && !body.preferredMemberIds.length ? [] : memberIds(body.preferredMemberIds) } : {}), ...(body.routingMode !== undefined ? { routingMode: body.routingMode as 'normal' | 'concierge' } : {}) }) }); return true;
+          json(response, 200, { conversation: store.updateConversation(settings[1]!, { memberIds: memberIds(body.memberIds,13), defaultMemberId: id(body.defaultMemberId), ...(body.preferredMemberIds !== undefined ? { preferredMemberIds: Array.isArray(body.preferredMemberIds) && !body.preferredMemberIds.length ? [] : memberIds(body.preferredMemberIds) } : {}), ...(body.routingMode !== undefined ? { routingMode: body.routingMode as 'normal' | 'concierge' } : {}) }) }); return true;
         }
         if (path === '/api/members') { const member = store.workbench.saveMember(memberInput(body), body.expectedRevision, body.requestId).result; engine.kick(); json(response, 200, { member }); return true; }
         if (path === '/api/accounts') { const account = store.workbench.saveAccount(accountInput(body), body.expectedRevision, body.requestId).result; probeCache = undefined; json(response, 200, { account: publicAccount(account, await probe()) }); return true; }

@@ -24,6 +24,7 @@ export interface ContextItem extends InputManifestItem {
 export interface ContextInput {
   memberContext?: MemberContextSnapshot;
   obligationPolicy?: boolean;
+  roomRuleTurn?: import('../../shared/collaboration.js').RoomRuleTurn;
   coordinationPolicy?: import('../../shared/collaboration.js').CoordinationPolicy;
   packageReplyReceipt?: true;
   externalScope?: import('../../shared/obligations.js').ExternalScope;
@@ -83,8 +84,9 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     toolPolicyVersion: input.crossPolicy ? 'cross-action-v1' : undefined, projectWork: input.projectWork,
   };
   const personalMode = runtimeMemberContextMode(input.memberContext);
-  const isolated = personalMode === 'private' || personalMode === 'writing';
-  const coordinationTools = input.coordinationPolicy ? [...opinionTools, ...versionPackageTools].map(tool => tool.name) : [];
+  const player = input.roomRuleTurn?.kind === 'player';
+  const isolated = player || personalMode === 'private' || personalMode === 'writing';
+  const coordinationTools = input.coordinationPolicy ? [...(input.roomRuleTurn?.kind==='host' ? ['game_open','game_read','game_settle'].map(name=>({name})) : []), ...opinionTools, ...versionPackageTools].map(tool => tool.name) : [];
   const obligations = obligationTools(obligationScope).map(tool => tool.name);
   const continuation = supportsContinuation(obligationScope);
   const seenMembers = new Set<string>();
@@ -92,7 +94,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     const instructions = member.instructions.slice(0, 400);
     items.push({ kind: 'roster', reference: `member:${member.id}`, representation: instructions.length === member.instructions.length ? 'full' : 'partial', ...(instructions.length < member.instructions.length ? { reason: 'directory_description_limit' } : {}), characters: instructions.length, complete: instructions.length === member.instructions.length });
     if (isolated) return {id:member.id,name:member.name,responsibilities:instructions,enabled:member.enabled,
-      authorizedTools:member.id===invocation.memberId?memberContextTools(personalMode).map(t=>t.name):[]};
+      authorizedTools:player?['game_read','game_act']:member.id===invocation.memberId?memberContextTools(personalMode).map(t=>t.name):[]};
     return { id: member.id, name: member.name, responsibilities: instructions, enabled: member.enabled, authorizedTools: source.projectReview ? (member.id === invocation.memberId ? [...projectReviewTools(source.projectReview).map(tool => tool.name), ...obligations] : []) : [...AUTHORIZED_COLLABORATION_TOOLS, ...(member.id===invocation.memberId?memberContextTools(input.memberContext?.mode).map(t=>t.name):[]), ...(member.id === invocation.memberId ? [...obligations, ...coordinationTools] : []), ...(input.taskPolicy ? ['task_list', 'task_create', 'task_update', 'task_handoff'] : []), ...(input.artifactPolicy ? ['artifact_list', 'artifact_read', 'artifact_propose', 'review_request', 'review_submit', 'user_question'] : []), ...(input.cooperationPolicy ? ['conversation_pending', 'conversation_read', 'multi_mention'] : []), ...(input.crossPolicy ? ['cross_routes','cross_send','action_list','action_create','action_candidate','action_return','action_wait'] : []), ...(input.memorySnapshot ? ['memory_read', 'memory_propose', 'material_search'] : [])].filter(tool => !restricted || ['workspace_list', 'workspace_read', 'user_question', 'conversation_pending', 'conversation_read', 'memory_read', 'memory_propose', 'material_search'].includes(tool)) };
   });
   if (caller) items.push({ kind: 'caller', reference: `invocation:${caller.invocationId}`, representation: 'full', characters: 0, complete: true });
@@ -168,7 +170,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     : '';
   const renderPersonal = (messages: ContextInput['history']) => [
     invocation.member.instructions,
-    personalMode === 'private' ? '本次为个人工作，由平台在本房间为你恢复。' : '本次在公开会话发言。你可以用自己的措辞表达下列观点，只可使用已经批准公开的表述和本次公开对话。',
+    player ? '本次为房间内单独授权的行动。先用 game_read 读本席身份和本阶段允许的资料；根据房内约定和自己的判断用 game_act 登记选择后结束本轮。' : personalMode === 'private' ? '本次为个人工作，由平台在本房间为你恢复。' : '本次在公开会话发言。你可以用自己的措辞表达下列观点，只可使用已经批准公开的表述和本次公开对话。',
     JSON.stringify({memberId:invocation.memberId, source:brief.source, participant:roster[0], batch:brief.batch}),
     workRecord,
     ...messages.map(m => JSON.stringify({messageId:m.id, sourceId:m.sourceId, author:m.author, memberId:m.memberId, ...backgroundResponsibility(m), content:m.content})),

@@ -28,6 +28,8 @@ import { RoomMemberService } from './room-members.js';
 import { migrateOpinions } from './opinions.js';
 import { migrateVersionPackages, VersionPackageService } from './version-packages.js';
 import { FactorService, migrateFactors } from './factors.js';
+import { RoomRules } from './room-rules.js';
+import { WerewolfRules, playerEvidence } from './werewolf.js';
 import { canRequestPublicStatement, freezeMemberContext, requiresFreshMemberContext, validateMemberContext } from './member-context.js';
 import { migrateObligations } from './obligations.js';
 import { OrdinaryTaskService } from './tasks.js';
@@ -46,6 +48,8 @@ import type { ObligationDelegation } from '../../shared/obligations.js';
 
 export class CollaborationStore {
   readonly factors: FactorService;
+  readonly werewolf = new WerewolfRules(this);
+  readonly roomRules = new RoomRules([this.werewolf]);
   readonly versionPackages: VersionPackageService;
   readonly obligations: ObligationService;
   readonly db;
@@ -87,6 +91,7 @@ export class CollaborationStore {
       CREATE TABLE IF NOT EXISTS cc_accounts (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_members (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES cc_accounts(id), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_conversations (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS cc_werewolf (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_sources (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id), sequence INTEGER NOT NULL UNIQUE, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_commands (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cc_deliveries (id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES cc_sources(id), member_id TEXT NOT NULL REFERENCES cc_members(id), response_id TEXT, status TEXT NOT NULL CHECK(status IN ('pending','consumed','held','withdrawn')), value TEXT NOT NULL, UNIQUE(source_id,member_id));
@@ -200,7 +205,7 @@ export class CollaborationStore {
       ? freezeMemberContext(this, roomMember, source, batch.factorCutoff) : undefined;
     const consumed = new Set(detail.consumptions.filter(c => c.memberId === i.memberId).map(c => c.sourceId));
     const cutoff = batch.historyCutoff ?? this.messageCursor(i.conversationId);
-    const historySnapshot = memberContext?.mode === 'private' ? [] : this.visibility.history(i.conversationId, i.memberId, scopeKey(source.visibility), !source.memberContextPolicy).filter(m => (m.sequence ?? 0) <= cutoff && m.sourceId !== source.id && (m.importedOrigin || m.branchOrigin || (m.responseId ? detail.responses.some(r => r.id === m.responseId && terminal.has(r.status)) : (snapshotOrigin === 'admission' && m.author === 'user') || !!m.sourceId && consumed.has(m.sourceId) && detail.sources.some(s => s.id === m.sourceId && s.sequence < source.sequence))));
+    const historySnapshot = memberContext?.mode === 'private' || source.roomRuleTurn?.kind==='player' ? [] : this.visibility.history(i.conversationId, i.memberId, scopeKey(source.visibility), !source.memberContextPolicy).filter(m => (m.sequence ?? 0) <= cutoff && m.sourceId !== source.id && (m.importedOrigin || m.branchOrigin || (m.responseId ? detail.responses.some(r => r.id === m.responseId && terminal.has(r.status)) : (snapshotOrigin === 'admission' && m.author === 'user') || !!m.sourceId && consumed.has(m.sourceId) && detail.sources.some(s => s.id === m.sourceId && s.sequence < source.sequence))));
     const historyMessageIds = historySnapshot.map(m => m.id);
     const historySourceIds = new Set(historySnapshot.flatMap(m => m.sourceId ? [m.sourceId] : []));
     const historySourceSnapshots: NonNullable<ExecutionContractSnapshot['historySourceSnapshots']> = detail.sources.filter(s => historySourceIds.has(s.id)).map(s => ({
@@ -235,9 +240,9 @@ export class CollaborationStore {
       !source.crossRef && !source.actionRef && (!source.projectReview || boundObligation) &&
       (source.kind === 'user' || boundObligation || !!source.taskRef);
     const coordinationPolicy = roomMember && !requiresFreshMemberContext(memberContext) ? source.coordinationPolicy : undefined;
-    const externalScope = snapshotOrigin==='admission' && obligationPolicy && coordinationPolicy && source.externalScope?.instanceId === roomMember?.id ? source.externalScope : undefined;
-    return { ...(externalScope && {externalScope}), ...(coordinationPolicy && source.packageReplyReceipt && {packageReplyReceipt:true as const}), ...(coordinationPolicy && {coordinationPolicy}), ...(roomMember && !source.visibility && !source.publicStatement && !source.projectWork && !source.projectReview && source.handoffPolicy && {handoffPolicy:source.handoffPolicy}), ...(roomMember && canRequestPublicStatement(source) && {mayRequestPublicStatement: true as const}), ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
-      ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', ...(snapshotOrigin === 'admission' && { crossDisclosure: 'excerpt-only-v1' as const }), visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: requiresFreshMemberContext(memberContext) ? [] : this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
+    const externalScope = snapshotOrigin==='admission' && source.roomRuleTurn?.kind!=='player' && obligationPolicy && coordinationPolicy && source.externalScope?.instanceId === roomMember?.id ? source.externalScope : undefined;
+    return { ...(externalScope && {externalScope}), ...(coordinationPolicy && source.roomRuleTurn && {roomRuleTurn: source.roomRuleTurn}), ...(coordinationPolicy && source.packageReplyReceipt && {packageReplyReceipt:true as const}), ...(coordinationPolicy && {coordinationPolicy}), ...(roomMember && !source.visibility && !source.publicStatement && !source.projectWork && !source.projectReview && source.handoffPolicy && {handoffPolicy:source.handoffPolicy}), ...(roomMember && canRequestPublicStatement(source) && {mayRequestPublicStatement: true as const}), ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
+      ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', ...(snapshotOrigin === 'admission' && { crossDisclosure: 'excerpt-only-v1' as const }), visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: source.roomRuleTurn?.kind==='player' || requiresFreshMemberContext(memberContext) ? [] : this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
   private verifyProjectWork(source: SourceWork, memberId: string, grant: Conversation['workspaceGrant']) {
     const conversation = this.workbench.conversation(source.conversationId);
@@ -372,7 +377,7 @@ export class CollaborationStore {
   create(input: CreateConversation): { conversation: Conversation; replayed: boolean } {
     checkText(input.title, 'title', 200);
     if (input.collaborationMode !== undefined && !['continuous','legacy'].includes(input.collaborationMode)) throw new AppError(400, '协作模式无效。');
-    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 12 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
+    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 13 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
     return this.tx(() => {
       const result = this.command(`conversation:${input.requestId}`, input, () => {
         for (const memberId of input.memberIds) if (!this.get<Member>('cc_members', memberId).enabled) throw new AppError(400, 'Member disabled.');
@@ -422,7 +427,7 @@ export class CollaborationStore {
     }).result);
   }
   updateConversation(conversationId: string, input: { memberIds: string[]; defaultMemberId: string; preferredMemberIds?: string[]; routingMode?: 'normal' | 'concierge' }): Conversation {
-    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 12 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
+    if (!Array.isArray(input.memberIds) || input.memberIds.length < 1 || input.memberIds.length > 13 || new Set(input.memberIds).size !== input.memberIds.length || !input.memberIds.includes(input.defaultMemberId)) throw new AppError(400, 'Invalid conversation members.');
     return this.tx(() => {
       const detail = this.detail(conversationId);
       if (input.preferredMemberIds && (new Set(input.preferredMemberIds).size !== input.preferredMemberIds.length || input.preferredMemberIds.some(m => !input.memberIds.includes(m)))) throw new AppError(400, '偏好成员必须属于会话且不重复。');
@@ -511,7 +516,7 @@ export class CollaborationStore {
     this.put('cc_messages',message);
     this.factors.recordMessage(message);
   }
-  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'taskRef' | 'handoffPolicy' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'publicStatement' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>> & {coordinationOriginSourceId?: string}): SourceWork {
+  private addSource(input: Pick<SourceWork, 'conversationId' | 'kind' | 'content' | 'requestedTargets' | 'depth'> & Partial<Pick<SourceWork, 'id' | 'parentInvocationId' | 'authorMemberId' | 'roomRuleTurn' | 'taskRef' | 'handoffPolicy' | 'reviewRef' | 'projectReview' | 'projectWork' | 'projectGrantRevision' | 'projectRepair' | 'projectCiRepair' | 'bindingState' | 'groupId' | 'visibility' | 'publicStatement' | 'excerptRefs' | 'replyTo' | 'crossRef' | 'actionRef'>> & {coordinationOriginSourceId?: string}): SourceWork {
     const conversation = this.get<Conversation>('cc_conversations', input.conversationId);
     if ((!input.requestedTargets.length && !(input.bindingState === 'unresolved' && input.kind === 'user')) || input.requestedTargets.some(t => !conversation.memberIds.includes(t))) throw new AppError(400, 'Targets must belong to this conversation.');
     const sequence = Number((this.db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM cc_sources').get() as { n: number }).n);
@@ -533,9 +538,10 @@ export class CollaborationStore {
       !conversation.importedFor && !input.visibility && !input.excerptRefs?.length && !input.publicStatement &&
       !input.crossRef && !input.actionRef && !input.projectWork && !input.projectReview && handoffPolicy !== 'candidate-v1';
     const packageReplyReceipt = coordinate && (parent ? this.contract(parent.id).packageReplyReceipt : origin ? origin.packageReplyReceipt : true);
+    const roomRuleTurn = coordinate && (input.roomRuleTurn ?? (origin?.roomRuleTurn?.kind === 'host' || (input.kind === 'user' && conversation.memberIds.length === 13) ? {kind:'host' as const} : undefined));
     const externalMember = coordinate && input.requestedTargets.length===1 ? this.roomMembers.resolve(conversation.id,input.requestedTargets[0]!) : undefined;
     let externalScope;
-    if (externalMember?.active && !parent) {
+    if (roomRuleTurn?.kind!=='player' && externalMember?.active && !parent) {
       if(origin?.externalScope?.instanceId===externalMember.id) externalScope=origin.externalScope;
       else if(input.kind==='user' && !origin && this.options.externalOperations) {
         const actor={conversationId:conversation.id,memberId:externalMember.memberId,instanceId:externalMember.id};
@@ -543,7 +549,7 @@ export class CollaborationStore {
         if(targets.length) externalScope={...actor,targets};
       }
     }
-    const source: SourceWork = { ...sourceInput, externalScope, ...(packageReplyReceipt && {packageReplyReceipt:true as const}), ...(coordinate && {coordinationPolicy:'decision-material-v1' as const}), handoffPolicy, ...(personal && { memberContextPolicy: 'member-context-v1' as const }), ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
+    const source: SourceWork = { ...sourceInput, ...(externalScope && {externalScope}), ...(roomRuleTurn && {roomRuleTurn}), ...(packageReplyReceipt && {packageReplyReceipt:true as const}), ...(coordinate && {coordinationPolicy:'decision-material-v1' as const}), handoffPolicy, ...(personal && { memberContextPolicy: 'member-context-v1' as const }), ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
     this.db.prepare('INSERT INTO cc_sources VALUES(?,?,?,?)').run(source.id, source.conversationId, sequence, JSON.stringify(source));
     for (const memberId of source.requestedTargets) {
       const enabled = this.get<Member>('cc_members', memberId).enabled;
@@ -865,6 +871,11 @@ export class CollaborationStore {
     this.tx(() => {
       const i = this.invocation(invocationId);
       this.validateSessionEvent(i, event);
+      if (this.contract(i.id).roomRuleTurn?.kind === 'player') {
+        const safe = playerEvidence(event);
+        if (!safe) return;
+        event = safe;
+      }
       const evidence: AcceptanceEvidence = { id: id(), invocationId, kind: event.kind, detail: event.detail, createdAt: now() };
       this.db.prepare('INSERT INTO cc_evidence VALUES(?,?,?)').run(evidence.id, invocationId, JSON.stringify(evidence));
       if (event.kind === 'accepted') i.acceptance = 'accepted';
@@ -934,6 +945,7 @@ export class CollaborationStore {
       const i = this.invocation(invocationId); const response = this.response(i.responseId);
       const contract = this.contract(i.id);
       if (status === 'succeeded') validateMemberContext(this, contract);
+      if (contract.roomRuleTurn?.kind === 'player') content = this.werewolf.result(i.id,status)!;
       // A free-form response to personal material may repeat it. Store private observations and
       // notes under their own revocable grants rather than copying them into shareable messages.
       if (contract.memberContext?.mode === 'private') content = status === 'succeeded'
@@ -1153,7 +1165,7 @@ export class CollaborationStore {
       const batch = this.get<DispatchBatch>('cc_batches', i.batchId); const source = this.get<SourceWork>('cc_sources', batch.sourceId);
       if (source.revision !== c.sourceRevision || hash(source.content) !== c.sourceDigest) throw new AppError(409, '来源已变化，不能使用旧执行的输入。', 'inputs_changed');
       const response = this.response(i.responseId); const legacy = c.contextPolicyVersion === 'legacy-history-40-v1';
-      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, memberContext: c.memberContext, externalScope:c.externalScope, coordinationPolicy:c.coordinationPolicy, packageReplyReceipt:c.packageReplyReceipt, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, handoffPolicy:c.handoffPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
+      const build = (additionalSources: SourceWork[]) => assembleContext({ invocation: i, memberContext: c.memberContext, roomRuleTurn:c.roomRuleTurn, externalScope:c.externalScope, coordinationPolicy:c.coordinationPolicy, packageReplyReceipt:c.packageReplyReceipt, obligationPolicy:c.obligationPolicy, continuationPolicy:c.continuationPolicy, handoffPolicy:c.handoffPolicy, webResearch:c.webResearch,projectBrowser:c.projectBrowser,gitDelivery:c.gitDelivery,projectWork: c.projectWork, mayRunProjectNpmTest:c.mayRunProjectNpmTest, projectNpmChecks:c.projectNpmChecks, mayExportProjectFile:c.mayExportProjectFile, mayRequestProjectReview:c.mayRequestProjectReview, reviewOrigin: c.projectReview && this.projectReviews.originalRequest(i.conversationId,c.projectReview), crossPolicy: c.toolPolicyVersion === 'cross-action-v1', memorySnapshot: c.memorySnapshot, visibility: c.visibility, taskSnapshot: c.taskSnapshot, taskPolicy: ['bounded-public-context-tasks-v2', 'bounded-public-context-artifacts-v3', 'bounded-public-context-cooperation-v4', 'bounded-visible-context-v5'].includes(c.contextPolicyVersion), artifactPolicy: ['managed-artifacts-v1', 'cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion), cooperationPolicy: ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(c.toolPolicyVersion ?? ''), additionalSources, additionalCallers: additionalSources.filter(s => s.parentInvocationId).map(s => this.invocation(s.parentInvocationId!)), reviewSnapshot: c.reviewSnapshot, source: { ...source, content: this.visibility.sourceContent(source) }, batch: { ...batch, historyCutoff: c.historyCutoff }, roster: c.roster,
         history: (c.historySnapshot ?? []).map(m => ({ ...m, sequence: m.sequence! })), historySourceSnapshots: c.historySourceSnapshots,
         ...(source.parentInvocationId ? { caller: this.invocation(source.parentInvocationId) } : {}) });
       let assembly = legacy ? undefined : build([]);

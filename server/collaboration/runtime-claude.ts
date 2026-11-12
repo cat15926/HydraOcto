@@ -52,7 +52,7 @@ async function createClaudeBridge(request: RuntimeRequest) {
 }
 
 export async function invokeClaude(request: RuntimeRequest, command: string, project?: ProjectCli): Promise<RuntimeResult> {
-  if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') {
+  if (request.roomRuleTurn?.kind === 'player' || request.memberContextMode === 'private' || request.memberContextMode === 'writing') {
     if (project || request.account.auth!=='api' || request.nativeSessionId) throw new Error('私密工作记录需要全新隔离的 Claude 执行。');
     const cwd = await mkdtemp(join(await realpath(tmpdir()), 'hydra-private-member-'));
     try { return await invokeClaudeProcess({...request,cwd},command); }
@@ -85,7 +85,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
     }
   }
   const env = official ? await officialProjectNetworkEnv(officialClaudeEnv()) : project ? {} as NodeJS.ProcessEnv : cliEnv();
-  const personal = request.memberContextMode === 'private' || request.memberContextMode === 'writing';
+  const personal = request.roomRuleTurn?.kind === 'player' || request.memberContextMode === 'private' || request.memberContextMode === 'writing';
   if (personal) {
     env.HOME = request.cwd;
     env.CLAUDE_CONFIG_DIR = join(request.cwd,'.claude');
@@ -210,7 +210,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
           proc.kill('SIGTERM');
           return;
         }
-        request.onEvent({kind:'diagnostic', detail:{observation:request.memberContextMode === 'writing' ? 'member_expression_tools' : personal ? 'private_member_tools' : 'project_review_tools', evidence:'system.init', nativeSessionId, tools:granted}});
+        request.onEvent({kind:'diagnostic', detail:{observation:request.roomRuleTurn?.kind === 'player' ? 'game_player_tools' : request.memberContextMode === 'writing' ? 'member_expression_tools' : personal ? 'private_member_tools' : 'project_review_tools', evidence:'system.init', nativeSessionId, tools:granted}});
       }
       // --resume + an echoed ID alone does not prove history restoration.
       const apiKeySource = ['none', 'user', 'project', 'org', 'environment', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'apiKeyHelper'].includes(message.apiKeySource) ? message.apiKeySource as string : undefined;

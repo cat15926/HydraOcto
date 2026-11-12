@@ -77,7 +77,7 @@ export class CollaborationEngine {
       const frozen = this.store.contract(invocation.id);
       if (frozen.workspaceGrant) verifyWorkspace(frozen.workspaceGrant);
       let identity: NativeSessionIdentity;
-      try { identity = requiresFreshMemberContext(frozen.memberContext) ? {supported:false, reason:'本轮按成员资料权限重建独立输入。'} : frozen.projectReview ? {supported:false, reason:'项目评审使用一次性工作目录。'} : frozen.projectWork && !frozen.projectContinuity ? { supported:false, reason:'原执行保留一次性项目环境。' } : frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
+      try { identity = frozen.roomRuleTurn?.kind === 'player' || requiresFreshMemberContext(frozen.memberContext) ? {supported:false, reason:'本轮按成员资料权限重建独立输入。'} : frozen.projectReview ? {supported:false, reason:'项目评审使用一次性工作目录。'} : frozen.projectWork && !frozen.projectContinuity ? { supported:false, reason:'原执行保留一次性项目环境。' } : frozen.adapterCapabilityVersion === 'native-continuity-v1' && this.runtime.sessionIdentity
         ? await this.runtime.sessionIdentity({ member: frozen.memberSnapshot, account: frozen.accountMetadataSnapshot, cwd: frozen.workspaceScope || this.options.workspace, projectWork:frozen.projectWork, projectContinuity:frozen.projectContinuity, workspaceGrant:frozen.workspaceGrant })
         : { supported: false, reason: '承载未提供原生会话身份探测，保留新建行为。' }; }
       catch (error) {
@@ -104,8 +104,8 @@ export class CollaborationEngine {
       if(contract.projectWork) await this.options.previews?.releaseForWriter(i.conversationId);
       validateMemberContext(this.store, contract);
       const sessionPlan = i.sessionPlan?.mode === 'resume' ? this.store.sessionForDispatch(i.id) : i.sessionPlan;
-      const result = await this.runtime.invoke({ mayRequestPublicStatement: contract.mayRequestPublicStatement, memberContextMode: runtimeMemberContextMode(contract.memberContext), handoffPolicy:contract.handoffPolicy, externalScope:contract.externalScope, coordinationPolicy:contract.coordinationPolicy, packageReplyReceipt:contract.packageReplyReceipt, invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, obligationPolicy: contract.obligationPolicy, continuationPolicy: contract.continuationPolicy, sessionPlan, nativeSessionId: sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch,projectPreview:contract.projectPreview,projectBrowser:contract.projectBrowser, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
-        onAppendReady: dispatcher => { if (!requiresFreshMemberContext(contract.memberContext) && ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
+      const result = await this.runtime.invoke({ mayRequestPublicStatement: contract.mayRequestPublicStatement, memberContextMode: runtimeMemberContextMode(contract.memberContext), roomRuleTurn:contract.roomRuleTurn, externalScope:contract.externalScope, handoffPolicy:contract.handoffPolicy, coordinationPolicy:contract.coordinationPolicy, packageReplyReceipt:contract.packageReplyReceipt, invocationId: i.id, conversationId: i.conversationId, member: i.member, account, prompt, ...(images ? { images } : {}), toolPolicyVersion: contract.toolPolicyVersion, obligationPolicy: contract.obligationPolicy, continuationPolicy: contract.continuationPolicy, sessionPlan, nativeSessionId: sessionPlan?.nativeSessionId, cwd: contract.workspaceScope || this.options.workspace, workspaceGrant: contract.workspaceGrant, projectWork: contract.projectWork, projectContinuity: contract.projectContinuity, mayProposeProject: contract.mayProposeProject, mayRequestProjectReview:contract.mayRequestProjectReview, mayExportProjectFile:contract.mayExportProjectFile, webResearch:contract.webResearch,projectPreview:contract.projectPreview,projectBrowser:contract.projectBrowser, gitDelivery:contract.gitDelivery, mayRunProjectNpmTest:contract.mayRunProjectNpmTest, projectNpmChecks:contract.projectNpmChecks, projectReview:contract.projectReview, visibility: contract.visibility, signal: controller.signal, onEvent,
+        onAppendReady: dispatcher => { if (contract.roomRuleTurn?.kind !== 'player' && !requiresFreshMemberContext(contract.memberContext) && ['cooperation-v2', 'visibility-memory-v1', 'cross-action-v1'].includes(contract.toolPolicyVersion ?? '') && i.member.carrier === 'codex-app-server' && !controller.signal.aborted) { this.appenders.set(i.id, dispatcher); this.kick(); } },
         onInputRead: observation => {
           const h = this.store.cooperation.handoffs(i.conversationId).find(h => h.invocationId === i.id && h.nativeDeliveryId === observation.nativeDeliveryId);
           if (h) this.store.cooperation.appendResult(h.id, observation);
@@ -115,7 +115,7 @@ export class CollaborationEngine {
         onNativePermissionLost: id => this.store.interactions.revokeReturn(i.id,id),
         onInteraction: request => {
           const raw = JSON.stringify(request), safe = redact(raw);
-          if (requiresFreshMemberContext(contract.memberContext) || request.gitDelivery) return Promise.resolve({state:'declined'});
+          if (contract.roomRuleTurn?.kind === 'player' || requiresFreshMemberContext(contract.memberContext) || request.gitDelivery) return Promise.resolve({state:'declined'});
           if ((request.fileChange || request.nativeCommand) && (raw !== safe || !this.store.checkNativeFilePermission(i.id))) return Promise.resolve({state:'declined'});
           return this.store.interactions.wait(i.id, JSON.parse(safe), i.member.carrier === 'claude-cli' ? 'claude' : 'codex', controller.signal);
         },
@@ -125,6 +125,7 @@ export class CollaborationEngine {
           validateMemberContext(this.store, contract);
           if (!memberContextToolAllowed(runtimeMemberContextMode(contract.memberContext), name)) throw new AppError(403, '本次执行无权使用此工具。');
           this.store.visibility.assertTool(i.id, name);
+          if (name.startsWith('game_')) return this.store.werewolf.tool(i.id,name,args);
           if (name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select') {
             return memberContextTool(this.store, i.id, name, JSON.parse(redact(JSON.stringify(args))), callId);
           }

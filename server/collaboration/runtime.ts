@@ -106,10 +106,10 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
       } };
       try {
       const api = request.member.carrier.endsWith('-api');
-      if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') {
+      if (request.roomRuleTurn?.kind === 'player' || request.memberContextMode === 'private' || request.memberContextMode === 'writing') {
         const isolatedClaude = request.member.carrier === 'claude-cli' && request.account.auth === 'api';
         const privateScope = request.visibility?.kind === 'private' && !request.visibility.revealedAt;
-        const validAudience = request.memberContextMode === 'writing' ? !privateScope
+        const validAudience = request.roomRuleTurn?.kind === 'player' || request.memberContextMode === 'writing' ? !privateScope
           : privateScope && request.visibility!.memberIds.length === 1 && request.visibility!.memberIds[0] === request.member.id;
         if ((!isolatedClaude && !api) || request.projectWork || request.projectReview || request.nativeSessionId || !validAudience) {
           throw new Error('该承载或会话不支持此私密工作范围或受限发言，请使用 Claude Code API 账户或模型 API。');

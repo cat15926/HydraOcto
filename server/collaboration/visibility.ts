@@ -81,6 +81,7 @@ export class VisibilityService {
     const i = this.store.invocation(invocationId), c = this.store.contract(invocationId);
     if (i.roomMember) this.store.roomMembers.assertCurrent(i.roomMember, i.conversationId, i.memberId);
     this.assertConversation(i.conversationId, i.memberId);
+    if (c.roomRuleTurn?.kind === 'player' && !['game_read','game_act'].includes(name)) throw new AppError(403,'本席只可读取本局和登记自己的行动。');
     if (name === 'project_environment_check' && (i.member.carrier !== 'codex-app-server' || !this.store.checkNativeFilePermission(i.id)))
       throw new AppError(403,'本次项目委托未授权平台环境查询。');
     if ((name.startsWith('opinion_') || name.startsWith('package_')) && (c.coordinationPolicy !== 'decision-material-v1' || c.toolPolicyVersion !== 'cross-action-v1')) {

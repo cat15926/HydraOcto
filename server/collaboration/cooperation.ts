@@ -102,7 +102,7 @@ export class CooperationService {
     if (this.store.obligations.isBoundSource(s.id) || this.store.obligations.isBoundSource(primary.id)) return false;
     if (this.store.workbench.imageReferences(i.conversationId, primary.attachmentIds).length) return false;
     const contract = this.store.contract(i.id);
-    if (s.publicStatement || primary.publicStatement || requiresFreshMemberContext(contract.memberContext)) return false;
+    if (s.roomRuleTurn?.kind === 'player' || primary.roomRuleTurn?.kind === 'player' || s.publicStatement || primary.publicStatement || requiresFreshMemberContext(contract.memberContext)) return false;
     // A new personal request must freeze its own authorized record and tool set at admission.
     if (s.memberContextPolicy && i.roomMember && !s.projectWork && !s.projectReview) {
       const scope = s.visibility?.kind === 'private' && !s.visibility.revealedAt ? 'private' : 'public';
@@ -158,7 +158,10 @@ export class CooperationService {
       const out = this.port.command(`multi-mention:${cid}:${stringField(input.requestId, '请求标识')}`, { input, invocationId }, () => {
         const i = invocationId ? this.store.invocation(invocationId) : undefined;
         if (i && (i.conversationId !== cid || this.groups(cid).some(g => g.state === 'collecting' && g.targets.includes(i.memberId)))) conflict('正在参与多人征询的成员不能再次创建征询组。');
-        if (!Array.isArray(input.targets) || input.targets.length < 2 || input.targets.length > 8 || new Set(input.targets).size !== input.targets.length || input.targets.includes(i?.memberId)) throw new AppError(400, '征询需要 2–8 名不同的其他成员。');
+        const authorization = i && this.store.contract(i.id).roomRuleTurn?.kind === 'host' ? this.store.roomRules.collection(input.obligationId,cid,i.memberId) : undefined;
+        const [minimum, maximum] = authorization ? [1,authorization.members.length] as const : [2,8] as const;
+        if (!Array.isArray(input.targets) || input.targets.length < minimum || input.targets.length > maximum || new Set(input.targets).size !== input.targets.length || input.targets.includes(i?.memberId)) throw new AppError(400, '征询需要 '+minimum+'–'+maximum+' 名不同的其他成员。');
+        if (authorization && input.targets.some(t=>!authorization.members.includes(t))) throw new AppError(409,'目标成员不在本次收集的授权范围。');
         const targets = input.targets.map(t => stringField(t, '目标成员')); for (const t of targets) this.data.target(cid, t);
         if (this.groups(cid).filter(g => g.state === 'collecting').length >= 20) conflict('本会话活动征询组达到上限。');
         const question = stringField(input.question, '问题', 10000), context = input.context === undefined ? '' : String(input.context);
@@ -171,7 +174,7 @@ export class CooperationService {
           g.contract = contract; g.results = []; g.missing = [...targets];
         }
         const instructions = g.contract ? '请直接回答当前问题。平台收集本次答复后会交回发起成员。' : '请直接回答当前问题。汇总不会唤回发起者；不得嵌套创建 multi_mention。';
-        const source = this.store.admitSource({ conversationId: cid, kind: 'multi_mention', content: `多人征询 ${g.id}\n${question}\n${context}\n${instructions}`, requestedTargets: targets, depth: i ? this.source(this.store.response(i.responseId).inputSourceIds[0]!).depth + 1 : 0, groupId: g.id, ...(i ? { parentInvocationId: i.id, authorMemberId: i.memberId } : {}) });
+        const source = this.store.admitSource({ conversationId: cid, kind: 'multi_mention', content: `多人征询 ${g.id}\n${question}\n${context}\n${instructions}`, requestedTargets: targets, ...(authorization && {roomRuleTurn:authorization.turn}), depth: i ? this.source(this.store.response(i.responseId).inputSourceIds[0]!).depth + 1 : 0, groupId: g.id, ...(i ? { parentInvocationId: i.id, authorMemberId: i.memberId } : {}) });
         if (source.depth > 8) conflict('征询达到协作深度上限。');
         g.sourceId = source.id; this.data.save('cc_mention_groups', g, 'group.created'); return { group: g };
       });

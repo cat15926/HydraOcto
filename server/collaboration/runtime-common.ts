@@ -1,5 +1,6 @@
 import { opinionTools } from './opinion-tools.js';
 import { versionPackageTools } from './version-package-tools.js';
+import { gameTools } from './werewolf.js';
 import { memberContextTools } from './member-context.js';
 import { obligationDeliverySchema, obligationTools, supportsContinuation } from './obligation-tools.js';
 import { projectBrowserTool } from './project-browser.js';
@@ -82,7 +83,8 @@ interface RuntimeToolSpec {
   inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'coordinationPolicy' | 'packageReplyReceipt' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'roomRuleTurn' | 'coordinationPolicy' | 'packageReplyReceipt' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+  if (request.roomRuleTurn?.kind === 'player') return gameTools('player');
   if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') return memberContextTools(request.memberContextMode);
   const obligations = obligationTools(request);
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
@@ -91,10 +93,10 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'co
     if (t.name === 'multi_mention' && supportsContinuation(request) && !request.projectWork) {
       return {
         ...t,
-        description: 'Collect replies to a question from 2–8 other room members. To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
+        description: 'Collect replies to a question from other room members (normally 2–8; an active room rule may authorize its eligible roster). To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
         inputSchema: {
           ...t.inputSchema,
-          properties: { ...t.inputSchema.properties, obligationId: { type: 'string', minLength: 1 } },
+          properties: { ...t.inputSchema.properties, ...(request.roomRuleTurn?.kind === 'host' && {targets:{type:'array',items:{type:'string'},minItems:1,maxItems:12}}), obligationId: { type: 'string', minLength: 1 } },
         },
       };
     }
@@ -115,6 +117,7 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'co
     };
   }), ...obligations, ...memberContextTools(request.memberContextMode)];
   if (request.coordinationPolicy === 'decision-material-v1' && request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork) {
+    if (request.roomRuleTurn?.kind === 'host') tools.push(...gameTools('host'));
     tools.push(...opinionTools, ...versionPackageTools);
   }
   if (request.handoffPolicy === 'candidate-v1' && !request.visibility && !request.projectWork && !request.projectReview) {
@@ -191,7 +194,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
     throw new Error('This continuation is outside the frozen invocation policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select' || name.startsWith('opinion_') || name.startsWith('package_') || name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
+  if (name.startsWith('game_') || name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select' || name.startsWith('opinion_') || name.startsWith('package_') || name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
   else if (name === 'workspace_read' || name === 'workspace_list') {
     if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
     if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);

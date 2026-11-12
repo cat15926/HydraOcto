@@ -76,12 +76,14 @@ export interface MemberContextSnapshot {
   factors: Pick<import('./factors.js').FactorView, 'id' | 'version' | 'kind' | 'content' | 'parentIds' | 'sourceRef' | 'issuer' | 'expressionOptions'>[];
   obligations: {id:string; revision:number; goal:string; state:string; wait?:string}[];
 }
+export type RoomRuleTurn = { kind:'host' } | { kind:'player'; gameId:string; epoch:number };
 export interface SourceWork {
   publicStatement?: true;
   memberContextPolicy?: 'member-context-v1';
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
+  roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
   externalScope?: import('./obligations.js').ExternalScope;
   roomPolicy?: 'instance-v1';
@@ -407,6 +409,7 @@ export interface ExecutionContractSnapshot {
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
+  roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
   externalScope?: import('./obligations.js').ExternalScope;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
@@ -491,6 +494,7 @@ export interface RuntimeRequest {
   continuationPolicy?: 'durable-v1';
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
+  roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
   externalScope?: import('./obligations.js').ExternalScope;
   images?: RuntimeImageInput[];
