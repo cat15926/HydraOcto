@@ -126,4 +126,3 @@ finally{
   await writeFile(out,JSON.stringify(report,null,2).replaceAll(process.env[account.apiKeyEnv],'[redacted]')+'\n',{mode:0o600,flag:'wx'});
   console.log(failure?'failed':'passed',out);
 }
-
