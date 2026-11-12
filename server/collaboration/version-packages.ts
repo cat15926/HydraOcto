@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { RoomMemberInstance } from '../../shared/collaboration.js';
 import type { Obligation } from '../../shared/obligations.js';
-import type { MaterialBasis, PackageVersion, VersionPackageView } from '../../shared/version-packages.js';
+import type { IncidentalMatch, MaterialBasis, PackageVersion, VersionPackageView } from '../../shared/version-packages.js';
 import { AppError, now } from '../store.js';
 import { textDigest } from './visibility.js';
 import { stringField } from './artifacts.js';
@@ -11,8 +11,8 @@ import type { CollaborationStore } from './store.js';
 interface Authorship { invocationId:string; sourceId:string; revision:number; instanceId:string }
 interface Version extends PackageVersion { origin?:Authorship }
 interface Material {key:string;name:string;versions:Version[]}
-interface Review {id:string;versionId:string;verdict:'accept'|'changes_requested';note:string;origin:Authorship}
-interface Submission extends Version {basis?:MaterialBasis[];reviews:Review[]}
+interface Review {id:string;versionId:string;verdict:'accept'|'changes_requested';note:string;origin:Authorship;confirmedIncidental?:MaterialBasis[]}
+interface Submission extends Version {basis?:MaterialBasis[];literalMatches?:MaterialBasis[];incidentalMatches?:IncidentalMatch[];reviews:Review[]}
 interface Part {key:string;label:string;dependsOn?:string[];writer?:RoomMemberInstance;reviewer?:RoomMemberInstance;submissions:Submission[];headVersionId?:string}
 interface Edition {id:string;publisher:Authorship;parts:{key:string;versionId:string;reviewId:string}[]}
 interface Package {
@@ -39,6 +39,8 @@ function records(value:unknown,label:string,allowEmpty=false):Record<string,unkn
 }
 function unique(values:string[]){if(new Set(values).size!==values.length)throw new AppError(400,'存在重复的材料或分项标识。');return values;}
 function last<T>(values:T[]):T{return values[values.length-1]!;}
+function sameInput(a:MaterialBasis,b:MaterialBasis){return a.key===b.key && a.versionId===b.versionId;}
+function covers(inputs:MaterialBasis[],ref:MaterialBasis){return inputs.some(input=>sameInput(input,ref));}
 function version(content:string,number:number,origin?:Authorship):Version{
   return {versionId:randomUUID(),number,content,digest:textDigest(content),createdAt:now(),origin};
 }
@@ -111,8 +113,29 @@ export class VersionPackageService {
     const row=this.store.db.prepare('SELECT 1 FROM cc_version_package_reads WHERE invocation_id=? AND package_id=? AND version_id=?').get(origin.invocationId,p.id,id);
     if(!row)conflict('请先用 package_list 读取本轮要使用的准确版本。');
   }
+  // Only literal, complete material values count. Equal text under different keys is
+  // ambiguous; the author must identify each use or explain the coincidence.
+  private findLiterals(p:Package,s:Submission,visibleOnly:boolean):MaterialBasis[]{
+    const matches:MaterialBasis[]=[];
+    const declared=[...(s.basis??[]),...(s.incidentalMatches??[])];
+    for (const m of p.materials) {
+      const values=new Map<string,Version>();
+      for (const v of m.versions) {
+        if ((!visibleOnly && v.createdAt>s.createdAt) || !s.content.includes(v.content) || (visibleOnly && !this.available(v,p.conversationId))) continue;
+        const previous=values.get(v.content);
+        if (!previous || !covers(declared,{key:m.key,versionId:previous.versionId})) values.set(v.content,v);
+      }
+      for (const v of values.values()) matches.push({key:m.key,versionId:v.versionId});
+    }
+    return matches;
+  }
+  private literals(p:Package,s:Submission){return s.literalMatches??this.findLiterals(p,s,false);}
+  private unexplained(p:Package,s:Submission){
+    const declared=[...(s.basis??[]),...(s.incidentalMatches??[])];
+    return this.literals(p,s).some(ref=>!covers(declared,ref));
+  }
   private matches(p:Package,part:Part,s:Submission){
-    if(!part.dependsOn||!s.basis||s.basis.length!==part.dependsOn.length)return false;
+    if(!part.dependsOn||!s.basis||s.basis.length!==part.dependsOn.length||this.unexplained(p,s)||!this.readableSubmission(p,s))return false;
     return part.dependsOn.every(k=>{
       const m=p.materials.find(m=>m.key===k),v=m&&last(m.versions);
       return v && this.available(v,p.conversationId) && s.basis!.some(b=>b.key===k && b.versionId===v.versionId);
@@ -121,7 +144,7 @@ export class VersionPackageService {
   private readableSubmission(p:Package,s:Submission,settledExcept?:string) {
     if (!this.available(s,p.conversationId,settledExcept)) return false;
     if (!s.basis) return p.materials.every(m=>m.versions.every(v=>this.available(v,p.conversationId)));
-    return s.basis.every(b=>{
+    return [...s.basis,...this.literals(p,s)].every(b=>{
       const material=p.materials.find(m=>m.key===b.key);
       const source=material?.versions.find(v=>v.versionId===b.versionId);
       return source && this.available(source,p.conversationId,settledExcept);
@@ -139,6 +162,7 @@ export class VersionPackageService {
     const currentReview=review&&this.validOrigin(review.origin);
     let state:VersionPackageView['parts'][number]['state']='missing', reason:string|undefined;
     if(!part.dependsOn || s&&!s.basis || s&&!valid){state='unknown';reason='依据待核实';}
+    else if(s&&this.unexplained(p,s)){state='unknown';reason='依据待核实：分项含未说明的材料原文，请由作者补正后重新评审。';}
     else if(s&&!selected){
       state='needs_review';
       const changed=part.dependsOn.filter(k=>!s.basis?.some(b=>b.key===k&&b.versionId===last(p.materials.find(m=>m.key===k)!.versions).versionId));
@@ -149,7 +173,7 @@ export class VersionPackageService {
     else if(s)state='pending';
     return {key:part.key,label:part.label,dependsOn:part.dependsOn,memberId:part.writer?.memberId??this.root(p).owner.memberId,
       reviewerMemberId:part.reviewer?.memberId??this.root(p).owner.memberId,state,reason,
-      ...(valid&&s && {versionId:s.versionId,number:s.number,content:s.content,basis:s.basis?.filter(b=>p.materials.find(m=>m.key===b.key)?.versions.some(v=>v.versionId===b.versionId&&this.available(v,p.conversationId)))}),
+      ...(valid&&s && {versionId:s.versionId,number:s.number,content:s.content,basis:s.basis,incidentalMatches:s.incidentalMatches}),
       ...(state==='accepted'&&review && {evidenceId:review.id}),
       history:part.submissions.filter(x=>this.readableSubmission(p,x)).flatMap(x=>{
         const reviews=x.reviews.filter(r=>this.validOrigin(r.origin));
@@ -255,7 +279,11 @@ export class VersionPackageService {
     if(text===base.content)return this.view(p,origin);
     material.versions.push(version(text,material.versions.length+1,origin));
     this.save(p,'material_changed');
-    this.notify(p,p.parts.filter(part=>part.dependsOn?.includes(material.key)),'writer','依据材料已改版，请复核受影响的分项',origin?.instanceId);
+    this.notify(p,p.parts.filter(part=>{
+      if (part.dependsOn?.includes(material.key)) return true;
+      const head=part.submissions.find(s=>s.versionId===part.headVersionId);
+      return head && this.unexplained(p,head) && this.literals(p,head).some(ref=>ref.key===material.key);
+    }),'writer','依据材料已改版，请复核受影响的分项',origin?.instanceId);
     if (this.view(p).state !== 'published') this.store.obligations.reopenPackage(this.root(p));
     return this.view(p,origin);
   }
@@ -272,19 +300,30 @@ export class VersionPackageService {
     if (current.versionId && args.expectedPartVersionId!==current.versionId) conflict('该分项已有交付。请先用 package_list 读取分项自己的 versionId，并把它作为 expectedPartVersionId。');
     // Some native tool bridges serialize an explicit JSON null as text.
     if (!current.versionId && args.expectedPartVersionId!=null && args.expectedPartVersionId!=='null') conflict('这是该分项的首次提交，请省略 expectedPartVersionId。材料版本只放在 basis。');
+    const readInput=(b:Record<string,unknown>):MaterialBasis=>{
+      const k=key(b.key),v=key(b.versionId),material=p.materials.find(m=>m.key===k);
+      if(!material?.versions.some(x=>x.versionId===v && this.available(x,p.conversationId)))conflict('依据版本不可核验。');
+      this.readVersion(origin,p,v);
+      return {key:k,versionId:v};
+    };
     let basis:MaterialBasis[]|undefined;
     if(args.basis!==undefined){
-      basis=records(args.basis,'依据',true).map(b=>{
-        const k=key(b.key),v=key(b.versionId),material=p.materials.find(m=>m.key===k);
-        if(!material?.versions.some(x=>x.versionId===v && this.available(x,p.conversationId)))conflict('依据版本不可核验。');
-        this.readVersion(origin,p,v);
-        return {key:k,versionId:v};
-      });
+      basis=records(args.basis,'依据',true).map(readInput);
       const keys=unique(basis.map(b=>b.key));
-      if(part.dependsOn && (keys.length!==part.dependsOn.length || part.dependsOn.some(k=>!keys.includes(k))))conflict('依据与该分项约定不符。');
-      part.dependsOn??=keys;
+      if(part.dependsOn?.some(k=>!keys.includes(k)))conflict('不能省略该分项已登记的材料依据。');
+      const addsDependency=keys.some(k=>!part.dependsOn?.includes(k));
+      if(addsDependency && basis.some(b=>b.versionId!==last(p.materials.find(m=>m.key===b.key)!.versions).versionId))conflict('补充依据须使用当前读到的准确版本。');
+      part.dependsOn=keys;
     }
     const s:Submission={...version(body(args.content),part.submissions.length+1,origin),basis,reviews:[]};
+    if(args.incidentalMatches!==undefined){
+      if(!basis)conflict('请先声明分项的材料依据；独立分项传入空 basis。');
+      s.incidentalMatches=records(args.incidentalMatches,'巧合说明',true).map(b=>({...readInput(b),reason:stringField(b.reason,'巧合原因',1000)}));
+      unique(s.incidentalMatches.map(b=>b.versionId));
+    }
+    s.literalMatches=this.findLiterals(p,s,true);
+    if(s.incidentalMatches?.some(b=>!covers(s.literalMatches!,b)||covers(basis??[],b)))conflict('巧合说明必须指向分项正文中确实出现、且未用作依据的材料版本。');
+    if(basis && this.unexplained(p,s))conflict('分项含未说明的完整材料原文。请用 package_list 核对，将实际引用的准确 key、versionId 加入 basis（可补正原空声明）；仅文字巧合时在 incidentalMatches 填写对应版本与原因，再请评审确认。');
     part.submissions.push(s);
     if(!s.basis || this.matches(p,part,s) || !part.headVersionId)part.headVersionId=s.versionId;
     this.save(p,'submitted');
@@ -299,7 +338,15 @@ export class VersionPackageService {
     this.readVersion(origin,p,s.versionId);
     if(args.verdict!=='accept'&&args.verdict!=='changes_requested')conflict('评审结论无效。');
     if(s.reviews.length)conflict('此版本已有评审，请对新的修订进行核对。');
-    s.reviews.push({id:randomUUID(),versionId:s.versionId,verdict:args.verdict,note:stringField(args.note,'验收依据',4000),origin});
+    let confirmedIncidental:MaterialBasis[]|undefined;
+    if(args.verdict==='accept'){
+      if(!s.basis||this.unexplained(p,s))conflict('依据待核实，请作者勘正当前分项再签收。');
+      const matches=s.incidentalMatches??[];
+      confirmedIncidental=records(args.confirmedIncidental??[],'巧合确认',true).map(b=>({key:key(b.key),versionId:key(b.versionId)}));
+      if(confirmedIncidental.length!==matches.length||matches.some(m=>!covers(confirmedIncidental!,m)))conflict('请核对该分项版本的巧合说明，在 confirmedIncidental 逐项确认准确材料 key 和 versionId。');
+      for(const m of matches)this.readVersion(origin,p,m.versionId);
+    }
+    s.reviews.push({id:randomUUID(),versionId:s.versionId,verdict:args.verdict,note:stringField(args.note,'验收依据',4000),origin,confirmedIncidental});
     this.save(p,'reviewed');
     if(args.verdict==='changes_requested'&&this.selected(p,part)?.versionId===s.versionId)this.notify(p,[part],'writer','评审要求修改分项',origin.instanceId);
     return this.view(p,origin);
@@ -307,7 +354,7 @@ export class VersionPackageService {
   private verify(p:Package,except:string){
     for(const part of p.parts){
       const s=this.selected(p,part),r=s&&this.review(s);
-      if(!s||!this.available(s,p.conversationId,except)||r?.verdict!=='accept'||!this.validOrigin(r.origin,except))
+      if(!s||!this.readableSubmission(p,s,except)||r?.verdict!=='accept'||!this.validOrigin(r.origin,except))
         conflict('需要当前版本的有效验收：'+part.label);
       for(const k of part.dependsOn??[]){
         const m=p.materials.find(x=>x.key===k)!;
@@ -353,6 +400,14 @@ export class VersionPackageService {
     return this.data.port.tx(()=>{
       if(name==='package_list'){
         const packages=args.packageId?[this.load(cid,args.packageId)]:this.data.rows<Package>('cc_version_packages',cid).filter(p=>this.accessible(p));
+        if(args.materialRef!==undefined){
+          if(!args.packageId || !args.materialRef || typeof args.materialRef!=='object')unavailable();
+          const ref=args.materialRef as Record<string,unknown>,p=packages[0]!,m=p.materials.find(m=>m.key===ref.key);
+          const v=m?.versions.find(v=>v.versionId===ref.versionId);
+          if(!m || !v || !this.available(v,cid))unavailable();
+          this.store.db.prepare('INSERT OR IGNORE INTO cc_version_package_reads VALUES(?,?,?)').run(id,p.id,v.versionId);
+          return {packages:[this.view(p,origin)],material:{key:m.key,versionId:v.versionId,number:v.number,content:v.content}};
+        }
         return {packages:packages.map(p=>this.view(p,origin))};
       }
       const receipt=this.data.port.command('package-tool:'+id+':'+stringField(callId,'调用编号'),{name,args},()=>{

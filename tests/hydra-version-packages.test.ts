@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +56,75 @@ test('venue changes preserve independent acceptance, late old review and new pub
     f.deliver();f.finish(f.id,'本次资料交付');
     assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivered');
     assert.throws(()=>f.store.versionPackages.change(f.room.id,p.id,{...change,requestId:randomUUID(),expectedRevision:p.revision}));
+  }finally{f.close();}
+});
+
+test('a live writer can add exact references to an empty plan, and cannot label quoted material independent',()=>{
+  const f=fixture();try {
+    const old='秋枫厅a36c52',latest='海棠厅a36c52';
+    let p=f.open(['notice','route','bio'].map(key=>({key,label:key,dependsOn:[]})),[{key:'location',name:'地点',content:old}]);
+    const basis=[{key:'location',versionId:p.materials[0]!.versionId}];
+    p=f.submit(p,'notice','欢迎来'+old,basis);
+    assert.deepEqual(p.parts[0]!.dependsOn,['location']);
+    assert.throws(()=>f.submit(p,'route','主入口直达'+old,[]),/完整材料原文/);
+    assert.equal(f.store.versionPackages.list(f.room.id)[0]!.parts[1]!.state,'missing');
+    p=f.submit(p,'route','主入口直达'+old,basis);
+    p=f.sign(f.submit(f.sign(p,'notice'),'bio','青林，摄影师',[]),'bio');
+    const bio=p.parts[2]!,route=p.parts[1]!;
+    p=f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,expectedMaterialVersionId:basis[0]!.versionId,key:'location',content:latest});
+    assert.deepEqual(p.parts.map(x=>x.state),['needs_review','needs_review','accepted']);
+    p=f.sign(p,'route',route.versionId);assert.equal(p.parts[1]!.history[0]?.current,false);
+    assert.throws(()=>f.publish(p),/有效验收/);
+    const fresh=[{key:'location',versionId:p.materials[0]!.versionId}];
+    assert.throws(()=>f.submit(p,'route','主入口直达'+old,fresh),/完整材料原文/);
+    assert.throws(()=>f.submit(p,'route','请咨询工作人员',[]),/不能省略/);
+    for(const k of ['notice','route'])p=f.sign(f.submit(p,k,'新地址 '+latest,fresh),k);
+    assert.deepEqual(p.parts[2],bio);assert.equal(f.publish(p).state,'published');
+  }finally{f.close();}
+});
+
+test('legacy unexplained literal stays unresolved after changes, retains its receipt and can be corrected',()=>{
+  const f=fixture();try{
+    let p=f.open([{key:'card',label:'卡片',dependsOn:[]}]);
+    p=f.sign(f.submit(p,'card','普通卡片',[]),'card');p=f.publish(p);
+    const previous=p.parts[0]!,oldReceipt=previous.evidenceId!;
+    // Re-create the exact old writer format. Old releases accepted a copied material under basis:[].
+    const db=f.db.db,stored=JSON.parse(String(db.prepare('SELECT value FROM cc_version_packages WHERE id=?').get(p.id)!.value));
+    const old=stored.parts[0].submissions[0];old.content='旧卡片指引：西馆';old.digest=createHash('sha256').update(old.content).digest('hex');
+    delete old.literalMatches;delete old.incidentalMatches;delete old.reviews[0].confirmedIncidental;
+    db.prepare('UPDATE cc_version_packages SET value=? WHERE id=?').run(JSON.stringify(stored),p.id);
+    p=f.store.versionPackages.list(f.room.id)[0]!;
+    assert.equal(p.parts[0]!.state,'unknown');assert.match(p.parts[0]!.reason!,/未说明/);
+    assert.equal(p.parts[0]!.history[0]!.reviewId,oldReceipt);assert.equal(p.parts[0]!.history[0]!.current,false);
+    assert.throws(()=>f.deliver(),/待核验/);assert.throws(()=>f.publish(p),/有效验收/);
+    p=f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,key:'venue',expectedMaterialVersionId:p.materials[0]!.versionId,content:'展厅2'});
+    assert.equal(p.parts[0]!.state,'unknown');
+    f.invoke('package_list',{packageId:p.id});
+    p=f.sign(f.submit(p,'card','新指引：展厅2',[{key:'venue',versionId:p.materials[0]!.versionId}]),'card');
+    assert.equal(p.parts[0]!.number,2);assert.equal(p.parts[0]!.history[0]!.reviewId,oldReceipt);
+    assert.notEqual(f.publish(p).edition!.parts[0]!.reviewId,oldReceipt);
+  }finally{f.close();}
+});
+
+test('coincidences require exact material and part identities, a reason, and a matching review',()=>{
+  const f=fixture();try{
+    let p=f.open([{key:'author',label:'署名',dependsOn:[]}],['place','series'].map(key=>({key,name:key,content:'A'})));
+    const [place,series]=p.materials.map(({key,versionId})=>({key,versionId}));
+    const submit=(matches:object[])=>f.invoke('package_submit',{packageId:p.id,key:'author',content:'Ada',basis:[],incidentalMatches:matches});
+    assert.throws(()=>submit([]),/完整材料原文/);
+    assert.throws(()=>submit([{...place,reason:'人名'}]),/完整材料原文/);
+    assert.throws(()=>submit([{...place,versionId:series!.versionId,reason:'人名'}]),/不可核验/);
+    p=submit([place!,series!].map(b=>({...b,reason:'Ada 是署名。'})));
+    assert.equal(p.parts[0]!.incidentalMatches?.length,2);assert.throws(()=>f.sign(p,'author'),/逐项确认/);
+    const approve={packageId:p.id,key:'author',versionId:p.parts[0]!.versionId,verdict:'accept',note:'核对人名与材料。'};
+    assert.throws(()=>f.invoke('package_review',{...approve,confirmedIncidental:[place,place]}),/逐项确认/);
+    assert.throws(()=>f.invoke('package_review',{...approve,versionId:place!.versionId,confirmedIncidental:[place,series]}),/不可核验/);
+    p=f.invoke('package_review',{...approve,confirmedIncidental:[place,series]});const accepted=p.parts[0]!;
+    p=f.store.versionPackages.change(f.room.id,p.id,{requestId:randomUUID(),expectedRevision:p.revision,key:'place',expectedMaterialVersionId:place!.versionId,content:'B'});
+    assert.deepEqual(p.parts[0],accepted);assert.equal(f.publish(p).state,'published');
+    const read=f.store.versionPackages.tool(f.id,'package_list',{packageId:p.id,materialRef:place},'read-old') as {material:{content:string}};
+    assert.equal(read.material.content,'A');
+    assert.throws(()=>f.invoke('package_list',{packageId:p.id,materialRef:{...series,versionId:place!.versionId}}),/不可用/);
   }finally{f.close();}
 });
 
