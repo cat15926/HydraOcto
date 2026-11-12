@@ -9,25 +9,36 @@ import { isolatedClaude } from './hydra-test-native.mjs';
 import { createApplication } from '../server/index.ts';
 import { createCollaborationRuntime } from '../server/collaboration/runtime.ts';
 
-const rejectFirst = process.argv.includes('--decline-first'), maxCalls = rejectFirst ? 5 : 3;
+const flags=process.argv.slice(2);
+assert(flags.every(f=>['--decline-first','--restart-on-accept'].includes(f)));
+const rejectFirst=flags.includes('--decline-first'), restart=flags.includes('--restart-on-accept');
+const maxCalls=rejectFirst?5:3;
 const base = resolve(process.env.VALIDATION_OUTPUT_DIR || '.local-data/validation');
 await mkdir(base,{recursive:true,mode:0o700});
 const dir = await mkdtemp(join(base,'hydra-shift-')), profile = join(dir,'native'), workspace = join(dir,'workspace'), dataDir=join(dir,'service');
 await mkdir(profile,{mode:0o700}); await mkdir(workspace,{mode:0o700});
 const proof = { accepted: false, rejectFirst, maxCalls, calls:[], submittedUserSources:[] };
-let app, store, cid;
+let app, store, cid, url, holdAdmissions=false;
 try {
   const {selected,account} = await isolatedClaude(resolve(process.env.HYDRA_CONFIG_ROOT || '.'),profile);
   const native = createCollaborationRuntime({timeoutMs:180000,privateRoots:[dataDir]});
-  app = await createApplication({dataDir,workspace,port:0,collaborationRuntime:{...native,async invoke(req) {
+  const options={dataDir,workspace,port:0,collaborationRuntime:{...native,async invoke(req) {
     assert(proof.calls.length < maxCalls,'Carrier call limit');
     assert.equal(req.cwd,workspace); assert(!req.projectWork && !req.webResearch);
     const c={id:req.invocationId,member:req.member.id,tools:[]}; proof.calls.push(c);
     return native.invoke({...req,async onToolCall(name,args,id){
-      const result = await req.onToolCall(name,args,id); c.tools.push(name); return result;
+      if(restart && name==='task_handoff_decide' && args.decision==='accept')holdAdmissions=true;
+      const result=await req.onToolCall(name,args,id); c.tools.push(name); return result;
     }});
-  }}});
-  const {url} = await app.start(); assert.notEqual(new URL(url).port,'4310');
+  }}};
+  app=await createApplication(options);
+  if(restart){
+    // Model the queue consumer becoming unavailable. In-flight model calls,
+    // settlement and persistence continue through the regular application.
+    const admit=app.collaborationStore.admitNext.bind(app.collaborationStore);
+    app.collaborationStore.admitNext=(...args)=>holdAdmissions?undefined:admit(...args);
+  }
+  ({url}=await app.start()); assert.notEqual(new URL(url).port,'4310');
   async function post(path,body) {
     const resp=await fetch(url+path,{method:'POST',headers:{'content-type':'application/json','x-csrf-token':app.csrfToken},body:JSON.stringify({requestId:randomUUID(),...body})});
     assert(resp.ok,path+' HTTP '+resp.status);return resp.json();
@@ -50,6 +61,21 @@ try {
     const d=store.detail(cid), root=store.obligations.list(cid).find(o=>!o.parentId);
     const failed=d.invocations.find(i=>['failed','cancelled','interrupted'].includes(i.status));
     assert(!failed,failed?.memberId+' '+failed?.error);
+    if(holdAdmissions && d.invocations.every(i=>i.status==='succeeded')){
+      const handoff=store.tasks.handoffs(cid).find(h=>h.state==='applied');
+      assert(handoff && root?.id===handoff.offer?.obligationId);
+      assert(d.deliveries.some(item=>item.sourceId===handoff.sourceId && item.status==='pending'));
+      assert(!d.consumptions.some(item=>item.sourceId===handoff.sourceId));
+      const prior=handoff.executionRef?.invocationId;
+      assert(prior && d.invocations.some(i=>i.id===prior));
+      proof.restart={handoffId:handoff.id,sourceId:handoff.sourceId,previousInvocationId:prior,owner:root.owner.instanceId};
+      await app.close();app=await createApplication(options);store=app.collaborationStore;
+      holdAdmissions=false;
+      // Replay a late former-owner delivery against the reopened store before admitting the successor.
+      assert.throws(()=>store.obligations.tool(prior,'obligation_deliver',{obligationId:root.id,summary:'已退场成员的迟到回报'},randomUUID()));
+      assert.equal(store.obligations.list(cid).find(o=>o.id===root.id)?.owner.instanceId,proof.restart.owner);
+      ({url}=await app.start());continue;
+    }
     if(d.invocations.length && d.invocations.every(i=>i.status==='succeeded') && !d.deliveries.some(x=>x.status==='pending')) {
       assert.equal(root?.state,'delivered','No final delivery or autonomous continuation');
       const shifts=store.tasks.handoffs(cid);
@@ -63,6 +89,11 @@ try {
       assert(/一[笔次]|1[笔次]|未重复|没有重复|未被重复|并未重复/.test(final.content));
       assert.equal(d.messages.filter(m=>m.author==='user').length,1);
       assert(d.invocations.every(i=>i.acceptance==='accepted' && i.teardown==='confirmed' && i.nativeSessionId && i.roomMember?.id));
+      if(restart){
+        assert(proof.restart);
+        assert.equal(d.consumptions.filter(c=>c.sourceId===proof.restart.sourceId).length,1);
+        assert.equal(shifts.at(-1).id,proof.restart.handoffId);
+      }
       proof.final=final.id;proof.accepted=true;break;
     }
     await delay(300);
