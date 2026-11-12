@@ -153,5 +153,5 @@ try{
 }catch(e){proof.error=e.message;process.exitCode=1;}
 finally{
  if(app){if(cid){const r=app.collaborationStore.obligations.list(cid).find(o=>!o.parentId);proof.endState=r?.state;proof.remaining=r&&{obligation:r.id,owner:r.owner,phase:r.state,group:r.activeGroupId,pending:app.collaborationStore.invocations().filter(i=>i.conversationId===cid&&i.status==='prepared'&&!i.dispatchStarted).map(i=>i.id)};proof.gamePhase=r&&app.collaborationStore.werewolf.get(r.id,cid)?.phase;}await app.close();}
- await writeFile(join(dir,'report.json'),JSON.stringify(proof,null,2),{mode:0o600});console.log(JSON.stringify({dir,mode,passed:proof.passed,checks,error:proof.error}));
+ await writeFile(join(dir,'result.json'),JSON.stringify(proof,null,2),{mode:0o600});console.log(JSON.stringify({dir,mode,passed:proof.passed,checks,error:proof.error}));
 }
