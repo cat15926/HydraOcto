@@ -239,16 +239,16 @@ export function collaborationHttp(deps: HttpDependencies) {
           json(response, 200, result);
           return true;
         }
-        const obligationRoute = /^\/api\/conversations\/([^/]+)\/obligations\/([^/]+)\/(signal|accept|cancel|retry|reassign)$/.exec(path);
+        const obligationRoute = /^\/api\/conversations\/([^/]+)\/obligations\/([^/]+)\/(signal|accept|cancel|retry|reassign|approve-external)$/.exec(path);
         if (obligationRoute) {
           const [,cid,oid,operation]=obligationRoute;
-          const keys=operation==='signal'?['requestId','condition','summary','waitId','expectedRevision']:operation==='reassign'?['requestId','reason','expectedRevision','taskRevision','memberId','instanceId','generation']:['requestId','reason','expectedRevision'];
+          const keys=operation==='approve-external'?['requestId','operationId','targetId','expectedRevision']:operation==='signal'?['requestId','condition','summary','waitId','expectedRevision']:operation==='reassign'?['requestId','reason','expectedRevision','taskRevision','memberId','instanceId','generation']:['requestId','reason','expectedRevision'];
           if (Object.keys(body).some(k=>!keys.includes(k))) throw new AppError(400,'操作包含未知字段。');
           const requestId=id(body.requestId), rowId=id(oid);
           const expectedRevision=revision(body.expectedRevision,'委托版本',1);
           const room=store.workbench.conversation(cid!);
           if(room.archivedAt||room.deletedAt) throw new AppError(409,'请先恢复会话。');
-          const result=operation==='signal'
+          const result=operation==='approve-external' ? store.obligations.approveExternal(cid!,rowId,{requestId,expectedRevision,operationId:id(body.operationId),...(body.targetId!==undefined && {targetId:field(body.targetId,'授权对象',128)})}) : operation==='signal'
             ? store.obligations.signal(cid!,rowId,{requestId,expectedRevision,condition:field(body.condition,'等待条件',1000),summary:field(body.summary,'观察结果',2000),waitId:id(body.waitId)})
             : operation==='reassign' ? store.obligations.reassign(cid!,rowId,{requestId,expectedRevision,taskRevision:revision(body.taskRevision,'任务版本',1),target:{memberId:id(body.memberId),instanceId:id(body.instanceId),generation:revision(body.generation,'成员代次',1)},reason:field(body.reason,'交接说明',1000)})
             : await store.obligations.decide(cid!,rowId,{requestId,expectedRevision,decision:operation==='accept'?'accept':operation==='retry'?'retry':'cancel',...(body.reason!==undefined?{reason:field(body.reason,'原因',1000)}:{})});

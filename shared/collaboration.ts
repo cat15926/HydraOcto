@@ -83,6 +83,7 @@ export interface SourceWork {
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
   packageReplyReceipt?: true;
+  externalScope?: import('./obligations.js').ExternalScope;
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
   projectCiRepair?: { interactionId: string; commit: string };
@@ -407,6 +408,7 @@ export interface ExecutionContractSnapshot {
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
   packageReplyReceipt?: true;
+  externalScope?: import('./obligations.js').ExternalScope;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;
   memberSnapshot: Member; accountMetadataSnapshot: CollaborationAccount; workspaceScope: string;
@@ -490,6 +492,7 @@ export interface RuntimeRequest {
   handoffPolicy?: HandoffPolicy;
   coordinationPolicy?: CoordinationPolicy;
   packageReplyReceipt?: true;
+  externalScope?: import('./obligations.js').ExternalScope;
   images?: RuntimeImageInput[];
   invocationId: string; conversationId: string; member: Member; account: CollaborationAccount;
   prompt: string; nativeSessionId?: string; sessionPlan?: NativeSessionPlan; toolPolicyVersion?: string; cwd: string; signal: AbortSignal;

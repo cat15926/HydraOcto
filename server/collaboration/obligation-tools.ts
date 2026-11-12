@@ -46,6 +46,7 @@ const ordinary = [
 ];
 
 interface ObligationToolScope {
+  externalScope?:import('../../shared/obligations.js').ExternalScope;
   handoffPolicy?: HandoffPolicy;
   obligationPolicy?: boolean;
   packageReplyReceipt?: true;
@@ -73,6 +74,11 @@ export function obligationTools(scope: ObligationToolScope) {
       kind: { type: 'string', enum: ['event', 'timer'] },
     }, ['obligationId', 'condition', 'deadline']),
   });
+  if (scope.externalScope && !scope.projectWork) tools.push(
+    {name:'obligation_external_request',description:'Ask the operator to authorize exactly one external write on this commitment. Choose the exact target. End the turn to await their decision. Targets: '+JSON.stringify(scope.externalScope.targets),inputSchema:object({obligationId:text,targetId:{type:'string',enum:scope.externalScope.targets.map(t=>t.id)}},['obligationId','targetId'])},
+    {name:'obligation_external_execute',description:'Perform the single approved write. If the receipt is missing, end this turn. The next execution must look up the original operation and must not write again.',inputSchema:object({obligationId:text},['obligationId'])},
+    {name:'obligation_external_lookup',description:'Read the original external operation by exact operationId from obligation_list. If the receipt is unavailable, report unknown and stop until the operator requests another check.',inputSchema:object({obligationId:text,operationId:text},['obligationId','operationId'])},
+  );
   if (scope.packageReplyReceipt) {
     const index = tools.findIndex(tool => tool.name === 'obligation_deliver');
     tools[index] = { ...tools[index]!, description: 'Submit your final delivery after verification. When the result contains finalReplyMarker, paste it exactly on its own plain line in your final public reply in this turn. You may add notes above or below. It expands into your registered summary. Otherwise repeat summary verbatim; a concise summary is easiest to reproduce.' };

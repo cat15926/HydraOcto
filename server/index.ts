@@ -25,6 +25,7 @@ export interface ApplicationOptions {
   port?: number; host?: '127.0.0.1'; dataDir?: string; workspace?: string; staticDir?: string;
   provider?: Provider; modelBaseUrl?: string; modelName?: string; modelApiKey?: string;
   approvalTtlMs?: number; providerTimeoutMs?: number; leaseMs?: number; startWorker?: boolean;
+  externalOperations?: import('./collaboration/external-operations.js').ExternalOperationAdapter;
   collaborationRuntime?: CollaborationRuntime;
   projectGitHub?: typeof githubApi;
   folderPicker?: FolderPicker; projectFilePicker?: ProjectFilePicker;
@@ -80,7 +81,7 @@ export async function createApplication(options: ApplicationOptions = {}) {
   const commands = new Commands(store, worker, gateway);
   const csrfToken = randomBytes(32).toString('hex');
   const collaborationRuntime = options.collaborationRuntime ?? createCollaborationRuntime({privateRoots:[dataDir]});
-  const collaborationStore = new CollaborationStore(store, { workspace, mcpReaders, singleProjectVm: !options.collaborationRuntime, artifactDir: resolve(dataDir, 'collaboration-artifacts'),
+  const collaborationStore = new CollaborationStore(store, { externalOperations:options.externalOperations, workspace, mcpReaders, singleProjectVm: !options.collaborationRuntime, artifactDir: resolve(dataDir, 'collaboration-artifacts'),
     projectWorkAvailability: collaborationRuntime.projectWorkAvailability?.bind(collaborationRuntime) });
   const previews=new ProjectPreviews(cid=>collaborationStore.workbench.conversation(cid),collaborationRuntime.runProjectService?.bind(collaborationRuntime),resolve(dataDir,'project-services'));
   const browser=new ProjectBrowser(collaborationStore,previews,resolve(dataDir,'browser-evidence'));

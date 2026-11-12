@@ -26,6 +26,7 @@ export interface ContextInput {
   obligationPolicy?: boolean;
   coordinationPolicy?: import('../../shared/collaboration.js').CoordinationPolicy;
   packageReplyReceipt?: true;
+  externalScope?: import('../../shared/obligations.js').ExternalScope;
   handoffPolicy?: HandoffPolicy;
   continuationPolicy?: 'durable-v1';
   webResearch?:true; gitDelivery?:true; projectBrowser?:true;
@@ -78,7 +79,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   }
   const items: ContextItem[] = [{ kind: 'identity', reference: `member:${invocation.memberId}`, representation: 'full', characters: invocation.member.instructions.length, complete: true }];
   const obligationScope = {
-    obligationPolicy: input.obligationPolicy, packageReplyReceipt:input.packageReplyReceipt, handoffPolicy:input.handoffPolicy, continuationPolicy: input.continuationPolicy, visibility: input.visibility, projectReview: source.projectReview,
+    obligationPolicy: input.obligationPolicy, externalScope:input.externalScope, packageReplyReceipt:input.packageReplyReceipt, handoffPolicy:input.handoffPolicy, continuationPolicy: input.continuationPolicy, visibility: input.visibility, projectReview: source.projectReview,
     toolPolicyVersion: input.crossPolicy ? 'cross-action-v1' : undefined, projectWork: input.projectWork,
   };
   const personalMode = runtimeMemberContextMode(input.memberContext);
@@ -145,6 +146,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   const obligationHint = !obligations.length ? '' : review
     ? '\n本轮承接独立评审。先用 obligation_list 找到分派给本轮的子委托与约定版本，使用获准的评审工具独立读取文件并执行约定检查。根据真实回执调用 obligation_report 提交版本、结果和依据，由平台回报主责成员。无法验证时提交 blocked，测试未通过时提交 failed。\n'
     : '\n当场能答复的提问直接作答。回复里的 @ 只作提及；需要请同伴工作时用协作工具，知会无需登记。若用户交付的工作需要跨轮跟进或同伴回报，在委托前用 obligation_open 登记目标。向用户汇报、请同伴验证均按 delivery 交付；用户在原文明确要求亲自验收时按返回的 acceptBy 等待确认。用 collaboration_request 指定一位成员，在 delivery 中给出主责的 obligationId、要核验的具体版本和验收条件；项目验证时，先调用 project_npm_test 取得实际受测快照的 snapshotSha256，用作 delivery.version；同时填写获准的 projectReview.paths。委托排队后结束本轮，由平台等候回报并唤回你；主责继续由你承担。收到子委托或回报先用 obligation_list 核对本轮身份、约定和版本。子责用 obligation_report 回报，主责在满足约定后用 obligation_deliver 并在本轮最终公开答复中' + (input.packageReplyReceipt ? '按工具回执交付登记的 summary。' : '原样写出 summary。') + '已登记的委托由平台在交付后同步关闭关联任务；不要提前用 task_update 把关联任务标为 done。单人等待用 obligation_wait 登记条件和期限。跟进已获准的 PR 时从 obligation_list 的 ciTargets 选择与目标提交匹配的 condition 原值；结果由平台核实，不要让用户提供内部编号。\n';
+  const externalHint = input.externalScope ? '\n如用户要求办理这些外部事项：'+JSON.stringify(input.externalScope.targets)+'，先登记主委托并用 obligation_external_request 选择匹配的对象，然后结束本轮等待用户授权。获准接回后用 obligation_external_execute 办理一次。结果未知时只用 obligation_external_lookup 查询原操作；若仍无法核查，明确报告未知并结束本轮。核实成功后用 obligation_deliver 将真实回执编号报告给用户，并在最终回复中复述交付摘要。\n' : '';
   const coordinationHint = input.coordinationPolicy
     ? '\n多人意见有最低人数、截止时间或异议核查约定时，从原委托调用 opinion_open。受邀评审用 opinion_submit 登记意见，负责人用 opinion_read 核对意见版本并锁定，按约定核查异议后决定；达到人数不能自动结案。制作依赖多份资料的交付时，用 package_ 工具将原委托、实际使用的资料版本和交付验收关联起来。资料改版时只重验受影响的产物，然后再汇编交付。\n' + (input.packageReplyReceipt ? '资料包交付时，若 obligation_deliver 返回 finalReplyMarker，优先把它原样放在最终公开答复的独立一行，可在上下行补充说明。平台会当场展开已登记的 summary。也可直接逐字贴回摘要，宜写简短。\n' : '') : '';
   const handoffHint = obligations.includes('obligation_handoff')
@@ -172,7 +174,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     ...messages.map(m => JSON.stringify({messageId:m.id, sourceId:m.sourceId, author:m.author, memberId:m.memberId, ...backgroundResponsibility(m), content:m.content})),
     '本次准确请求：' + JSON.stringify({sourceId:source.id, revision:source.revision, content:source.content}),
   ].join('\n');
-  const render = (messages: ContextInput['history']) => isolated ? renderPersonal(messages) : (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + coordinationHint + handoffHint + waitHint + publicStatementHint + workRecord + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
+  const render = (messages: ContextInput['history']) => isolated ? renderPersonal(messages) : (reviewerPrompt || prefix + researchHint + browserHint + deliveryHint + writerHint + (input.mayRunProjectNpmTest ? authorTestHint : '') + (input.mayExportProjectFile ? '\n用户要求把文稿保存到项目外时，在项目内生成文件，再用 project_export_request 指定源文件相对路径。收到平台写入回执后才能报告导出成功。\n' : '')) + obligationHint + externalHint + coordinationHint + handoffHint + waitHint + publicStatementHint + workRecord + messages.map(message => JSON.stringify({ messageId: message.id, author: message.author, memberId: message.memberId, sourceId: message.sourceId, ...backgroundResponsibility(message), content: message.content })).join('\n') + (review ? '\n本轮评审问题：'+JSON.stringify(source.content) : suffix);
   if (estimate(render([])) > limit) throw new AppError(422, personal ? '本轮请求与必须完整提供的成员资料超出上下文预算。请缩短请求或撤回不再需要的资料后重试。' : '本次完整请求及必要身份超过上下文预算；请缩短请求或调整预算，平台未静默裁剪请求。', 'context_budget_exceeded');
   const candidates: ContextInput['history'] = [];
   const seen = new Set<string>();

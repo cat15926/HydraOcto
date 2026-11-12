@@ -7,8 +7,8 @@ import type { WorkbenchCommand } from './WorkbenchPanel';
 
 const labels:Record<Obligation['state'],string> = {open:'处理中',delegated:'等待同伴回报',waiting:'等待外部结果',
   delivery_pending:'正在交付',awaiting_acceptance:'等你验收',delivered:'已交付',blocked:'需要处理',cancelled:'已取消'};
-type Operation = 'signal'|'cancel'|'retry'|'reassign'|'accept';
-type Form = Exclude<Operation,'accept'>;
+type Operation = 'signal'|'cancel'|'retry'|'reassign'|'accept'|'approve-external';
+type Form = Exclude<Operation,'accept'|'approve-external'>;
 type Request = {op:Operation; fields:Record<string,unknown>};
 type Props = {onMessage?:(id:string)=>void; item:OperatorObligation; rows:Obligation[]; detail:ConversationDetail; members:Member[]; command:WorkbenchCommand; refresh:()=>Promise<void>};
 
@@ -28,6 +28,9 @@ function GroupResults({group, name}: {group:MentionGroup; name:(id:string)=>stri
 
 export function ObligationReceipt({item,rows,detail,members,command,refresh,onMessage}:Props) {
   const [action,setAction] = useState<Form>(), [note,setNote] = useState(''), [target,setTarget] = useState('');
+  const [externalChoice,setExternalChoice]=useState('');
+  const externalTargets=item.externalOperation?.stage==='approval'?detail.sources.find(s=>s.id===item.originSourceId)?.externalScope?.targets:[];
+  const chosenTarget=externalTargets?.find(t=>t.id===externalChoice)?.id || item.externalOperation?.target.id;
   const [error,setError] = useState(''), [busy,setBusy] = useState(false), [pending,setPending] = useState<Request>();
   const trigger = useRef<HTMLElement>(null), formRevision = useRef(item.revision), sending = useRef(false);
   const retryButton = useRef<HTMLButtonElement>(null);
@@ -43,6 +46,8 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh,onMe
   function progressLabel() {
     if (openRound && !['blocked','cancelled','delivered'].includes(item.state)) return opinionProgress(openRound);
     if (active) return `等待成员答复 · ${active.results?.length ?? 0}/${active.targets.length}`;
+    if (item.externalOperation?.stage==='approval' && item.state==='waiting') return '等你授权 · '+item.externalOperation.target.title;
+    if (item.externalOperation?.stage==='unknown' && item.state!=='cancelled') return '外部结果待核查';
     if (item.state === 'waiting' && timer) return '等待约定时间';
     if (item.state === 'delegated' && current) return '等待 ' + name(current.owner.memberId) + ' 回报';
     return labels[item.state];
@@ -65,6 +70,7 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh,onMe
   async function submit(op:Operation) {
     if (sending.current || (changed && !pending)) return;
     const fields:Record<string,unknown> = {requestId:crypto.randomUUID(),expectedRevision:action ? formRevision.current : item.revision};
+    if (op === 'approve-external') Object.assign(fields,{operationId:item.externalOperation?.id,targetId:chosenTarget});
     if (op === 'signal') Object.assign(fields,{condition:item.wait?.condition,waitId:item.wait?.id,summary:note.trim()});
     else if (note.trim()) fields.reason = note.trim();
     if (op === 'reassign' && selectedTarget) Object.assign(fields,selectedTarget,{taskRevision:recovery?.taskRevision});
@@ -82,6 +88,9 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh,onMe
   }
   return <details className="cc-obligation"><summary ref={trigger}><strong>{name(item.owner.memberId)} 负责</strong><span> · {progressLabel()}</span></summary>
     <div className="cc-obligation-body"><p>{item.goal}</p><small>交付条件：{item.acceptance}</small>
+      {item.externalOperation && <div className="cc-obligation-child"><strong>{item.externalOperation.target.title}</strong>
+        <p>{{approval:'等待你确认，授权范围为本对象的一次写入。',approved:'已授权一次写入。',unknown:'尚未取得外部回执。核查将读取原记录。',recorded:'已取得外部回执。'}[item.externalOperation.stage]}</p>
+        <small>原操作编号：{item.externalOperation.id}</small>{item.externalOperation.receipt&&<small>回执：{item.externalOperation.receipt}</small>}</div>}
       {item.userAcceptance&&<small>你在原消息中要求：「{item.userAcceptance.quote}」</small>}
       {groups.map(group => <GroupResults key={group.id} group={group} name={name} />)}
       {detail.versionPackages?.filter(bundle => bundle.obligationId === item.id).map(bundle => <VersionPackageReceipt key={bundle.id} bundle={bundle} conversationId={detail.conversation.id} command={command} refresh={refresh} />)}
@@ -99,9 +108,13 @@ export function ObligationReceipt({item,rows,detail,members,command,refresh,onMe
         {pending ? <><p>尚未收到操作回执。重试将核对同一次操作。</p>
           <button ref={retryButton} disabled={busy} onClick={()=>void submit(pending.op)}>重试上次操作</button></> :
           !action ? <>
+            {item.state==='waiting' && item.externalOperation?.stage==='approval' && externalTargets && externalTargets.length>1 &&
+              <label>本次授权对象<select value={chosenTarget} disabled={busy} onChange={e=>setExternalChoice(e.target.value)}>
+                {externalTargets.map(t=><option key={t.id} value={t.id}>{t.title}</option>)}</select></label>}
+            {item.state==='waiting' && item.externalOperation?.stage==='approval' && <button disabled={busy} onClick={()=>void submit('approve-external')}>授权此次操作</button>}
             {item.state==='blocked' && recovery?.retryUnavailable && <small>{recovery.retryUnavailable}</small>}
             {item.state==='blocked' && recovery && !recovery.retryUnavailable && <>
-              <button disabled={busy} onClick={()=>void submit('retry')}>请负责人复核</button>
+              <button disabled={busy} onClick={()=>void submit('retry')}>{item.externalOperation?.stage==='unknown'?'查询原操作':'请负责人复核'}</button>
               <button disabled={busy} onClick={()=>begin('retry')}>补充材料并复核…</button></>}
             {!!recovery?.handoffTargets.length && <button disabled={busy} onClick={()=>begin('reassign')}>改派负责人…</button>}
             {item.state==='awaiting_acceptance' && <button disabled={busy} onClick={()=>void submit('accept')}>确认验收</button>}

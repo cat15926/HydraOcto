@@ -1,3 +1,4 @@
+import { externalTargets, type ExternalReceipt } from './external-operations.js';
 import { expandDeliveryReply } from './delivery-reply.js';
 import { OpinionService } from './opinions.js';
 import type { OpinionRound } from '../../shared/opinions.js';
@@ -63,6 +64,90 @@ export class ObligationService {
     if(o.state!=='awaiting_acceptance')return;
     delete o.delivery;
     this.wake(o,'资料已改版，请按当前依据重验受影响的部分。');o.state='open';this.save(o,'package_changed');
+  }
+  private externalGrant(o:Obligation) {
+    const {source,originalMember}=this.publicOrigin(o.originInvocationId);
+    const scope=source.externalScope, adapter=this.store.options.externalOperations;
+    if(!adapter || !scope || source.id!==o.originSourceId || originalMember.id!==o.owner.instanceId ||
+      scope.instanceId!==o.owner.instanceId || (o.externalOperation && o.externalOperation.sourceRevision!==source.revision) || !same(o.owner,this.endpoint(o.conversationId,o.owner.memberId)))
+      conflict('原委托的外部工具范围或负责人已变化。');
+    return {adapter,scope,source};
+  }
+  async externalTool(id:string,name:string,args:Record<string,unknown>) {
+    const request=name==='obligation_external_request', lookup=name==='obligation_external_lookup';
+    const fields=request?['obligationId','targetId']:lookup?['obligationId','operationId']:['obligationId'];
+    if ((!request && !lookup && name!=='obligation_external_execute') || Object.keys(args).some(k=>!fields.includes(k)))
+      throw new AppError(400,'外部操作只接受当前委托及工具声明的字段。');
+    const prepare=this.port.tx(()=>{
+      this.store.visibility.assertTool(id,name);
+      const {o}=this.authorize(id,args.obligationId);
+      const c=this.store.contract(id);
+      if(!c.externalScope || c.snapshotOrigin!=='admission' || c.externalScope.instanceId!==o.owner.instanceId || o.parentId)
+        conflict('本次执行没有外部操作权限。');
+      const {adapter,scope,source}=this.externalGrant(o);
+      const targetId=request?args.targetId:o.externalOperation?.target.id;
+      const target=scope.targets.find(t=>t.id===targetId);
+      if(!target || !externalTargets(adapter,scope).some(t=>t.id===target.id && t.title===target.title)) {
+        const pending=o.externalOperation;
+        if(!request && !lookup && pending?.stage==='approved') {
+          pending.stage='approval';delete pending.approvedAt;o.state='waiting';
+          this.save(o,'external_approval_invalidated');
+          return {operation:pending};
+        }
+        conflict('指定对象超出当前委托可用的工具范围。');
+      }
+      let op=o.externalOperation;
+      if(request) {
+        if(op && op.target.id!==target.id) conflict('此委托已绑定其他外部操作。');
+        if(!op) {
+          if(o.state!=='open') conflict('请从开放的主委托申请操作。');
+          op={id:randomUUID(),stage:'approval',target,sourceRevision:source.revision,instanceId:o.owner.instanceId};
+          o.externalOperation=op;o.state='waiting';this.save(o,'external_requested');
+        }
+        return {operation:op};
+      }
+      if(!op || op.instanceId!==scope.instanceId || !op.approvedAt) conflict('请先由用户确认此对象的一次操作。');
+      if(lookup && args.operationId!==op.id) conflict('只能查询本委托的原操作编号。');
+      if(lookup && op.stage==='unknown' && op.issuedBy===id) conflict('写入执行尚未释放，请结束本轮。平台将让负责人接回并查询原编号。');
+      if(op.stage==='recorded' || (!lookup && op.stage==='unknown') || (lookup && op.checkedBy===id)) return {operation:op};
+      if(o.state!=='open' || op.stage!==(lookup?'unknown':'approved')) conflict('原操作尚不具备执行或核查条件。');
+      if(lookup) op.checkedBy=id;
+      else {op.stage='unknown';op.issuedBy=id;}
+      this.save(o,lookup?'external_query_started':'external_dispatched');
+      return {operation:op,call:{adapter,scope,target,obligationId:o.id}};
+    });
+    const {operation,call}=prepare;
+    if(!call) return {operation};
+    // The durable dispatch record precedes all domain I/O, including a crash during the call.
+    let result:ExternalReceipt|undefined;
+    try {
+      result=lookup?await call.adapter.lookup(call.scope,call.target,operation.id):
+        await call.adapter.issue(call.scope,call.target,operation.id);
+    } catch { /* Until a receipt can be read, both a transport error and an absent record remain unknown. */ }
+    return this.port.tx(()=>{
+      const {o}=this.authorize(id,call.obligationId), current=o.externalOperation;
+      if(!current || current.id!==operation.id) conflict('外部操作已变化。');
+      if(current.stage==='unknown' && result?.operationId===current.id && result.targetId===current.target.id &&
+        typeof result.receipt==='string' && result.receipt.trim() && result.receipt.length<=500) {
+        current.stage='recorded';current.receipt=result.receipt;this.save(o,'external_recorded');
+      } else if(lookup && current.stage==='unknown') this.block(o,'外部结果仍未知。请稍后查询原操作。');
+      return {operation:current,obligationState:o.state,...(o.reason && {reason:o.reason})};
+    });
+  }
+  approveExternal(cid:string,id:string,input:{operationId:string;targetId?:string;expectedRevision:number;requestId:string}) {
+    this.room(cid);
+    return this.port.tx(()=>this.port.command('external-approval:'+cid+':'+value(input.requestId,'请求标识',160),{id,input},()=>{
+      const o=this.owner(this.row(cid,id));this.version(o,input.expectedRevision);
+      const op=o.externalOperation;
+      if(!op || op.id!==input.operationId || op.instanceId!==o.owner.instanceId || op.stage!=='approval' || o.state!=='waiting')
+        conflict('当前没有这项待授权操作。');
+      const {scope,adapter}=this.externalGrant(o);
+      const target=scope.targets.find(t=>t.id===(input.targetId??op.target.id));
+      if(!target || !externalTargets(adapter,scope).some(t=>t.id===target.id && t.title===target.title)) conflict('外部工具对象已变化。');
+      op.target=target;op.stage='approved';op.approvedAt=now();o.state='open';
+      this.wake(o,'用户已授权一次「'+op.target.title+'」，请用 obligation_external_execute 完成并核对回执。');
+      return {obligation:this.save(o,'external_approved')};
+    }).result);
   }
   private get port() { return this.store.artifacts.port; }
   private clock() { return this.store.options.clock?.() ?? Date.now(); }
@@ -287,6 +372,8 @@ export class ObligationService {
   private deliver(id: string, args: Record<string,unknown>) {
     const {o} = this.authorize(id,args.obligationId);
     if (o.parentId || o.state !== 'open') conflict('当前责任尚不具备最终交付条件。');
+    if(o.externalOperation && (o.externalOperation.stage!=='recorded' || !o.externalOperation.receipt ||
+      !value(args.summary,'最终交付').includes(o.externalOperation.receipt))) conflict('交付需要核实的外部回执，并在摘要中列出回执编号。');
     const last = this.raw(o.conversationId).filter(x => x.parentId === o.id).at(-1);
     if (last && (last.state !== 'delivered' || last.report?.outcome !== 'passed')) conflict('子委托未通过，不能完成最终交付。');
     this.opinions.assertDelivery(o);
@@ -332,7 +419,7 @@ export class ObligationService {
       if (name === 'obligation_handoff') {
         if (this.store.contract(id).handoffPolicy !== 'consent-v2') throw new AppError(403,'本轮冻结的工具契约不支持按委托交班。');
         const {o} = this.authorize(id,args.obligationId);
-        if (o.parentId || !o.taskId || o.state !== 'open') conflict('仅开放的主委托可发起整项交班。');
+        if (o.externalOperation || o.parentId || !o.taskId || o.state !== 'open') conflict('仅开放的主委托可发起整项交班。');
         const t = this.store.tasks.getTask(o.taskId);
         const {handoff} = this.store.tasks.handoff(t.id,{requestId:randomUUID(),expectedRevision:t.revision,expectedOwnerRevision:o.ownerRevision!,
           targetMemberId:value(args.targetMemberId,'候选成员',100),reason:value(args.reason,'交班说明')},id);
@@ -518,6 +605,13 @@ export class ObligationService {
       if (o.taskId && this.store.tasks.getTask(o.taskId).pendingHandoffId) return;
       const {member} = this.actor(run.id,false);
       if (!same(member,o.owner) || !same(member,this.endpoint(o.conversationId,run.memberId))) conflict('责任接手人已失效。');
+      if(o.externalOperation?.stage==='unknown' && run.teardown==='confirmed') {
+        if(o.externalOperation.issuedBy===run.id && !o.externalOperation.checkedBy) {
+          this.wake(o,'外部写入回执缺失，请用 obligation_external_lookup 查询原操作 '+o.externalOperation.id+'。');
+          this.save(o,'external_query_due');
+        } else this.block(o,'外部结果仍未知。请稍后查询原操作。');
+        return;
+      }
       if (run.status !== 'succeeded') conflict(run.error ?? '执行未成功，需要核查原执行。');
       if (run.teardown !== 'confirmed') return;
       if (o.report && o.report.invocationId === run.id) {
@@ -659,6 +753,7 @@ export class ObligationService {
     this.requireReleased(o);
   }
   private handoffTask(o: Obligation) {
+    if(o.externalOperation && o.externalOperation.stage!=='recorded') conflict('这项外部操作仍与原授权成员绑定。');
     if (o.state !== 'blocked' || o.parentId || !o.taskId) conflict('只能改派受阻的主委托。');
     const t = this.store.tasks.getTask(o.taskId);
     if (t.ownerRevision !== o.ownerRevision || t.ownerMemberId !== o.owner.memberId ||
@@ -738,7 +833,7 @@ export class ObligationService {
       } else if (input.decision === 'retry') {
         this.requireRetry(o);
         const note = input.reason === undefined ? '' : '\n用户补充的公开材料，请独立核对：' + value(input.reason,'补充材料',1000);
-        this.wake(o,'用户要求复核先前的阻塞：' + (o.reason ?? '待核对') + '。请核对现有证据，需要新的项目操作时重新申请授权。' + note);
+        this.wake(o,o.externalOperation?.stage==='unknown'?'请只用 obligation_external_lookup 查询原操作 '+o.externalOperation.id+' 并报告实际结果。':'用户要求复核先前的阻塞：' + (o.reason ?? '待核对') + '。请核对现有证据，需要新的项目操作时重新申请授权。' + note);
         o.state = 'open'; o.reminderCount = 0; o.waitCount = 0; o.groupCount = 0; delete o.reason; delete o.delivery;
       } else if (input.decision === 'cancel') {
         this.opinions.cancel(o);
@@ -778,6 +873,7 @@ export class ObligationService {
             if (t.disposition || t.status === 'done' || t.status === 'blocked') conflict('关联任务已终结或阻塞，责任尚未交付。');
             if (t.pendingHandoffId) continue;
           }
+          if(o.state==='waiting' && o.externalOperation?.stage==='approval')continue;
           if(o.decisionRoundId) this.opinions.reconcile(o);
           if(o.state==='waiting' && o.decisionRoundId && !o.wait && !o.activeGroupId)continue;
           if (o.state === 'waiting' && !o.wait && !o.activeGroupId) conflict('没有找到已登记的等待对象，请负责人复核。');

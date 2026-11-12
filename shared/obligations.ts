@@ -28,7 +28,21 @@ export interface ObligationWait {
   deadline: string;
   signal?: { requestId: string; summary: string; receivedAt: string };
 }
+export interface ExternalTarget { id:string; title:string }
+export interface ExternalScope { conversationId:string; memberId:string; instanceId:string; targets:ExternalTarget[] }
+export interface ExternalOperation {
+  id:string;
+  target:ExternalTarget;
+  sourceRevision:number;
+  instanceId:string;
+  stage:'approval'|'approved'|'unknown'|'recorded';
+  approvedAt?:string;
+  issuedBy?:string;
+  checkedBy?:string;
+  receipt?:string;
+}
 export interface Obligation {
+  externalOperation?:ExternalOperation;
   id: string;
   conversationId: string;
   parentId?: string;

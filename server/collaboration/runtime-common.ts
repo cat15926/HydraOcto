@@ -82,7 +82,7 @@ interface RuntimeToolSpec {
   inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'coordinationPolicy' | 'packageReplyReceipt' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'coordinationPolicy' | 'packageReplyReceipt' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
   if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') return memberContextTools(request.memberContextMode);
   const obligations = obligationTools(request);
   if (request.projectReview) return request.toolPolicyVersion === 'cross-action-v1' && !request.visibility && !request.projectWork
