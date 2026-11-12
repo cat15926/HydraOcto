@@ -90,6 +90,13 @@ try {
   for(const v of [email,order,origin.id,...(revokeBeforeDispatch?[marker]:[])])assert(!answer.content.includes(v));
   if(revokeBeforeDispatch)assert(!detail.consumptions.some(c=>c.sourceId===result.revocation.withdrawnSource));
   assert.equal(detail.invocations.length,1);assert.equal(s.cross.transfers().length,1);
+  const visible=s.factors.list(target,s.roomMembers.resolve(target,'writer'));
+  const allowed=new Set(visible.map(f=>f.id));
+  assert(visible.length>0 && visible.every(f=>f.roomId===target && f.parentIds.every(id=>allowed.has(id))));
+  const serialized=JSON.stringify(visible);
+  for(const hidden of [email,order,origin.id,digest(content),...s.factors.list(home).map(f=>f.id)])assert(!serialized.includes(hidden));
+  result.visibleFactorEdges=visible.map(f=>({id:f.id,parents:f.parentIds}));
+
   Object.assign(result,{passed:true,home,target,receipt,consumptions:detail.consumptions.map(({id,sourceId,responseId})=>({id,sourceId,responseId})),answer:answer.content,instances:[first.roomMember.id,second.roomMember.id]});
 } catch(e){result.passed=false;result.error=String(e.message).slice(0,300);process.exitCode=1;}
 finally{if(app)await app.close();const path=join(dir,'result.json');await writeFile(path,JSON.stringify(result,null,2),{mode:0o600});console.log(JSON.stringify({passed:result.passed,path,error:result.error}));}

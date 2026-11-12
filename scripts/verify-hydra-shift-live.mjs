@@ -94,6 +94,12 @@ try {
         assert.equal(d.consumptions.filter(c=>c.sourceId===proof.restart.sourceId).length,1);
         assert.equal(shifts.at(-1).id,proof.restart.handoffId);
       }
+      const history=store.factors.list(cid).filter(f=>f.obligationRef?.id===root.id);
+      assert.equal(history[0].obligationRef.ownerId,'morning');
+      assert.equal(history.at(-1).obligationRef.ownerId,root.owner.memberId);
+      const firstTransfer=history.findIndex(f=>f.obligationRef.ownerId!==members[0][0]);
+      assert(firstTransfer>0 && history.slice(firstTransfer).every(f=>f.obligationRef.ownerId===root.owner.memberId));
+      proof.ownership=history.map(f=>({factorId:f.id,parents:f.parentIds,...f.obligationRef}));
       proof.final=final.id;proof.accepted=true;break;
     }
     await delay(300);
