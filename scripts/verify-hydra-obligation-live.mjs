@@ -113,6 +113,25 @@ async function verify(final) {
     assert.equal(messages[0].id, root.delivery.messageId);
     proof.finalMessageId = messages[0].id;
   }
+  const views=app.collaborationStore.factors.list(cid);
+  const factorForSource=id=>views.find(f=>f.sourceRef.id===id);
+  const report=views.findLast(f=>f.obligationRef?.id===child.id);
+  const request=factorForSource(child.originSourceId),receipt=factorForSource(tested.id);
+  const finalFactor=views.findLast(f=>f.obligationRef?.id===root.id);
+  assert(report && request && receipt && finalFactor);
+  assert(report.parentIds.includes(request.id) && report.parentIds.includes(receipt.id));
+  assert(receipt.parentIds.includes(request.id));
+  const byId=new Map(views.map(f=>[f.id,f])),visited=new Set(),pending=[finalFactor.id];
+  while(pending.length) {
+    const id=pending.pop();
+    if(visited.has(id))continue;
+    visited.add(id);pending.push(...(byId.get(id)?.parentIds??[]));
+  }
+  assert(visited.has(report.id)&&visited.has(request.id)&&visited.has(receipt.id));
+  proof.factorGraph={final:finalFactor.id,report:report.id,request:request.id,receipt:receipt.id,
+    edges:views.filter(f=>visited.has(f.id)).map(f=>({id:f.id,parentIds:f.parentIds,sourceRef:f.sourceRef,obligationRef:f.obligationRef}))};
+  proof.responsibilityChain={owner:root.owner,reviewer:child.owner,returnTo:child.returnTo,reportInvocation:child.report.invocationId,
+    reviewVersion:child.report.version,rootState:root.state,rootRevision:root.revision,finalDelivery:root.delivery?.messageId};
   Object.assign(proof, {rootId:root.id, childId:child.id, version:child.version, writerTests:authorTests.map(e => e.id), reviewerTest:tested.id,
     reviewReceipts:child.report.evidenceIds, returnSourceId:root.currentSourceId, rootState:root.state, driftInjected});
 }
@@ -122,15 +141,16 @@ try {
   const native = createCollaborationRuntime({projectVm:vm, timeoutMs:300_000});
   const runtime = {...native, async invoke(req) {
     const index = calls.length;
-    assert(index < 3, 'Unexpected fourth model execution');
-    assert.equal(req.member.id, [author, reviewer, author][index]);
+    const position=index % 3;
+    assert(index < (variant ? 6 : 3), 'Native project run budget exceeded');
+    assert.equal(req.member.id, [author, reviewer, author][position]);
     assert.equal(req.obligationPolicy, true);
     assert.equal(req.account.id, selected[req.member.id].id);
     assert.equal(req.account.auth, req.member.id === 'codex' ? 'cli' : 'api');
-    if (index < 2) assert.equal(req.workspaceGrant?.path, project);
-    if (index === 0) assert(req.projectWork && !req.projectReview);
-    if (index === 1) assert(req.projectReview?.mode === 'project' && !req.projectWork, 'Reviewer requires a separate read-only invocation');
-    calls.push({id:req.invocationId, member:req.member.id, role:['author','reviewer','reporter'][index], carrier:req.member.carrier, auth:req.account.auth});
+    if (position < 2) assert.equal(req.workspaceGrant?.path, project);
+    if (position === 0) assert(req.projectWork && !req.projectReview);
+    if (position === 1) assert(req.projectReview?.mode === 'project' && !req.projectWork, 'Reviewer requires a separate read-only invocation');
+    calls.push({id:req.invocationId, member:req.member.id, role:['author','reviewer','reporter'][position], carrier:req.member.carrier, auth:req.account.auth});
     const result = await native.invoke(req);
     if (index === 2 && variant) {
       // Inject a real disk change after the native owner's delivery proposal but before publication.
@@ -186,6 +206,54 @@ try {
   const replay = await post(path+'/messages', msg);
   assert.equal(replay.source.id, admitted.source.id);
   assert.equal(store.detail(cid).invocations.length, 3);
+  if (variant) {
+    // The operator explicitly reauthorizes the project in a reply to the original request.
+    // The actors decide how to perform the recheck; an ordinary wake never gains project tools.
+    const originalMessage=final.d.messages.find(m=>m.author==='user' && m.sourceId===final.root.originSourceId);
+    assert(originalMessage);
+    const previousChild=final.obligations.find(o=>o.parentId===final.root.id);
+    const ask={requestId:randomUUID(),replyTo:originalMessage.id,content:'@'+names[author]+' 项目版本已变，请在原委托上继续。请在项目中重新跑测试 npm test，把当前版本交给'+names[reviewer]+' 独立读取 orders.js 并用同一命令验证，再由你向我简短汇报。保留现有文件。'};
+    const accepted=await post(path+'/messages',ask);
+    assert(accepted.source?.projectWork && accepted.source.replyTo===originalMessage.id,'Version recheck needs explicit project authorization');
+    let recovered;
+    const until=Date.now()+950_000;
+    while(Date.now()<until) {
+      const details=store.detail(cid),items=store.obligations.list(cid);
+      const root=items.find(o=>o.id===final.root.id);
+      const error=details.invocations.find(i=>i.id!==calls[2].id && done(i) && i.status!=='succeeded');
+      if(error)throw Error('Version recheck '+error.memberId+' '+error.status+' '+(error.error??''));
+      if(root?.state==='delivered' && details.invocations.length===6 && details.invocations.every(done)) {
+        recovered={details,root,items}; break;
+      }
+      if(details.invocations.length>3 && details.invocations.every(done) && !details.deliveries.some(x=>x.status==='pending'))
+        throw Error('Version recheck stopped with root '+root?.state+' '+(root?.reason??''));
+      await delay(400);
+    }
+    assert(recovered,'Timed out waiting for the explicitly authorized project recheck');
+    const {details,root,items}=recovered;
+    const renewed=items.find(o=>o.parentId===root.id && o.id!==previousChild.id);
+    assert.equal(items.length,3);
+    assert(renewed?.state==='delivered' && renewed.report.authority==='project_test' && renewed.report.outcome==='passed');
+    assert(renewed.version!==previousChild.version && renewed.originInvocationId===calls[3].id && renewed.report.invocationId===calls[4].id);
+    assert.deepEqual(root.owner,final.root.owner);assert.deepEqual(renewed.returnTo,root.owner);
+    assert.deepEqual(items.find(o=>o.id===previousChild.id).report,previousChild.report);
+    assert.equal(root.delivery.invocationId,calls[5].id);
+    const result=details.messages.find(m=>m.id===root.delivery.messageId);
+    assert(result?.memberId===author && result.content.includes(root.delivery.summary));
+    const reviewEvidence=details.evidence.filter(e=>renewed.report.evidenceIds.includes(e.id));
+    const newTest=reviewEvidence.find(e=>e.invocationId===calls[4].id && e.detail.name==='project_review_test' &&
+      e.detail.state==='tested' && e.detail.exitCode===0 && e.detail.treeExited===true && e.detail.argv?.join(' ')==='npm test' &&
+      e.detail.snapshotSha256===renewed.version);
+    assert(newTest && !previousChild.report.evidenceIds.includes(newTest.id));
+    assert(reviewEvidence.some(e=>e.invocationId===calls[4].id && e.detail.state==='read' && e.detail.path==='orders.js'));
+    assert(details.evidence.some(e=>e.invocationId===calls[3].id && e.detail.name==='project_npm_test' && e.detail.state==='tested' &&
+      e.detail.exitCode===0 && e.detail.snapshotSha256===renewed.version));
+    assert(calls.slice(3).every(c=>{const i=store.invocation(c.id);return i.nativeSessionId && i.acceptance==='accepted' && i.teardown==='confirmed' && i.status==='succeeded';}));
+    assert.equal((await post(path+'/messages',ask)).source.id,accepted.source.id);
+    assert.equal(store.detail(cid).invocations.length,6);
+    proof.recheck={rootId:root.id,oldChild:previousChild.id,oldVersion:previousChild.version,blockedAtRevision:final.root.revision,
+      source:accepted.source.id,child:renewed.id,recheckedVersion:renewed.version,independentTest:newTest.id,finalMessage:result.id,finalState:root.state};
+  }
 
 } catch (error) { failure = error; }
 finally {

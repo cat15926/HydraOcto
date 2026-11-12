@@ -68,7 +68,7 @@ export function obligationTools(scope: ObligationToolScope) {
   if (!supportsContinuation(scope)) return ordinary;
   const tools = ordinary.map(tool => tool.name !== 'obligation_wait' ? tool : {
     ...tool,
-    description: 'Wait on your current commitment. For a named event use kind=event with the exact condition and an ISO deadline. For a timer use kind=timer with the wake time as the deadline and a reminder in condition. End this turn after registration.',
+    description: 'Wait on your current commitment. For a named event use kind=event with the exact condition and an ISO deadline. For a PR, copy only the condition value from obligation_list.ciTargets, with no prefix or explanation. For a timer use kind=timer with the wake time as the deadline and a reminder in condition. End this turn after registration.',
     inputSchema: object({
       obligationId: text, condition: text, deadline: text,
       kind: { type: 'string', enum: ['event', 'timer'] },

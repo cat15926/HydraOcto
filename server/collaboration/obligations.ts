@@ -3,7 +3,7 @@ import { expandDeliveryReply } from './delivery-reply.js';
 import { OpinionService } from './opinions.js';
 import type { OpinionRound } from '../../shared/opinions.js';
 import { userAcceptanceQuote } from './user-acceptance.js';
-import { ciTargets, observedCi } from './obligation-ci.js';
+import { ciTargets, observedCi, referencesCi } from './obligation-ci.js';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -394,7 +394,7 @@ export class ObligationService {
     if (condition.startsWith('package:') && (kind!=='event' || condition!=='package:'+o.id || !this.store.versionPackages.hasPackage(o.id) || this.store.contract(id).coordinationPolicy!=='decision-material-v1'))
       conflict('请选择本主委托下的资料包并等待其实际版本。');
     if (kind === 'timer' && condition.startsWith('ci:')) conflict('CI 结果必须来自真实的运行记录。');
-    if (condition.startsWith('ci:') && !ciTargets(this.store,id).some(target => target.condition === condition)) conflict('请选择本实例已经获准交付的 PR 和准确提交。');
+    if (referencesCi(condition) && !ciTargets(this.store,id).some(target => target.condition === condition)) conflict('请从 obligation_list 的 ciTargets 选择当前 PR 和准确提交，将 condition 原值单独填入等待条件。');
     if (!Number.isFinite(Date.parse(deadline)) || Date.parse(deadline) <= this.clock()) conflict('请指定未来的有效截止时间。');
     if (kind && (o.waitCount ?? 0) >= 16) return this.block(o,'已连续登记 16 次等待，请负责人核对进展。');
     if (kind) o.waitCount = (o.waitCount ?? 0) + 1;
@@ -700,7 +700,7 @@ export class ObligationService {
     if (!Number.isSafeInteger(revision) || revision !== o.revision) conflict('责任已更新，请刷新后再处理。');
   }
   signal(cid: string,id: string,input: WaitSignal) {
-    if (input.condition?.startsWith('ci:')) conflict('CI 条件仅接受平台核对的真实运行结果。');
+    if (typeof input.condition==='string' && referencesCi(input.condition)) conflict('CI 条件仅接受平台核对的真实运行结果。');
     return this.applySignal(cid,id,input,false);
   }
   private recordWaitWake(o: Obligation, eventKey: string) {
@@ -878,6 +878,7 @@ export class ObligationService {
           if(o.state==='waiting' && o.decisionRoundId && !o.wait && !o.activeGroupId)continue;
           if (o.state === 'waiting' && !o.wait && !o.activeGroupId) conflict('没有找到已登记的等待对象，请负责人复核。');
           if (o.state === 'waiting' && o.wait?.returnTo && (!same(o.owner,o.wait.returnTo) || o.ownerRevision !== o.wait.ownerRevision)) conflict('原等待的接回人已变化，需要重新约定。');
+          if (o.state === 'waiting' && o.wait && referencesCi(o.wait.condition) && !o.wait.condition.startsWith('ci:')) conflict('原 CI 等待条件混有说明，请负责人重新选择准确的运行记录。');
           if (o.state === 'waiting' && o.wait?.kind === 'timer' && Date.parse(o.wait.deadline) <= this.clock()) {
             this.wake(o, '已到约定时间 ' + o.wait.deadline + '。请按约定处理「' + o.wait.condition + '」。');
             this.recordWaitWake(o,'timer:' + o.wait.id);

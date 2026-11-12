@@ -93,3 +93,21 @@ test('an expired named event remains blocked; cancelling a live timer before res
     }finally{f.close();}
   }
 });
+
+test('an existing named wait containing a PR handle stays attributed and cannot be advanced by user text',()=>{
+  const f=fixture();
+  try {
+    const w=f.tool('obligation_wait',{obligationId:f.root.id,condition:'收到结果',deadline:f.until});
+    f.end();
+    const legacyCondition='跟进（ci:old-receipt:'+('a'.repeat(40))+'）';
+    f.store.db.prepare("UPDATE cc_obligations SET value=json_set(value,'$.wait.condition',?) WHERE id=?").run(legacyCondition,w.id);
+    assert.throws(()=>f.store.obligations.signal(f.room.id,w.id,{requestId:randomUUID(),waitId:w.wait!.id,expectedRevision:w.revision,
+      condition:legacyCondition,summary:'通过'}),/仅接受平台/);
+    f.restart(); f.store.obligations.reconcile();
+    const [blocked]=f.store.obligations.list(f.room.id);
+    assert.equal(blocked!.state,'blocked');
+    assert.deepEqual(blocked!.owner,w.owner);
+    assert.match(blocked!.reason!,/重新选择/);
+    assert.equal(f.store.admitNext(),undefined);
+  }finally{f.close();}
+});

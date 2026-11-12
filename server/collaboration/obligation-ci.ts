@@ -2,6 +2,11 @@ import type { Obligation } from '../../shared/obligations.js';
 import type { RuntimeInteraction } from '../../shared/collaboration.js';
 import type { CollaborationStore } from './store.js';
 
+// A reserved CI handle inside prose must never fall through to a user-signalled event.
+export function referencesCi(condition: string) {
+  return condition.startsWith('ci:') || /ci:[a-zA-Z0-9_-]+:[a-fA-F0-9]{40,64}/.test(condition);
+}
+
 /** Only observations of a PR previously authorized by this room for this very member instance. */
 function reference(store:CollaborationStore,cid:string,member:string,instanceId:string,item:RuntimeInteraction) {
   if(item.conversationId!==cid || item.memberId!==member || item.transport!=='project-git' || item.state!=='answered' || !item.gitDelivery?.pull ||

@@ -153,9 +153,13 @@ test('single member waiting for CI: user text and a superseded commit cannot wak
   store.recordEvidence(run.id,{kind:'tool',detail:{origin:'project_git',state:'completed',callId:'wait',commit}});
   const {ciTargets}=await import('../server/collaboration/obligation-ci.js');
   const target=ciTargets(store,run.id)[0]!;assert.equal(target.commit,commit);
+  const described='正在等待 '+target.condition+' 跑完测试';
+  const receipt={obligationId:root.id,condition:described,deadline:new Date(Date.now()+60000).toISOString()};
+  assert.throws(()=>tool(run.id,'obligation_wait',receipt),/condition 原值/);
   const w=tool(run.id,'obligation_wait',{obligationId:root.id,condition:target.condition,deadline:new Date(Date.now()+60000).toISOString()});
   store.recordEvidence(run.id,{kind:'process_exit',detail:{confirmed:true}});store.finish(run.id,'succeeded','等待检查。');
   assert.throws(()=>store.obligations.signal(cid,root.id,{requestId:randomUUID(),waitId:w.wait.id,expectedRevision:w.revision,condition:target.condition,summary:'通过'}));
+  assert.throws(()=>store.obligations.signal(cid,root.id,{requestId:randomUUID(),waitId:w.wait.id,expectedRevision:w.revision,condition:described,summary:'通过'}),/仅接受平台/);
   let head=other;const api:GitHubApi=async path=>{
     const current={...pr(),head:{...pr().head,sha:head}};
     if(path.includes('/pulls?'))return [current];if(path.endsWith('/pulls/8'))return current;

@@ -12,7 +12,8 @@ import { createApplication } from '../server/index.ts';
 import { createCollaborationRuntime } from '../server/collaboration/runtime.ts';
 
 const args = process.argv.slice(2);
-assert(args.length === 1 && ['--check-config', '--live'].includes(args[0]));
+assert(['--check-config','--live'].includes(args[0]) && (args.length===1 || (args.length===2 && args[1]==='--restart')));
+const interrupt=args[1]==='--restart';
 const installed = resolve(process.env.HYDRA_CONFIG_ROOT || '.');
 const config = new DatabaseSync(join(installed, '.local-data/platform.sqlite'), {readOnly:true});
 let model, account;
@@ -55,9 +56,10 @@ const runtime = {...native, async invoke(req) {
   return native.invoke(req);
 }};
 
-const content = '@林 请你暂任主持，组织远山和南星就「小型博物馆的有限经费，优先数字展览还是实体展览」进行五轮简短辩论。远山支持数字展览，南星支持实体展览。每轮请两位同时独立发言，听完双方意见后你再组织下一轮。第五轮结束，请白露作为裁判根据实际发言给出胜方和理由，最后由你向我汇报。每次发言一两句即可。';
+const content = (interrupt ? '@林 请你暂任主持，组织远山和南星就「公共图书馆应优先延长开放时间还是扩大纸质藏书」进行五轮简短辩论。远山支持延长开放时间，南星支持扩大藏书。' : '@林 请你暂任主持，组织远山和南星就「小型博物馆的有限经费，优先数字展览还是实体展览」进行五轮简短辩论。远山支持数字展览，南星支持实体展览。') + '每轮请两位同时独立发言，听完双方意见后你再组织下一轮。第五轮结束，请白露作为裁判根据实际发言给出胜方和理由，最后由你向我汇报。每次发言一两句即可。';
 const proof = {model, carrier:'claude-cli', passed:false, prompt:content, calls, userSubmissions:0};
-const app = await createApplication({dataDir:join(dir, 'db'), workspace, port:0, collaborationRuntime:runtime});
+const open = () => createApplication({dataDir:join(dir,'db'), workspace, port:0, collaborationRuntime:runtime,startWorker:false});
+let app = await open(), restartWake, replayed;
 let cid, failure;
 try {
   const store = app.collaborationStore;
@@ -66,16 +68,22 @@ try {
     store.saveMember({id, name, accountId:account.id, carrier:'claude-cli', model, modelBinding:'override', accountBinding:'override',
       instructions:'根据房间里的委托参与协作，简洁表达。', enabled:true});
   }
-  const {url} = await app.start();
+  let {url} = await app.start();
   assert.notEqual(new URL(url).port, '4310');
   async function post(path, body) {
     const resp = await fetch(url + path, {method:'POST', headers:{'content-type':'application/json','x-csrf-token':app.csrfToken}, body:JSON.stringify(body)});
     assert(resp.ok, 'HTTP ' + resp.status + ' ' + path);
     return resp.json();
   }
-  const room = await post('/api/conversations', {requestId:randomUUID(), title:'展览经费辩论', memberIds:Object.keys(members), defaultMemberId:'host'});
+  const room = await post('/api/conversations', {requestId:randomUUID(), title:interrupt?'图书馆资源辩论':'展览经费辩论', memberIds:Object.keys(members), defaultMemberId:'host'});
   cid = room.conversation.id;
   const path = '/api/conversations/' + cid;
+  if (interrupt) {
+    // Stop at the durable boundary after both first-round replies have been saved.
+    const admit = store.admitNext.bind(store);
+    store.admitNext = () => store.cooperation.groups(cid).some(g=>g.state==='done') ? undefined : admit();
+  }
+  app.collaborationEngine.start();
   await post(path + '/messages', {requestId:randomUUID(), content});
   proof.userSubmissions++;
   let details, idleSince = Date.now(), previousProgress = '';
@@ -86,6 +94,27 @@ try {
     const root = details.obligations?.find(o => !o.parentId);
     const terminal = details.invocations.length && details.invocations.every(i => ['failed','succeeded','cancelled','interrupted'].includes(i.status));
     const failed = details.invocations.find(i => ['failed','cancelled','interrupted'].includes(i.status));
+    if (interrupt && !restartWake && terminal && details.groups?.[0]?.state==='done') {
+      restartWake=details.groups[0].contract.wakeSourceId;
+      assert(restartWake && !details.consumptions.some(c=>c.sourceId===restartWake));
+      await app.close();
+      app=await open();
+      url=(await app.start()).url;
+      app.collaborationEngine.start();
+      continue;
+    }
+    if (restartWake && !replayed && details.groups.length===2 && details.groups[1].state==='collecting') {
+      const liveStore=app.collaborationStore;
+      const [first,second]=liveStore.cooperation.groups(cid),old=first.results[0];
+      if(second.state!=='collecting') continue;
+      // Replay the first turn's genuine terminal callback during a different open round.
+      liveStore.finish(old.invocationId,'succeeded',liveStore.response(old.responseId).content);
+      liveStore.cooperation.groupTick();
+      const checked=liveStore.cooperation.groups(cid).find(g=>g.id===second.id);
+      assert.deepEqual(checked.results,second.results);
+      assert.equal(checked.contract.wakeSourceId,second.contract.wakeSourceId);
+      replayed={roundId:first.id,oldInvocationId:old.invocationId,openRoundId:second.id};
+    }
     if (failed) throw Error('Unsuccessful execution: ' + failed.memberId + ' ' + failed.status);
     if (terminal && root?.state === 'delivered') break;
     if (root && ['cancelled','blocked','awaiting_acceptance'].includes(root.state)) throw Error('Root ' + root.state);
@@ -97,6 +126,12 @@ try {
   }
   const root = details?.obligations?.find(o => !o.parentId);
   assert(root?.state === 'delivered' && root.owner.memberId === 'host');
+  if (interrupt) {
+    assert(restartWake && replayed,'The restart and late replay must actually take place');
+    assert.equal(details.groups[0].contract.wakeSourceId,restartWake);
+    proof.restartWake=restartWake; proof.lateReplay=replayed;
+  }
+  assert.equal(details.messages.filter(m=>m.author==='user').length,1);
   const groups = details.groups;
   assert.equal(groups.length, 5);
   const wakes = new Set(), answers = new Set();
