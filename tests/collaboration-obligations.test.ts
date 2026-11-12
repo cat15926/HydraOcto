@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Store } from '../server/store.js';
 import { CollaborationStore } from '../server/collaboration/store.js';
+import {runtimeTools} from '../server/collaboration/runtime-common.js';
+import {sessionFingerprint} from '../server/collaboration/continuity.js';
 import { userAcceptanceQuote } from '../server/collaboration/user-acceptance.js';
 import type { Obligation } from '../shared/obligations.js';
 
@@ -65,6 +67,45 @@ test('two members retain root ownership, submit the fixed version, wake once and
     assert.equal(h.read(root).state,'delivered'); assert.equal(h.store.tasks.getTask(root.taskId!).status,'done');
     assert.equal(h.store.admitNext(),undefined);
   } finally { h.owner.close(); }
+});
+
+for(const legacy of [false,true])test('grounded delivery distinguishes signed opinion from direct evidence across a peer return; legacy='+legacy,()=>{
+ const h=setup();
+ try {
+   const source=h.store.send(h.cid,{requestId:randomUUID(),content:'@Codex 对照两份材料：新版签批仅适用于 A 项目，B 项目只有成员建议。请核实后汇报。'}).source;
+   if(legacy){delete source.deliveryEvidencePolicy;h.store.visibility.put('cc_sources',source);}
+   function start(){
+     const run=h.store.admitNext()!.invocations[0]!,input=h.store.prepareInput(run.id);
+     h.store.startInvocation(run.id);h.store.recordEvidence(run.id,{kind:'accepted',detail:{source:'isolated_test'}});
+     return {id:run.id,input,contract:h.store.contract(run.id)};
+   }
+   const writer=start(),policy=legacy?undefined:'source-grounded-v1';
+   assert.equal(writer.contract.deliveryEvidencePolicy,policy);
+   assert.equal(writer.input.manifest.renderVersion,legacy?'room-package-reply-v1':'room-grounded-delivery-v1');
+   assert.equal(writer.input.prompt.includes('原件直接支持的事实'),!legacy);
+   assert.equal(writer.input.prompt.includes('可以在该范围给出肯定结论'),!legacy);
+   assert(writer.input.prompt.includes('新版签批仅适用于 A 项目'));
+   assert.equal(h.store.obligations.list(h.cid).length,0);
+   const identity={supported:true,fingerprint:'unchanged-native-account',reason:'test'};
+   const older={...writer.contract,deliveryEvidencePolicy:undefined};
+   assert.equal(sessionFingerprint(older,identity)===sessionFingerprint(writer.contract,identity),legacy);
+   const tools=runtimeTools(writer.contract);
+   assert.deepEqual(tools.map(t=>t.name),runtimeTools(older).map(t=>t.name));
+   assert.deepEqual(tools.map(t=>t.inputSchema),runtimeTools(older).map(t=>t.inputSchema));
+   assert.equal(tools.find(t=>t.name==='obligation_deliver')?.description.includes('pending verification'),!legacy);
+   const list=(id:string)=>h.store.obligations.tool(id,'obligation_list',{},randomUUID()) as {receipts:{report:{authority:string;summary:string;version:string}}[];reportGuidance?:string};
+   assert.equal(list(writer.id).reportGuidance,undefined);
+   const root=h.tool(writer.id,'obligation_open',{goal:'核对变更范围'}),child=h.delegate(writer.id,root);
+   h.finish(writer.id,'已请同伴核对。');const reviewer=start();
+   assert.equal(reviewer.contract.deliveryEvidencePolicy,policy);
+   assert.equal(runtimeTools(reviewer.contract).find(t=>t.name==='obligation_report')?.description.includes('directly inspected'),!legacy);
+   h.tool(reviewer.id,'obligation_report',{obligationId:child.id,version:'v2',outcome:'passed',summary:'我的判断是 B 可能可行，但我手头没有 B 的批准件。'});
+   h.finish(reviewer.id,'已回报。');const returning=start(),observed=list(returning.id);
+   assert.equal(returning.contract.deliveryEvidencePolicy,policy);assert.equal(returning.input.prompt.includes('原件直接支持的事实'),!legacy);
+   assert.equal(observed.receipts.length,1);assert.equal(observed.receipts[0]?.report.authority,'member');
+   assert.equal(observed.receipts[0]?.report.version,'v2');assert(observed.receipts[0]?.report.summary.includes('没有 B 的批准件'));
+   assert.equal(Boolean(observed.reportGuidance?.includes('署名成员')), !legacy);
+ } finally {h.owner.close();}
 });
 
 test('normal answers create no obligation; missing report gets one reminder then a blocked return', () => {

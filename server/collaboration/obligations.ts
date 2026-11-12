@@ -415,6 +415,10 @@ export class ObligationService {
       const receipts = obligations.filter(o => !o.parentId).flatMap(o => this.raw(o.conversationId)
         .filter(child => child.parentId === o.id && child.report && (ended(child) || child.state === 'blocked'))
         .map(child => ({obligationId:o.id,childId:child.id,version:child.version,state:child.state,report:child.report})));
+      if(receipts.length && this.store.contract(id).deliveryEvidencePolicy==='source-grounded-v1') return {
+        obligations,receipts,
+        reportGuidance:'按 version 核对回报对应哪一版。authority 为 member 时，summary 是署名成员对该版本的回报；需要以原件为依据的结论，还要核对你实际可读的材料。authority 为 project_test 时，平台核验了该版本约定检查的回执，适用范围限于实际检查。'
+      };
       return {obligations,receipts};
     }
     const key = value(callId,'调用编号',160);

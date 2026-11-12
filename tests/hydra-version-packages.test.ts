@@ -17,7 +17,7 @@ function fixture(userAccept=false,preReceipt=false) {
   };
   const finish=(id:string,reply:string)=>{store.recordEvidence(id,{kind:'process_exit',detail:{confirmed:true}});store.finish(id,'succeeded',reply);};
   const source=store.send(room.id,{requestId:randomUUID(),content:'准备活动资料。'+(userAccept?'最终由我确认。':'')}).source;
-  if(preReceipt) { delete source.packageReplyReceipt; store.visibility.put('cc_sources',source); }
+  if(preReceipt) { delete source.packageReplyReceipt; delete source.deliveryEvidencePolicy; store.visibility.put('cc_sources',source); }
   const id=run(),ob=(store.obligations.tool(id,'obligation_open',{goal:'形成资料包',...(userAccept&&{acceptance:'user'})},'root') as {obligation:Obligation}).obligation;
   const invoke=(tool:string,args:Record<string,unknown>,who=id,callId:string=randomUUID())=>store.versionPackages.tool(who,tool,args,callId) as VersionPackageView;
   const open=(parts:object[],materials:object[]=[{key:'venue',name:'地点',content:'西馆'}])=>invoke('package_open',{obligationId:ob.id,title:'活动资料',parts,materials});
@@ -393,7 +393,7 @@ test('an older frozen execution or a root without a package keeps the literal-on
     const f=fixture(false,frozen);try {
       if(frozen) signedPackage(f);
       assert.equal(f.store.prompt(f.id).includes('finalReplyMarker'),!frozen);
-      assert.equal(f.store.prepareInput(f.id).manifest.renderVersion,frozen?'room-decision-material-v1':'room-package-reply-v1');
+      assert.equal(f.store.prepareInput(f.id).manifest.renderVersion,frozen?'room-decision-material-v1':'room-grounded-delivery-v1');
       const result=requestReceipt(f);assert.equal(result.finalReplyMarker,undefined);
       f.finish(f.id,receiptSummary);
       assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivered');

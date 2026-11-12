@@ -43,6 +43,7 @@ test('upgrading schema 16 preserves old input and authority, new contracts bind 
     assert.notEqual(sessionFingerprint(contract,identity),sessionFingerprint(fresh,identity));
     const privateSource=store.send(room.id,{requestId:randomUUID(),content:'私聊',privateTo:['claude']}).source;
     assert.equal(privateSource.coordinationPolicy,undefined);
+    assert.equal(privateSource.deliveryEvidencePolicy,undefined);
     const other=store.create({requestId:randomUUID(),title:'另房',memberIds:['claude'],defaultMemberId:'claude'}).conversation;
     assert.throws(()=>store.admitSource({conversationId:other.id,requestedTargets:['claude'],coordinationOriginSourceId:latest.id,kind:'job_result',content:'错误接回',depth:0}),/其他会话/);
   } finally { owner.close(); rmSync(directory,{recursive:true,force:true}); }

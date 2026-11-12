@@ -50,6 +50,7 @@ interface ObligationToolScope {
   handoffPolicy?: HandoffPolicy;
   obligationPolicy?: boolean;
   packageReplyReceipt?: true;
+  deliveryEvidencePolicy?: import('../../shared/collaboration.js').RuntimeRequest['deliveryEvidencePolicy'];
   continuationPolicy?: 'durable-v1';
   toolPolicyVersion?: string;
   visibility?: MessageVisibility;
@@ -82,6 +83,12 @@ export function obligationTools(scope: ObligationToolScope) {
   if (scope.packageReplyReceipt) {
     const index = tools.findIndex(tool => tool.name === 'obligation_deliver');
     tools[index] = { ...tools[index]!, description: 'Submit your final delivery after verification. When the result contains finalReplyMarker, paste it exactly on its own plain line in your final public reply in this turn. You may add notes above or below. It expands into your registered summary. Otherwise repeat summary verbatim; a concise summary is easiest to reproduce.' };
+  }
+  if(scope.deliveryEvidencePolicy==='source-grounded-v1') {
+    for(const [i,tool] of tools.entries()) {
+      if(tool.name==='obligation_report') tools[i]={...tool,description:tool.description+' Attribute what you directly inspected on this version. Mark your interpretation and any missing verification.'};
+      if(tool.name==='obligation_deliver') tools[i]={...tool,description:tool.description+' For a decision based on multiple sources or peer reports, limit each claim to its evidence. State the scope of any explicit approval or superseding version. Mark unsupported alternatives as pending verification. Apply the same limits to extra notes in the final reply.'};
+    }
   }
   if (scope.handoffPolicy === 'consent-v2' && !scope.projectWork) tools.push({
     name:'obligation_handoff',
