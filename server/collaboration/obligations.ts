@@ -36,6 +36,7 @@ interface WaitSignal {requestId:string;expectedRevision:number;condition:string;
 interface Observation { id: string; invocationId: string; }
 export class ObligationService {
   readonly opinions: OpinionService;
+  readonly exhaustedReminder='一次补交机会已用尽，仍缺少约定交付。';
   constructor(private readonly store: CollaborationStore) { this.opinions=new OpinionService(store,this); }
   opinionActor(id:string) {
     const c=this.store.contract(id), run=this.store.invocation(id), source=this.store.visibility.primary(id);
@@ -55,7 +56,7 @@ export class ObligationService {
   blockOpinion(o:Obligation,reason:string) { this.block(o,reason); }
   returnOpinion(o:Obligation,r:OpinionRound) {
     this.wake(o,'征询 '+r.id+' 已达到决策条件。请用 opinion_read 核对当前意见，锁定依据并核查署名异议后交付。',r.originInvocationId);
-    o.state='open';o.reminderCount=0;this.save(o,'opinion_returned');return o.currentSourceId;
+    o.state='open';o.reminderCount=0;delete o.reason;this.save(o,'opinion_returned');return o.currentSourceId;
   }
   reopenPackage(o:Obligation) {
     if(o.state!=='awaiting_acceptance')return;
@@ -533,8 +534,14 @@ export class ObligationService {
         o.state = o.acceptBy === 'user' ? 'awaiting_acceptance' : 'delivered';
         this.save(o,'delivery_recorded'); return;
       }
-      if (o.reminderCount >= 1) conflict('一次补交机会已用尽，仍缺少约定交付。');
+      if(this.opinions.deferReminder(o)) {
+        o.state='waiting';this.save(o,'opinion_quorum_lost');return;
+      }
+      if(o.decisionRoundId && (o.currentSourceId!==this.store.contract(run.id).primarySourceId || o.state!=='open'))return;
+      if (o.reminderCount >= 1) conflict(this.exhaustedReminder);
+      const priorId=o.currentSourceId;
       this.wake(o,'上一执行已释放，请补交原回执或说明阻塞。只需核对现有结果，无需重做已执行操作。');
+      this.opinions.recordReminder(o,priorId);
       o.reminderCount++; this.save(o,'reminded');
     } catch (error) {
       if (!(error instanceof AppError)) throw error;

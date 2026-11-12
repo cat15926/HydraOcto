@@ -17,7 +17,7 @@ export function OpinionRoundReceipt({round, name, onMessage}: {round: OpinionRou
   const checked = (id:string) => { const review = reviews.get(id); return review && review.valid !== false; };
   const latest = new Map<string, number>();
   for (const opinion of round.opinions) {
-    if (!opinion.late) latest.set(opinion.instanceId, Math.max(opinion.version, latest.get(opinion.instanceId) ?? 0));
+    if (!opinion.late && opinion.eligible!==false) latest.set(opinion.instanceId, Math.max(opinion.version, latest.get(opinion.instanceId) ?? 0));
   }
   const waiting = round.participants.filter(p => !latest.has(p.instanceId));
   return <details className="cc-review-progress" data-opinion-round={round.id}>
@@ -31,7 +31,7 @@ export function OpinionRoundReceipt({round, name, onMessage}: {round: OpinionRou
       const review = reviews.get(opinion.id);
       const included = locked.has(opinion.id);
       const current = latest.get(opinion.instanceId) === opinion.version;
-      const disposition = opinion.late ? '迟到归档' : included ? '已纳入决定依据' : current ? '' : '历史意见';
+      const disposition = opinion.late ? '迟到归档' : included ? '已纳入决定依据' : opinion.eligible===false ? '历史意见 · 未计入人数' : current ? '' : '历史意见';
       return <li key={opinion.id}>
         <strong>{name(opinion.memberId)} · 第 {opinion.version} 版</strong>{disposition && <small>{disposition}</small>}
         <p>{opinion.text}</p>

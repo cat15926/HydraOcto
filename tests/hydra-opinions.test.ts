@@ -110,3 +110,86 @@ test('E06 revoking the first invitation removes its signature from a pending cut
     assert.equal(h.read().validCount,1);assert.equal(h.read().state,'expired');
   }finally{h.close();}
 });
+
+function dropEarlyQuorum(h:ReturnType<typeof fixture>) {
+  const first=h.start();h.vote(first.id,'A');h.end(first.id);
+  const second=h.start();h.vote(second.id,'B');h.end(second.id);
+  const wake=h.read().wakeSourceId;assert(wake);
+  const replacement=h.start();
+  function lose() {
+    const source=h.store.visibility.primary(first.id);
+    h.store.cooperation.withdraw(source.id,{requestId:randomUUID(),expectedRevision:source.revision});
+    h.store.obligations.reconcile();
+    const lost=h.read();
+    assert.equal(lost.state,'collecting'); assert.equal(lost.validCount,1);
+    assert.equal(lost.opinions[0]!.eligible,false);
+  }
+  function finishDecision(ownerId:string) {
+    const round=h.tool(ownerId,'opinion_read',{roundId:h.round.id}) as OpinionRound;
+    h.tool(ownerId,'opinion_lock',{roundId:h.round.id,expectedRevision:round.revision});
+    h.deliver(ownerId);h.end(ownerId,'采用经过核查的资料');
+    assert.equal(h.store.obligations.list(h.cid)[0]!.state,'delivered');assert.equal(h.store.admitNext(),undefined);
+  }
+  return {lose,wake,replacement,finishDecision};
+}
+for(const mode of ['queued','running','exited'] as const)test('E06 requalification with decision return '+mode,()=>{
+  const h=fixture('early');try {
+    const {lose,wake,replacement,finishDecision}=dropEarlyQuorum(h);
+    let decider=mode==='queued' ? undefined : h.start();lose();
+    if(mode==='exited') {
+      h.end(decider!.id,'人数不够，继续等候。');
+      assert.equal(h.store.obligations.list(h.cid)[0]!.state,'waiting');
+      assert.equal(h.store.obligations.list(h.cid)[0]!.reminderCount,0);
+      assert.equal(h.store.admitNext(),undefined);
+    }
+    h.vote(replacement.id,'C',false,'once');h.vote(replacement.id,'C',false,'once');h.end(replacement.id);
+    h.store.obligations.reconcile();h.store.obligations.reconcile();
+    const back=h.read();
+    assert.equal(back.state,'ready');assert.equal(back.validCount,2);
+    assert.deepEqual(back.quorumChanges?.map(change=>change.kind),['lost','restored']);
+    if(mode==='exited') {
+      assert.notEqual(back.wakeSourceId,wake);
+      h.restart();h.store.obligations.reconcile();assert.equal(h.read().wakeSourceId,back.wakeSourceId);
+      decider=h.start();
+    } else {
+      assert.equal(back.wakeSourceId,wake);decider??=h.start();
+    }
+    finishDecision(decider.id);
+  }finally{h.close();}
+});
+test('E06 exhausted automatic reminder can recover after a distinct threshold crossing',()=>{
+  const h=fixture('early');try {
+    const {lose,wake,replacement,finishDecision}=dropEarlyQuorum(h);
+    h.end(h.start().id);h.end(h.start().id);
+    assert.equal(h.store.obligations.list(h.cid)[0]!.state,'blocked');
+    lose();h.vote(replacement.id,'C');h.end(replacement.id);
+    assert.notEqual(h.read().wakeSourceId,wake);
+    finishDecision(h.start().id);
+  }finally{h.close();}
+});
+test('E06 a cancelled decision execution stays blocked after quorum returns',()=>{
+  const h=fixture('early');try {
+    const {lose,wake,replacement}=dropEarlyQuorum(h);
+    const decider=h.start();lose();
+    h.store.cancel(decider.id);
+    h.store.recordEvidence(decider.id,{kind:'process_exit',detail:{confirmed:true}});
+    h.store.finish(decider.id,'cancelled','取消执行');
+    h.vote(replacement.id,'C');h.end(replacement.id);
+    h.store.obligations.reconcile();
+    assert.equal(h.read().wakeSourceId,wake);
+    assert.equal(h.store.obligations.list(h.cid)[0]!.state,'blocked');
+    assert.equal(h.store.admitNext(),undefined);
+  }finally{h.close();}
+});
+test('E06 an expired round cannot reopen from a late replacement after quorum loss',()=>{
+  const h=fixture('early');try {
+    const {lose,wake,replacement}=dropEarlyQuorum(h);
+    const decider=h.start();lose();h.end(decider.id,'仍待补票');
+    h.due();assert.equal(h.read().state,'expired');
+    const late=h.vote(replacement.id,'迟到');assert(late.late);h.end(replacement.id);
+    h.store.obligations.reconcile();
+    assert.equal(h.read().wakeSourceId,wake);
+    assert.equal(h.store.obligations.list(h.cid)[0]!.state,'blocked');
+    assert.equal(h.store.admitNext(),undefined);
+  }finally{h.close();}
+});

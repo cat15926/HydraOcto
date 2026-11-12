@@ -26,7 +26,8 @@ export class OpinionService {
   private clock(){ return this.store.options.clock?.() ?? Date.now(); }
   list(cid:string){ return this.store.artifacts.rows<OpinionRound>('cc_opinion_rounds',cid).map(r=>this.project(r)); }
   private project(r:OpinionRound):OpinionRound {
-    return {...r,resolutions:r.resolutions.map(check=>{
+    const eligible=new Set(r.lockedOpinionIds ?? this.qualified(r).map(v=>v.id));
+    return {...r,opinions:r.opinions.map(v=>({...v,eligible:eligible.has(v.id)})),resolutions:r.resolutions.map(check=>{
       const opinion=r.opinions.find(v=>v.id===check.opinionId);
       if(opinion && this.validCheck(r,check,opinion))return {...check,valid:true};
       return {opinionId:check.opinionId,invocationId:check.invocationId,valid:false};
@@ -59,8 +60,46 @@ export class OpinionService {
     r.objectionIds=opinions.filter(o=>o.objection).map(o=>o.id);
     r.state='locked';
   }
+  private recordQuorum(r:OpinionRound, kind:'lost'|'restored', votes:SignedOpinion[]) {
+    const latest=new Map(votes.map(v=>[v.instanceId,v.id]));
+    (r.quorumChanges??=[]).push({revision:r.revision+1,kind,at:new Date(this.clock()).toISOString(),
+      validCount:latest.size,opinionIds:[...latest.values()],wakeSourceId:r.wakeSourceId!});
+  }
+  isDecisionSource(o:Obligation,r:OpinionRound) {
+    return o.currentSourceId===r.wakeSourceId || o.currentSourceId===r.reminderSourceId;
+  }
+  private recovery(r:OpinionRound,o:Obligation) {
+    if(!r.pendingRecovery || o.decisionRoundId!==r.id || !this.isDecisionSource(o,r) ||
+        !this.activeInstance(r.conversationId,r.decider.memberId,r.decider.instanceId) ||
+        this.store.visibility.primary(r.originInvocationId).withdrawnAt)return false;
+    const task=o.taskId && this.store.tasks.getTask(o.taskId);
+    if (!task || task.pendingHandoffId || task.disposition || ['done','blocked'].includes(task.status) ||
+        o.ownerRevision!==r.ownerRevision || o.owner.instanceId!==r.decider.instanceId || o.wait || o.activeGroupId)return false;
+    const wasExhausted=o.state==='blocked' && r.reminderSourceId===o.currentSourceId &&
+      o.reason===this.obligations.exhaustedReminder;
+    if(!wasExhausted && !['open','waiting'].includes(o.state))return false;
+    const prior=this.store.artifacts.get<SourceWork>('cc_sources',o.currentSourceId);
+    const delivery=this.store.db.prepare('SELECT response_id,status FROM cc_deliveries WHERE source_id=? AND member_id=?')
+      .get(prior.id,r.decider.memberId) as {response_id?:string;status:string}|undefined;
+    if(!delivery || prior.withdrawnAt || delivery.status==='withdrawn')return false;
+    if(delivery.response_id){
+      const run=this.store.invocation(this.store.response(delivery.response_id).invocationId);
+      if(run.cancelRevision || ['cancelled','failed','interrupted'].includes(run.status))return false;
+      if(run.status==='succeeded'){
+        if(run.teardown!=='confirmed')return false;
+        r.wakeSourceId=this.obligations.returnOpinion(o,r);
+        delete r.reminderSourceId;
+      }
+    }
+    // A pending or active return still belongs to the decision owner and can read the new votes.
+    delete r.pendingRecovery;
+    return true;
+  }
   reconcileRound(r:OpinionRound,o:Obligation) {
-    if (closed(r)) return;
+    if (closed(r)) {
+      if(r.state==='locked' && this.recovery(r,o))this.save(r);
+      return;
+    }
     if (o.state==='cancelled' || o.owner.instanceId!==r.decider.instanceId || o.ownerRevision!==r.ownerRevision ||
         !this.activeInstance(r.conversationId,r.decider.memberId,r.decider.instanceId) ||
         this.store.visibility.primary(r.originInvocationId).withdrawnAt) {
@@ -76,12 +115,36 @@ export class OpinionService {
       r.state='expired'; r.reason='已到截止时间，有效意见人数不足。';
       this.save(r); this.obligations.blockOpinion(o,r.reason); return;
     }
+    if(r.state==='ready' && count<r.minimum && r.wakeSourceId){
+      this.recordQuorum(r,'lost',qualified);
+      r.pendingRecovery={priorWakeSourceId:r.wakeSourceId,revision:r.revision+1};
+      r.state='collecting';changed=true;
+    }
+    const restored=r.state==='collecting' && !!r.pendingRecovery && count>=r.minimum;
     if (due) { this.freeze(r,qualified); changed=true; }
     if (!due && r.lockMode==='early' && count>=r.minimum && r.state==='collecting') {r.state='ready';changed=true;}
-    if ((r.state==='ready'||r.state==='locked') && !r.wakeSourceId) {
-      r.wakeSourceId=this.obligations.returnOpinion(o,r); changed=true;
+    if (r.state==='ready'||r.state==='locked') {
+      if (!r.wakeSourceId && o.state==='waiting' && !o.wait && !o.activeGroupId) {
+        r.wakeSourceId=this.obligations.returnOpinion(o,r); changed=true;
+      } else if(this.recovery(r,o)) changed=true;
+      if(restored)this.recordQuorum(r,'restored',qualified);
     }
     if(changed)this.save(r);
+  }
+  private current(o:Obligation) {
+    return o.decisionRoundId ? this.get(o.conversationId,o.decisionRoundId) : undefined;
+  }
+  deferReminder(o:Obligation) {
+    const r=this.current(o);
+    if(!r || !this.isDecisionSource(o,r))return false;
+    this.reconcileRound(r,o);
+    return r.state==='collecting' && !!r.pendingRecovery && this.isDecisionSource(o,r);
+  }
+  recordReminder(o:Obligation,priorId:string) {
+    const r=this.current(o);
+    if(!r || priorId!==r.wakeSourceId)return;
+    r.reminderSourceId=o.currentSourceId;
+    this.save(r);
   }
   reconcile(o:Obligation) {
     if(o.decisionRoundId)this.reconcileRound(this.get(o.conversationId,o.decisionRoundId),o);

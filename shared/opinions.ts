@@ -8,6 +8,7 @@ export interface SignedOpinion {
   text: string;
   objection: boolean;
   late: boolean;
+  eligible?: boolean;
   version: number;
   createdAt: string;
 }
@@ -33,5 +34,8 @@ export interface OpinionRound {
   lockedOpinionIds?: string[];
   objectionIds?: string[];
   wakeSourceId?: string;
+  reminderSourceId?: string;
+  pendingRecovery?: { priorWakeSourceId: string; revision: number };
+  quorumChanges?: { revision: number; kind: 'lost'|'restored'; at: string; validCount: number; opinionIds: string[]; wakeSourceId: string }[];
   reason?: string;
 }
