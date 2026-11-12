@@ -95,6 +95,21 @@ try {
   assert(visible.length>0 && visible.every(f=>f.roomId===target && f.parentIds.every(id=>allowed.has(id))));
   const serialized=JSON.stringify(visible);
   for(const hidden of [email,order,origin.id,digest(content),...s.factors.list(home).map(f=>f.id)])assert(!serialized.includes(hidden));
+  const transfer=s.cross.transfers()[0];
+  if(revokeBeforeDispatch) {
+    assert(!visible.some(f=>f.sourceRef.id===transfer.sourceId),'Revoked foreign material still has a target receipt');
+  } else {
+    const received=visible.find(f=>f.kind==='request' && f.sourceRef.kind==='source' && f.sourceRef.id===transfer.sourceId);
+    const delivered=visible.find(f=>f.kind==='message' && f.sourceRef.kind==='message' && f.sourceRef.id===answer.id);
+    assert(received && delivered,'Missing a scoped receipt for this transfer or its actual reply');
+    assert.deepEqual(received.parentIds,[]);assert.deepEqual(delivered.parentIds,[received.id]);
+    assert(!s.factors.list(target).some(f=>f.id===received.id || f.id===delivered.id));
+    await post('/api/cross-grants/'+receipt.grantId+'/revoke',{expectedRevision:1});
+    const after=s.factors.list(target,s.roomMembers.resolve(target,'writer'));
+    assert(!after.some(f=>f.id===received.id || f.id===delivered.id),'Target can read a withdrawn receipt');
+    assert.equal(s.detail(target).messages.find(m=>m.id===answer.id)?.content,answer.content,'Persisted historical delivery was rewritten');
+    result.afterDeliveryRevocation={targetSourceId:transfer.sourceId,answerId:answer.id,removedFromProjection:true};
+  }
   result.visibleFactorEdges=visible.map(f=>({id:f.id,parents:f.parentIds}));
 
   Object.assign(result,{passed:true,home,target,receipt,consumptions:detail.consumptions.map(({id,sourceId,responseId})=>({id,sourceId,responseId})),answer:answer.content,instances:[first.roomMember.id,second.roomMember.id]});

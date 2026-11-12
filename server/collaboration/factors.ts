@@ -134,6 +134,14 @@ export class FactorService {
     if (!invocationId) return undefined;
     return this.store.contract(invocationId).primarySourceId;
   }
+  // Issued only in the new reviewed-excerpt transaction. The local receipt has no edge to
+  // the granting room, the transfer, the excerpt coordinates or its underlying materials.
+  recordApprovedExcerpt(s:SourceWork, targetInstance:string) {
+    if(!s.crossRef || !s.roomPolicy || !this.enabled(s.conversationId) || !privateScope(s.visibility) ||
+      s.requestedTargets.length!==1 || this.store.roomMembers.resolve(s.conversationId,s.requestedTargets[0]!).id!==targetInstance) return;
+    this.insert({roomId:s.conversationId,kind:'request',issuer:'platform',content:'获准摘录已送入本房间',
+      audience:[targetInstance]}, {kind:'source',id:s.id,version:s.revision});
+  }
   recordSource(s: SourceWork) {
     if (!this.enabled(s.conversationId) || !s.roomPolicy) return;
     // Existing transfer services govern their own references and disclosure contracts.
@@ -153,6 +161,16 @@ export class FactorService {
     const origin = this.reference(cid,'source',sourceId);
     // Requirements apply prospectively. Don't reconstruct old sources or transfer histories.
     if (!origin) return;
+    const source=sourceId && this.store.artifacts.get<SourceWork>('cc_sources',sourceId);
+    if(source && source.crossRef) {
+      if(!m.responseId || m.author!=='member') return;
+      const run=this.store.invocation(this.store.response(m.responseId).invocationId);
+      if(!run.roomMember || run.status!=='succeeded' || run.acceptance!=='accepted' || run.teardown!=='confirmed' ||
+        run.roomMember.conversationId!==cid || run.memberId!==source.requestedTargets[0])return;
+      this.insert({roomId:cid,kind:'message',issuer:run.memberId,content:'成员已答复获准摘录',audience:[run.roomMember.id]},
+        {kind:'message',id:m.id,version:m.revision ?? 1},[origin]);
+      return;
+    }
     const context = m.responseId && this.store.contract(this.store.response(m.responseId).invocationId).memberContext;
     const material = context ? context.factors.map(f=>f.id) : [];
     const commitments = m.responseId ? this.db.prepare('SELECT obligation_id FROM cc_obligation_sources WHERE source_id=?')
@@ -164,6 +182,7 @@ export class FactorService {
   recordEvidence(i: CollaborationInvocation, e: AcceptanceEvidence) {
     if (e.kind !== 'tool' || !i.roomMember || !this.enabled(i.conversationId)) return;
     const cid = i.conversationId, contract = this.store.contract(i.id);
+    if(contract.primarySourceId && this.store.artifacts.get<SourceWork>('cc_sources',contract.primarySourceId).crossRef) return;
     const origin = this.reference(cid,'source',contract.primarySourceId);
     if (!origin) return;
     // Tool output belongs to the original evidence store. The graph only contains its typed reference.
@@ -220,7 +239,15 @@ export class FactorService {
         if (!actor || !f.audience.includes(actor.id) || (role==='writing' && f.kind!=='expression')) continue;
       }
       if (personal && !personalKinds.has(f.kind)) continue;
-      if (f.sourceRef.kind === 'source' && this.store.artifacts.get<SourceWork>('cc_sources', f.sourceRef.id).withdrawnAt) continue;
+      if (f.sourceRef.kind === 'source') {
+        const source=this.store.artifacts.get<SourceWork>('cc_sources',f.sourceRef.id);
+        if(source.withdrawnAt)continue;
+        if(source.crossRef) {
+          // Grants, exact source versions, workspace identities and both endpoint generations
+          // may change before the periodic sweep. Check the original authority on every read.
+          try {this.store.cross.material(source);} catch(e) {if(e instanceof AppError)continue;throw e;}
+        }
+      }
       if (f.sourceRef.kind === 'evidence') {
         const receipt = this.db.prepare('SELECT invocation_id FROM cc_evidence WHERE id=?').get(f.sourceRef.id);
         if (!receipt || this.store.visibility.primary(String(receipt.invocation_id)).withdrawnAt) continue;

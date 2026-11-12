@@ -110,7 +110,9 @@ export class CrossConversationService {
       const transfer: CrossTransfer = { id: randomUUID(), conversationId: cid, grantId:g.id, grantRevision:g.revision, from, to, sourceId:'', origin, refs, content, createdAt:now() };
       const depth = origin ? this.data.get<SourceWork>('cc_sources',origin.sourceId).depth + 1 : 0; if (depth > 8) conflict('跨会话链达到深度限制。');
       const s = this.store.admitSource({ conversationId:to.conversationId, kind:'cross_message', ...(g.approvedExcerpts && {visibility:this.store.visibility.audience(to.conversationId,[to.memberId])}), content:`跨会话消息 ${transfer.id}，来自 ${from.memberId}。\n${content}`, requestedTargets:[to.memberId], depth, crossRef:{transferId:transfer.id} });
-      transfer.sourceId=s.id; this.data.save('cc_cross_transfers',transfer,'cross.sent'); this.store.publishSource(s); this.port.event(to.conversationId,'cross.received',{ transferId:transfer.id,sourceId:s.id }); return transfer;
+      transfer.sourceId=s.id; this.data.save('cc_cross_transfers',transfer,'cross.sent');
+      if(g.approvedExcerpts && g.endpointInstances) this.store.factors.recordApprovedExcerpt(s,g.endpointInstances.target);
+      this.store.publishSource(s); this.port.event(to.conversationId,'cross.received',{ transferId:transfer.id,sourceId:s.id }); return transfer;
     }));
   }
   material(s: SourceWork) {

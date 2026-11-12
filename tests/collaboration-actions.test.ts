@@ -202,6 +202,60 @@ test('Hydra E: reviewed excerpts bind exact text, recipient instance and one del
  } finally {h.close();}
 });
 
+for(const invalidation of ['revoke','expire','replace-member','delete-origin'] as const)
+test('E08 target-local factor pair reads exact grant on every projection: '+invalidation,()=>{
+ const h=fixture();try{
+   const {store,home,target}=h;
+   const text='Customer private account: ABC-42. Approved: numeric order.';
+   store.send(home.id,{requestId:rid(),content:text});end(h,start(h).id);
+   const origin=store.detail(home.id).messages.find(m=>m.content===text)!;
+   const approved='numeric order',offset=text.indexOf(approved);
+   const command={requestId:rid(),homeMemberId:'codex',targetConversationId:target.id,targetMemberId:'claude',
+     refs:[{...excerpt(origin),start:offset,end:offset+approved.length}]};
+   const grant=store.cross.shareExcerpts(home.id,command).result;
+   const transfer=store.cross.transfers().find(t=>t.id===grant.transferId)!;
+   const actor=()=>store.roomMembers.resolve(target.id,'claude');
+   const view=()=>store.factors.list(target.id,actor());
+   const initial=view();assert.equal(initial.length,1);
+   const received=initial[0]!;assert.equal(received.sourceRef.id,transfer.sourceId);assert.deepEqual(received.parentIds,[]);
+   assert(!JSON.stringify(received).includes(origin.id));assert(!JSON.stringify(received).includes(textDigest(text)));
+   assert(!store.factors.list(target.id).length);assert(!store.factors.list(target.id,store.roomMembers.resolve(target.id,'codex')).length);
+   const run=start(h);end(h,run.id);const delivered=view().find(f=>f.kind==='message')!;
+   const reply=store.detail(target.id).messages.find(m=>m.responseId===run.responseId)!;
+   assert.equal(delivered.sourceRef.id,reply.id);assert.deepEqual(delivered.parentIds,[received.id]);
+   for(const hidden of [home.id,origin.id,grant.grantId,grant.transferId,'ABC-42',...store.factors.list(home.id).map(f=>f.id)])
+     assert(!JSON.stringify(view()).includes(hidden));
+   if(invalidation==='revoke')store.cross.revoke(grant.grantId,{expectedRevision:1,requestId:rid()});
+   if(invalidation==='expire')h.advance(86400001);
+   if(invalidation==='replace-member'){
+     store.updateConversation(target.id,{memberIds:['codex'],defaultMemberId:'codex'});
+     store.updateConversation(target.id,{memberIds:['codex','claude'],defaultMemberId:'claude'});
+   }
+   if(invalidation==='delete-origin')store.visibility.messageCommand(home.id,origin.id,{requestId:rid(),expectedRevision:1,action:'delete'});
+   assert.deepEqual(view(),[]);assert.equal(store.detail(target.id).messages.find(m=>m.id===reply.id)?.content,reply.content);
+ }finally{h.close();}
+});
+
+test('E08 an approved transfer already present without a receipt at upgrade is never backfilled by a later reply',()=>{
+ const h=fixture();try{
+   const content='reviewed line';h.store.send(h.home.id,{requestId:rid(),content});end(h,start(h).id);
+   const m=h.store.detail(h.home.id).messages.find(m=>m.content===content)!;
+   h.store.cross.shareExcerpts(h.home.id,{requestId:rid(),homeMemberId:'codex',targetConversationId:h.target.id,targetMemberId:'claude',refs:[excerpt(m)]});
+   // Prior releases persisted this transfer, its source and delivery without any target factor.
+   h.owner.db.prepare('DELETE FROM cc_factors WHERE room=?').run(h.target.id);
+   const i=start(h);end(h,i.id);
+   assert.deepEqual(h.store.factors.list(h.target.id,h.store.roomMembers.resolve(h.target.id,'claude')),[]);
+ }finally{h.close();}
+});
+
+test('E08 broad historical transfers have no approved-excerpt factor or synthesized descendants',()=>{
+ const h=fixture();try{
+   h.store.cross.send(h.home.id,{requestId:rid(),grantId:h.grant().id,content:'普通跨房消息'});
+   const i=start(h);end(h,i.id);
+   assert.deepEqual(h.store.factors.list(h.target.id,h.store.roomMembers.resolve(h.target.id,'claude')),[]);
+ }finally{h.close();}
+});
+
 test('Hydra E: ordinary cross-room action callbacks return safe views without home anchors or excerpt coordinates',()=>{
  const h=fixture();try {
    h.store.send(h.home.id,{requestId:rid(),content:'action excerpt'});end(h,start(h).id);
