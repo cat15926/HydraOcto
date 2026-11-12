@@ -51,7 +51,7 @@ test('memory library: owner administration is independent of selected conversati
 
 test('N8 HTTP: private -> exact tool boundaries -> refs-only selected share -> isolated public prompt with CSRF and metadata projection', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.31.0-hydra-d');
+    assert.equal(h.boot.version, '0.32.0-hydra-e');
     assert.equal((await h.api(h.path + '/messages', { requestId: rid(), content: '', excerptTargets: ['codex'], excerptRefs: [null] })).status, 400);
     assert.equal((await h.api(h.path + '/visibility-organize', { requestId: rid(), expectedRevision: 1, action: 'groups', groups: [null] })).status, 400);
     const input = { requestId: rid(), content: 'TEST_TOOL_BOUNDARY PRIVATE_UNSELECTED TOKEN_TO_SHARE', privateTo: ['codex'] };

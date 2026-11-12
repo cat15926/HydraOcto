@@ -22,7 +22,7 @@ const until = async (predicate: () => boolean) => { const deadline = Date.now() 
 
 test('N6 HTTP: source queue CAS, exact scope, CSRF, group cancellation and forged evidence rejection', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.31.0-hydra-d');
+    assert.equal(h.boot.version, '0.32.0-hydra-e');
     const path = '/api/conversations/' + h.c.id;
     const a = (await h.api(path + '/messages', { requestId: rid(), content: '@codex one' })).data.source;
     const b = (await h.api(path + '/messages', { requestId: rid(), content: '@claude two' })).data.source;
