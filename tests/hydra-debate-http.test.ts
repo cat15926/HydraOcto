@@ -60,8 +60,9 @@ async function fixture() {
         delivery:{obligationId:root.id,version:'debate-ended',acceptance:'Provide a verdict and a reason.'}});
       return 'Asked for a verdict.';
     }
+    assert.equal(req.collectionOwnerPolicy,'same-execution-v1');
     await tool('multi_mention',{targets:['left','right'],question:'ROUND-' + round + ' present your arguments.',
-      obligationId:root.id,timeoutMs:120000});
+      ...(round===1?{}:{obligationId:root.id}),timeoutMs:120000});
     return 'Invited both speakers for ROUND-' + round;
   }
   const runtime:CollaborationRuntime = {probe:async()=>[],invoke:async req=>{

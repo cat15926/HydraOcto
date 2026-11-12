@@ -85,6 +85,7 @@ export interface SourceWork {
   coordinationPolicy?: CoordinationPolicy;
   roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
+  collectionOwnerPolicy?: 'same-execution-v1';
   deliveryEvidencePolicy?: 'source-grounded-v1';
   finalTextPolicy?: 'registered-v1';
   externalScope?: import('./obligations.js').ExternalScope;
@@ -240,6 +241,9 @@ export interface MentionGroup {
   id: string; conversationId: string; sourceId: string; targets: string[]; question: string; context: string;
   callerInvocationId?: string; callbackTo?: string; state: 'collecting' | 'done' | 'timeout' | 'cancelled' | 'lost';
   createdAt: string; deadline: string; finishedAt?: string; revision: number;
+  /** Possible later adoption by this exact caller; the original group remains independently usable. */
+  standalone?: true;
+  ownerCandidate?: {participants: import('./obligations.js').ObligationEndpoint[]; receipts: NonNullable<MentionGroup['results']>};
   contract?: {
     version: 2;
     obligationId: string;
@@ -413,6 +417,7 @@ export interface ExecutionContractSnapshot {
   coordinationPolicy?: CoordinationPolicy;
   roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
+  collectionOwnerPolicy?: 'same-execution-v1';
   deliveryEvidencePolicy?: 'source-grounded-v1';
   finalTextPolicy?: 'registered-v1';
   externalScope?: import('./obligations.js').ExternalScope;
@@ -500,6 +505,7 @@ export interface RuntimeRequest {
   coordinationPolicy?: CoordinationPolicy;
   roomRuleTurn?: RoomRuleTurn;
   packageReplyReceipt?: true;
+  collectionOwnerPolicy?: 'same-execution-v1';
   deliveryEvidencePolicy?: 'source-grounded-v1';
   finalTextPolicy?: 'registered-v1';
   externalScope?: import('./obligations.js').ExternalScope;

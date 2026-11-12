@@ -84,7 +84,7 @@ interface RuntimeToolSpec {
   inputSchema: { type: string; properties: Record<string, unknown>; required?: readonly string[]; additionalProperties?: boolean };
 }
 
-export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'roomRuleTurn' | 'coordinationPolicy' | 'deliveryEvidencePolicy' | 'finalTextPolicy' | 'packageReplyReceipt' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
+export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'roomRuleTurn' | 'coordinationPolicy' | 'collectionOwnerPolicy' | 'deliveryEvidencePolicy' | 'finalTextPolicy' | 'packageReplyReceipt' | 'handoffPolicy' | 'mayRequestPublicStatement' | 'memberContextMode' | 'obligationPolicy' | 'continuationPolicy' | 'projectBrowser' | 'projectPreview' | 'webResearch' | 'gitDelivery' | 'toolPolicyVersion' | 'visibility' | 'projectWork' | 'mayProposeProject' | 'projectReview' | 'mayRequestProjectReview' | 'mayExportProjectFile' | 'mayRunProjectNpmTest' | 'projectNpmChecks' | 'workspaceGrant'> & {member?:Pick<RuntimeRequest['member'],'carrier'>}): RuntimeToolSpec[] {
   if (request.roomRuleTurn?.kind === 'player') return gameTools('player');
   if (request.memberContextMode === 'private' || request.memberContextMode === 'writing') return memberContextTools(request.memberContextMode);
   const obligations = obligationTools(request);
@@ -94,10 +94,10 @@ export function runtimeTools(request: Pick<RuntimeRequest, 'externalScope' | 'ro
     if (t.name === 'multi_mention' && supportsContinuation(request) && !request.projectWork) {
       return {
         ...t,
-        description: 'Collect replies to a question from other room members (normally 2–8; an active room rule may authorize its eligible roster). Omit timeoutMs to use the room default scaled to the authorized collection size. To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. Without obligationId this is a standalone consultation.',
+        description: 'Collect replies to a question from other room members (normally 2–8; an active room rule may authorize its eligible roster). Omit timeoutMs to use the room default scaled to the authorized collection size. To resume your ongoing commitment after all replies arrive, pass its obligationId and end this turn. Read the returned answers to decide the next step. ' + (request.collectionOwnerPolicy ? 'Omit obligationId to attach to the sole open main commitment of this execution, including one you register later in this turn. Set standalone=true only for an independent summary.' : 'Without obligationId this is a standalone consultation.'),
         inputSchema: {
           ...t.inputSchema,
-          properties: { ...t.inputSchema.properties, ...(request.roomRuleTurn?.kind === 'host' && {targets:{type:'array',items:{type:'string'},minItems:1,maxItems:12},timeoutMs:{type:'integer',minimum:1000,maximum:authorizedCollectionMaxMs}}), obligationId: { type: 'string', minLength: 1 } },
+          properties: { ...t.inputSchema.properties, ...(request.collectionOwnerPolicy && {standalone:{type:'boolean',enum:[true]}}), ...(request.roomRuleTurn?.kind === 'host' && {targets:{type:'array',items:{type:'string'},minItems:1,maxItems:12},timeoutMs:{type:'integer',minimum:1000,maximum:authorizedCollectionMaxMs}}), obligationId: { type: 'string', minLength: 1 } },
         },
       };
     }
@@ -190,6 +190,7 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
   }
   if (name === 'collaboration_request' && args.delivery !== undefined && !obligationTools(request).length)
     throw new Error('Tracked delegation is outside this invocation frozen policy.');
+  if (name === 'multi_mention' && args.standalone !== undefined && (request.collectionOwnerPolicy !== 'same-execution-v1' || args.standalone !== true || args.obligationId !== undefined)) throw new Error('standalone=true is valid only on its own in an authorized room consultation.');
   if (name === 'multi_mention' && args.obligationId !== undefined && request.projectWork) throw new Error('Tracked consultation is outside this project execution.');
   if (((name === 'multi_mention' && args.obligationId !== undefined) || (name === 'obligation_wait' && args.kind !== undefined)) && !supportsContinuation(request))
     throw new Error('This continuation is outside the frozen invocation policy.');

@@ -16,6 +16,7 @@ export function sessionFingerprint(contract: ExecutionContractSnapshot, identity
     ...(contract.obligationPolicy && {obligationPolicy:true}),
     ...(contract.externalScope && {externalScope:contract.externalScope}),
     ...(contract.finalTextPolicy && {finalTextPolicy:contract.finalTextPolicy}),
+    ...(contract.collectionOwnerPolicy && {collectionOwnerPolicy:contract.collectionOwnerPolicy}),
     ...(contract.deliveryEvidencePolicy && {deliveryEvidencePolicy:contract.deliveryEvidencePolicy}),
     ...(contract.packageReplyReceipt && {packageReplyReceipt:true}),
     ...(contract.roomRuleTurn && {roomRuleTurn:contract.roomRuleTurn}),

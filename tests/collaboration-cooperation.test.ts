@@ -490,3 +490,137 @@ test('a deadline fences an admitted participant whose provider has not launched'
     }
   } finally {h.close();}
 });
+
+// A late declaration adopts the issued group and its own signed replies. The test
+// observer never resends the question or manufactures an answering invocation.
+test('public consultations join the current root in either order, including an already published result',()=>{
+  for(const timing of ['root-first','group-first','one-reply','all-replies'] as const){
+    const h=setup(true);
+    try{
+      const host=h.run();
+      const open=()=> (h.s.obligations.tool(host.id,'obligation_open',{goal:'综合两名同伴的材料'},'declare') as {obligation:Obligation}).obligation;
+      const question={requestId:rid(),question:'产出各自的核对意见',targets:['claude','reviewer']};
+      if(timing==='root-first') open();
+      const first=h.s.cooperation.createGroup(h.c.id,question,host.id).group;
+      const replies=h.admit().invocations.map(h.start);
+      const done=(index:number)=>h.end(replies[index]!, 'succeeded','意见来自 '+replies[index]!.memberId);
+      const early=timing==='one-reply'?1:timing==='all-replies'?2:0;
+      for(let n=0;n<early;n++)done(n);
+      h.s.cooperation.groupTick();
+      if(timing==='all-replies')assert.equal(h.s.cooperation.groups(h.c.id)[0]!.state,'done');
+      const root=open();
+      const replay=h.s.cooperation.createGroup(h.c.id,question,host.id);
+      assert(replay.replayed&&replay.group.id===first.id);
+      assert.equal(h.s.cooperation.groups(h.c.id)[0]!.contract?.obligationId,root.id);
+      h.end(host);
+      for(let n=early;n<2;n++)done(n);
+      h.restart();
+      for(let n=0;n<2;n++) {
+        h.s.cooperation.observeTerminalEvidence(h.s.invocation(replies[0]!.id));h.s.cooperation.groupTick();h.s.obligations.reconcile();
+      }
+      const rows=h.s.detail(h.c.id),group=rows.groups![0]!;
+      const wake=rows.sources.filter(s=>s.kind==='job_result');
+      assert.equal(wake.length,1);assert.equal(wake[0]!.id,group.contract!.wakeSourceId);
+      assert.equal(rows.sources.filter(s=>s.kind==='multi_mention').length,1);
+      assert.equal(rows.sources.some(s=>s.kind==='a2a_failure'),false);
+      assert.equal(rows.groups!.length,1);assert.equal(group.sourceId,first.sourceId);
+      assert.deepEqual(group.results!.map(r=>r.invocationId).sort(),replies.map(r=>r.id).sort());
+      assert.equal(rows.messages.filter(m=>m.author==='system'&&m.content.startsWith('多人征询结果')).length,timing==='all-replies'?1:0);
+      const owner=h.start(h.admit().invocations[0]!);
+      assert.equal(owner.memberId,host.memberId);assert.equal(h.s.obligations.context(owner.id)[0]!.id,root.id);
+      assert.equal(h.s.detail(h.c.id).consumptions.filter(c=>c.sourceId===wake[0]!.id).length,1);
+    }finally{h.close();}
+  }
+});
+
+test('standalone, old frozen inputs and unrelated open roots never gain a consultation callback',()=>{
+  for(const scope of ['standalone-before','standalone-after','old-source','old-contract','no-root','different-source'] as const){
+    const h=setup();
+    try{
+      const origin=h.send('@codex 核对材料'),legacy=scope.startsWith('old-');
+      if(scope==='old-source'){
+        delete origin.collectionOwnerPolicy;
+        h.s.db.prepare('UPDATE cc_sources SET value=? WHERE id=?').run(JSON.stringify(origin),origin.id);
+      }
+      const host=h.start(h.admit().invocations[0]!);
+      if(scope==='old-contract'){
+        const c=h.s.contract(host.id);delete c.collectionOwnerPolicy;
+        h.s.db.prepare('UPDATE cc_contracts SET value=? WHERE invocation_id=?').run(JSON.stringify(c),host.id);
+      }
+      const open=(id:string)=> (h.s.obligations.tool(id,'obligation_open',{goal:'综合材料'},rid()) as {obligation:Obligation}).obligation;
+      if(scope==='different-source') {
+        const unrelated=open(host.id);
+        h.s.obligations.tool(host.id,'obligation_wait',{obligationId:unrelated.id,condition:'future-event',kind:'event',deadline:new Date(Date.now()+120_000).toISOString()},rid());
+        h.end(host);
+      }
+      const actor=scope==='different-source'?h.run():host;
+      const args={requestId:rid(),targets:['claude','reviewer'],question:'两项看法'};
+      const group=(extra:Record<string,unknown>)=>h.s.cooperation.createGroup(h.c.id,{...args,...extra},actor.id).group;
+      for(const invalid of [false,'true',null])assert.throws(()=>group({standalone:invalid}));
+      assert.throws(()=>group({standalone:true,obligationId:'anything'}));
+      const schema=runtimeTools(h.s.contract(actor.id)).find(t=>t.name==='multi_mention')!;
+      assert.equal(Object.hasOwn(schema.inputSchema.properties,'standalone'),!legacy);
+      if(legacy)assert.throws(()=>group({standalone:true}));
+      if(scope==='standalone-after'||legacy)open(actor.id);
+      const g=group(scope.startsWith('standalone')?{standalone:true}:{});
+      if(scope==='standalone-before')open(actor.id);
+      assert.equal(g.contract,undefined,scope);
+      h.end(actor);
+      const answers=h.admit().invocations.map(h.start);answers.forEach(i=>h.end(i));h.s.cooperation.groupTick();
+      const own=h.s.cooperation.groups(h.c.id).find(x=>x.id===g.id)!;
+      assert.equal(own.state,'done');assert.equal(own.contract,undefined);
+      assert.equal(h.s.detail(h.c.id).sources.filter(s=>s.kind==='job_result'&&s.content.includes(g.id)).length,0);
+      assert.equal(h.s.detail(h.c.id).messages.filter(m=>m.content.startsWith('多人征询结果')).length,1);
+    }finally{h.close();}
+  }
+});
+
+test('private turns cannot create, adopt or select a standalone public consultation',()=>{
+  const h=setup();try{
+    h.send('私下核对',{privateTo:['codex']});
+    const host=h.start(h.admit().invocations[0]!);
+    assert.equal(h.s.contract(host.id).collectionOwnerPolicy,undefined);
+    for(const extra of [{},{standalone:true}])assert.throws(()=>h.s.cooperation.createGroup(h.c.id,{requestId:rid(),targets:['claude','reviewer'],question:'私下材料',...extra},host.id));
+    assert.throws(()=>h.s.obligations.tool(host.id,'obligation_open',{goal:'核对'},rid()));
+    assert.equal(h.s.cooperation.groups(h.c.id).length,0);
+  }finally{h.close();}
+});
+
+
+test('late binding cannot promote an ordinary result without confirmed teardown',()=>{
+  const h=setup();try{
+    const host=h.run(),question={requestId:rid(),targets:['claude','reviewer'],question:'核实签收',timeoutMs:1000};
+    const group=h.s.cooperation.createGroup(h.c.id,question,host.id).group;
+    assert.throws(()=>h.s.cooperation.createGroup(h.c.id,{...question,requestId:rid()},host.id),/已有一组/);
+    const [a,b]=h.admit().invocations.map(h.start);
+    h.end(a!,'succeeded','可采信回报');h.s.finish(b!.id,'succeeded','无退出凭据');
+    h.s.cooperation.groupTick();assert.equal(h.s.cooperation.groups(h.c.id)[0]!.state,'done');
+    h.s.obligations.tool(host.id,'obligation_open',{goal:'一次合格回报'},rid());
+    h.end(host);h.advance(1001);h.s.cooperation.groupTick();
+    const persisted=h.s.cooperation.groups(h.c.id)[0]!;
+    assert.equal(persisted.state,'timeout');assert.deepEqual(persisted.missing,[b!.memberId]);
+    assert.equal(persisted.results!.length,1);assert.equal(persisted.id,group.id);
+    const wake=h.s.detail(h.c.id).sources.find(s=>s.id===persisted.contract?.wakeSourceId)!;
+    assert.match(wake.content,/可采信回报/);assert.doesNotMatch(wake.content,/无退出凭据/);
+  }finally{h.close();}
+});
+
+test('an unrelated open room commitment and a restored member generation confer no implicit authority',()=>{
+  const h=setup();try{
+    const other=h.run('claude');
+    const foreign=(h.s.obligations.tool(other.id,'obligation_open',{goal:'另一个开放的委托'},rid()) as {obligation:Obligation}).obligation;
+    const host=h.run();
+    const g=h.s.cooperation.createGroup(h.c.id,{requestId:rid(),targets:['claude','reviewer'],question:'本轮参考'},host.id).group;
+    assert.equal(g.contract,undefined);assert(h.s.cooperation.groups(h.c.id)[0]!.ownerCandidate);
+    assert.equal(h.s.obligations.list(h.c.id).find(o=>o.id===foreign.id)!.state,'open');
+    h.end(other);
+    for(const participant of h.admit().invocations.map(h.start)) h.end(participant);
+    h.s.cooperation.groupTick();
+    h.s.updateConversation(h.c.id,{memberIds:['codex','claude'],defaultMemberId:'codex'});
+    h.s.updateConversation(h.c.id,{memberIds:['codex','claude','reviewer'],defaultMemberId:'codex'});
+    assert.throws(()=>h.s.obligations.tool(host.id,'obligation_open',{goal:'本轮自己的目标'},rid()),/可见性/);
+    assert.equal(h.s.obligations.list(h.c.id).length,1);
+    assert.equal(h.s.cooperation.groups(h.c.id)[0]!.contract,undefined);
+    assert.equal(h.s.cooperation.groups(h.c.id)[0]!.contract?.wakeSourceId,undefined);
+  }finally{h.close();}
+});

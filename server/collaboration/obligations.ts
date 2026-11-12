@@ -234,6 +234,13 @@ export class ObligationService {
       return o.currentSourceId === source.id && same(o.owner, member);
     }));
   }
+  collectionContext(id:string) {
+    const {source,member} = this.actor(id);
+    // Only the obligations actually linked to the primary consumed source can
+    // qualify. A separate open task owned by this member is never a fallback.
+    return this.forSource(source.id).filter(o=>!ended(o)).map(o=>this.owner(o))
+      .filter(o=>o.currentSourceId===source.id && same(o.owner,member));
+  }
   authorize(id: string, key: unknown, externalTool=false) {
     const {run, source, member} = this.actor(id);
     const o = this.owner(this.row(run.conversationId, value(key, '责任编号', 100)));
@@ -314,7 +321,9 @@ export class ObligationService {
     const o: Obligation = {id:randomUUID(), conversationId:run.conversationId, taskId, ownerRevision:t.ownerRevision, owner:member, goal,
       acceptance:acceptBy === 'user' ? '用户确认最终交付' : '向用户公开交付', acceptBy, ...(userAcceptance && {userAcceptance}), state:'open', originSourceId:source.id,
       originInvocationId:id, currentSourceId:source.id, reminderCount:0, revision:0, createdAt:now(), updatedAt:now()};
-    this.save(o,'opened'); this.link(source.id,o.id); return o;
+    this.save(o,'opened'); this.link(source.id,o.id);
+    if (this.store.contract(id).collectionOwnerPolicy === 'same-execution-v1') this.store.cooperation.adoptCollection(id,o.id);
+    return this.row(run.conversationId,o.id);
   }
   /** Called from inside the existing authorized A2A creation command. Throwing rolls back the delivery too. */
   bindDelegation(id: string, source: SourceWork, input: ObligationDelegation) {
@@ -486,7 +495,7 @@ export class ObligationService {
     if (o.parentId || o.activeGroupId || !['open', 'blocked'].includes(o.state)) {
       conflict('仅当前负责的开放或待复核主委托可登记持续征询。');
     }
-    const participants = group.targets.map(memberId => this.endpoint(o.conversationId, memberId));
+    const participants = group.ownerCandidate?.participants ?? group.targets.map(memberId => this.endpoint(o.conversationId, memberId));
     const groupLimit = this.store.roomRules.collection(o.id,o.conversationId,o.owner.memberId)?.maxCollections ?? 16;
     if ((o.groupCount ?? 0) >= groupLimit) {
       const reason = '此委托的 '+groupLimit+' 次持续征询额度已用尽；请依据已有结果交付或由用户复核。';

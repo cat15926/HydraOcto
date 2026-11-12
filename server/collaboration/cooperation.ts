@@ -151,7 +151,7 @@ export class CooperationService {
       d.status = 'consumed'; d.responseId = r.id; d.revision++; this.saveDelivery(d); this.changed(s.conversationId); this.port.event(s.conversationId, 'delivery.reconciled', { deliveryId: d.id, responseId: r.id });
     }
   }
-  groups(cid?: string) { return this.data.rows<MentionGroup>('cc_mention_groups', cid).map(g => ({ ...g, ...(g.state === 'collecting' && this.collectors.has(g.id) ? { results: [...this.collectors.get(g.id)!.values()], missing: g.targets.filter(t => !this.collectors.get(g.id)!.has(t)) } : {}) })); }
+  groups(cid?: string) { return this.data.rows<MentionGroup>('cc_mention_groups', cid).map(g => ({ ...g, ...(g.state === 'collecting' && !g.contract && this.collectors.has(g.id) ? { results: [...this.collectors.get(g.id)!.values()], missing: g.targets.filter(t => !this.collectors.get(g.id)!.has(t)) } : {}) })); }
   createGroup(cid: string, input: Record<string, unknown>, invocationId?: string) {
     const outcome = this.port.tx(() => {
       if (input.obligationId !== undefined && !invocationId) conflict('持续征询须由当前责任成员发起。');
@@ -159,7 +159,24 @@ export class CooperationService {
       const out = this.port.command(`multi-mention:${cid}:${stringField(input.requestId, '请求标识')}`, { input, invocationId }, () => {
         const i = invocationId ? this.store.invocation(invocationId) : undefined;
         if (i && (i.conversationId !== cid || this.groups(cid).some(g => g.state === 'collecting' && g.targets.includes(i.memberId)))) conflict('正在参与多人征询的成员不能再次创建征询组。');
-        const authorization = i && this.store.contract(i.id).roomRuleTurn?.kind === 'host' ? this.store.roomRules.collection(input.obligationId,cid,i.memberId) : undefined;
+        const policy = i && this.store.contract(i.id).collectionOwnerPolicy === 'same-execution-v1';
+        if (input.standalone !== undefined && (!policy || input.standalone !== true || input.obligationId !== undefined))
+          throw new AppError(400,'仅在当前支持的公开执行上可选 standalone=true；不能同时指定主责。');
+        let root = input.obligationId;
+        let candidate = false;
+        if (i && policy && !input.standalone && root === undefined) {
+          const responsibilities = this.store.obligations.collectionContext(i.id);
+          const roots = responsibilities.filter(o=>!o.parentId);
+          if (roots.length) {
+            if (roots.length !== 1 || roots[0]!.state !== 'open') conflict('本轮没有唯一可接回的开放主责。独立汇总可指定 standalone=true。');
+            root = roots[0]!.id;
+          } else {
+            const primary = this.store.visibility.primary(i.id);
+            candidate = !responsibilities.length && (primary.kind === 'user' || !!primary.taskRef);
+            if (candidate && this.candidateFor(i)) conflict('本轮已有一组等待主责登记的征询。请登记主责，或明确另发独立征询。');
+          }
+        }
+        const authorization = i && this.store.contract(i.id).roomRuleTurn?.kind === 'host' ? this.store.roomRules.collection(root,cid,i.memberId) : undefined;
         const [minimum, maximum] = authorization ? [1,authorization.members.length] as const : [2,8] as const;
         if (!Array.isArray(input.targets) || input.targets.length < minimum || input.targets.length > maximum || new Set(input.targets).size !== input.targets.length || input.targets.includes(i?.memberId)) throw new AppError(400, '征询需要 '+minimum+'–'+maximum+' 名不同的其他成员。');
         if (authorization && input.targets.some(t=>!authorization.members.includes(t))) throw new AppError(409,'目标成员不在本次收集的授权范围。');
@@ -171,12 +188,19 @@ export class CooperationService {
         const ttl = input.timeoutMs ?? window.defaultMs;
         if (!Number.isSafeInteger(ttl) || Number(ttl) < 1000 || Number(ttl) > window.maximumMs) throw new AppError(400, '征询期限须为 1–'+window.maximumMs/1000+' 秒。');
         const g: MentionGroup = { id: randomUUID(), conversationId: cid, sourceId: '', targets, question, context, state: 'collecting', createdAt: now(), deadline: new Date(this.clock() + Number(ttl)).toISOString(), revision: 1, ...(i ? { callerInvocationId: i.id, callbackTo: i.memberId } : {}) };
-        if (input.obligationId !== undefined) {
-          const contract = this.store.obligations.beginGroup(invocationId!, input.obligationId, g);
+        if (input.standalone === true) g.standalone = true;
+        if (candidate) {
+          g.ownerCandidate = {participants:targets.map(memberId=>{
+            const member=this.store.roomMembers.resolve(cid,memberId);
+            return {memberId,instanceId:member.id,generation:member.generation};
+          }),receipts:[]};
+        }
+        if (root !== undefined) {
+          const contract = this.store.obligations.beginGroup(invocationId!, root, g);
           if (typeof contract === 'string') return {blocked: contract};
           g.contract = contract; g.results = []; g.missing = [...targets];
         }
-        const instructions = g.contract ? '请直接回答当前问题。平台收集本次答复后会交回发起成员。' : '请直接回答当前问题。汇总不会唤回发起者；不得嵌套创建 multi_mention。';
+        const instructions = g.contract || g.ownerCandidate ? '请直接答复本次征询，平台将收集准确回报。' : '请直接回答当前问题。汇总不会唤回发起者；不得嵌套创建 multi_mention。';
         const source = this.store.admitSource({ conversationId: cid, kind: 'multi_mention', content: `多人征询 ${g.id}\n${question}\n${context}\n${instructions}`, requestedTargets: targets, ...(authorization && {roomRuleTurn:authorization.turn}), depth: i ? this.source(this.store.response(i.responseId).inputSourceIds[0]!).depth + 1 : 0, groupId: g.id, ...(i ? { parentInvocationId: i.id, authorMemberId: i.memberId } : {}) });
         if (source.depth > 8) conflict('征询达到协作深度上限。');
         g.sourceId = source.id; this.data.save('cc_mention_groups', g, 'group.created'); return { group: g };
@@ -185,7 +209,35 @@ export class CooperationService {
       return { ...out.result, replayed: out.replayed };
     });
     if (!outcome.group) throw new AppError(409, outcome.blocked!, 'collection_budget_exhausted');
-    return {group: outcome.group, replayed: outcome.replayed};
+    const group = outcome.replayed && outcome.group.ownerCandidate ? this.data.get<MentionGroup>('cc_mention_groups',outcome.group.id) : outcome.group;
+    return {group, replayed: outcome.replayed};
+  }
+
+  private candidateFor(run:CollaborationInvocation) {
+    return this.data.rows<MentionGroup>('cc_mention_groups',run.conversationId)
+      .find(g=>g.ownerCandidate && g.callerInvocationId===run.id && g.callbackTo===run.memberId);
+  }
+
+  // Called inside the original invocation's root-creation transaction. The participants
+  // and signed receipts were frozen before dispatch. Never create a second invitation.
+  adoptCollection(id:string,root:string) {
+    const run=this.store.invocation(id), group=this.candidateFor(run);
+    if (!group?.ownerCandidate) return;
+    const candidate=group.ownerCandidate, source=this.source(group.sourceId);
+    if (source.kind!=='multi_mention' || source.groupId!==group.id || source.parentInvocationId!==id || source.authorMemberId!==run.memberId)
+      conflict('原征询与本次执行身份不符。');
+    const contract=this.store.obligations.beginGroup(id,root,group);
+    if (typeof contract==='string') return;
+    group.contract=contract;
+    group.results=candidate.receipts;
+    group.missing=group.targets.filter(member=>!group.results!.some(r=>r.memberId===member));
+    delete group.ownerCandidate;
+    // A plain summary may already have been published. The durable join reuses signed
+    // receipts and owns precisely one wake, even across a restart at this point.
+    if (group.state==='cancelled'||group.state==='lost') this.store.obligations.settleGroup(group);
+    else { group.state='collecting'; delete group.finishedAt; }
+    group.revision++;
+    this.data.save('cc_mention_groups',group,'group.bound');
   }
 
   isDurableGroupSource(source: SourceWork) {
@@ -203,12 +255,13 @@ export class CooperationService {
   observeGroupFinish(source: SourceWork, run: CollaborationInvocation) {
     if (source.kind !== 'multi_mention' || !source.groupId || source.withdrawnAt) return;
     const g = this.data.get<MentionGroup>('cc_mention_groups', source.groupId);
-    if (!g.contract || g.state !== 'collecting' || this.clock() >= Date.parse(g.deadline) ||
+    const binding = g.contract ?? g.ownerCandidate;
+    if (!binding || (g.state !== 'collecting' && !(g.ownerCandidate && g.state==='done')) || this.clock() >= Date.parse(g.deadline) ||
         g.sourceId !== source.id || g.conversationId !== run.conversationId ||
         !['succeeded','failed'].includes(run.status) || run.teardown !== 'confirmed' ||
         run.acceptance !== 'accepted' || (run.cancelRevision ?? 0) !== 0 ||
-        g.results?.some(r => r.memberId === run.memberId)) return;
-    const bound = g.contract.participants.find(p => p.memberId === run.memberId);
+        (g.ownerCandidate?.receipts ?? g.results)?.some(r => r.memberId === run.memberId)) return;
+    const bound = binding.participants.find(p => p.memberId === run.memberId);
     const contract = this.store.contract(run.id);
     if (contract.primarySourceId !== source.id || contract.visibility || !bound || !run.roomMember ||
         run.roomMember.id !== bound.instanceId || run.roomMember.generation !== bound.generation ||
@@ -221,9 +274,9 @@ export class CooperationService {
     const response = this.store.response(run.responseId);
     if (!receipt || response.invocationId !== run.id || response.memberId !== run.memberId ||
         response.status !== run.status || !response.content.trim()) return;
-    g.results ??= [];
-    g.results.push({memberId:run.memberId, responseId:run.responseId, invocationId:run.id, status:run.status as 'succeeded'|'failed', content:response.content});
-    g.missing = g.targets.filter(member => !g.results!.some(r => r.memberId === member));
+    const results=g.ownerCandidate?.receipts ?? (g.results ??= []);
+    results.push({memberId:run.memberId, responseId:run.responseId, invocationId:run.id, status:run.status as 'succeeded'|'failed', content:response.content});
+    if (g.contract) g.missing = g.targets.filter(member => !results.some(r => r.memberId === member));
     g.revision++;
     this.data.save('cc_mention_groups', g, 'group.receipt');
   }
@@ -270,7 +323,7 @@ export class CooperationService {
   groupTick() {
     this.port.tx(() => { for (const g of this.data.rows<MentionGroup>('cc_mention_groups')) {
       if (g.state !== 'collecting') continue;
-      if (g.contract) { this.tickDurable(g); continue; }
+      if (g.contract) { this.collectors.delete(g.id); this.tickDurable(g); continue; }
       const collector = this.collectors.get(g.id);
       if (!collector) { g.state = 'lost'; g.missing = g.targets; }
       else if (Date.parse(g.deadline) <= this.clock()) { g.state = 'timeout'; g.results = [...collector.values()]; g.missing = g.targets.filter(t => !collector.has(t)); }
