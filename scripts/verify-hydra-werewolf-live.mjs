@@ -19,20 +19,20 @@ await mkdir(base,{recursive:true,mode:0o700});
 const dir=await mkdtemp(join(base,'werewolf-')),workspace=join(dir,'workspace'),profile=join(dir,'cli');
 await Promise.all([mkdir(workspace),mkdir(profile)]);
 const {selected,account}=await isolatedClaude(resolve(process.env.HYDRA_CONFIG_ROOT||'.'),profile);
-const maxCalls=200,maxMinutes=70,deadline=Date.now()+maxMinutes*60_000;
-if(mode==='--check-config'){console.log({mode,model:selected.model,maxCalls});process.exit(0);}
+const maxCalls=200,maxMinutes=95,perProcessMs=300_000,deadline=Date.now()+maxMinutes*60_000;
+if(mode==='--check-config'){console.log({mode,model:selected.model,maxCalls,maxMinutes,perProcessMs});process.exit(0);}
 const calls=[], projections=[], observations=[], seals=new Set(), checks={};
 const sourceDir=fileURLToPath(new URL('../',import.meta.url));
 const sourceHash=createHash('sha256');
 const paths=execFileSync('git',['ls-files','-z','server','shared','scripts/verify-hydra-werewolf-live.mjs','scripts/hydra-test-native.mjs','package-lock.json'],{cwd:sourceDir}).toString().split('\0').filter(Boolean);
 for(const path of paths)sourceHash.update(path).update('\0').update(readFileSync(join(sourceDir,path)));
 const source={commit:execFileSync('git',['rev-parse','HEAD'],{cwd:sourceDir}).toString().trim(),sha256:sourceHash.digest('hex')};
-const proof={passed:false,mode,model:selected.model,source,maxCalls,maxMinutes,checks,calls,userSubmissions:0,userAdvances:0};
+const proof={passed:false,mode,model:selected.model,source,maxCalls,maxMinutes,perProcessMs,checks,calls,userSubmissions:0,userAdvances:0};
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const players=Array.from({length:12},(_,i)=>'seat'+String(i+1).padStart(2,'0'));
 const roster=['host',...players];
 const roomRequest='@主持 请组织其余十二名成员打一局标准十二人预女猎白，由你负责到终局。大家自主决定夜间行动、白天公开观点和投票，我全程旁观，不查看身份、查验原件，也不参与推进。按本房既定规则结算后，向我报告真实胜方和关键公开经过。';
-const native=createCollaborationRuntime({privateRoots:[join(dir,'db')],timeoutMs:180_000});
+const native=createCollaborationRuntime({privateRoots:[join(dir,'db')],timeoutMs:perProcessMs});
 let app,url,cid,sideId,sideMember,sideStart,restarted=false,pause=false,budgetStopped=false;
 const reservations=new Set();
 async function post(path,body){
@@ -97,7 +97,7 @@ try{
  await boot();const store=app.collaborationStore;
  store.saveAccount(account);
  for(const id of roster)store.saveMember({id,name:id==='host'?'主持':id,carrier:'claude-cli',accountId:account.id,model:selected.model,modelBinding:'override',accountBinding:'override',enabled:true,
-  instructions:id==='host'?'本房约定：受托主持十二人局时以现有主委托为单位，用规则工具读取本场事实，向公开 eligible 名单的全体同时收取本阶段决策，征询应挂在同一 obligationId，留足 600000 毫秒。玩家收到邀请后需通过 game_read 和 game_act 独立登记。收到真实汇总再结算该 epoch；新阶段自行组织，至真实终局公开交付。':'依据本轮委托独立作出选择。收到本房的游戏邀请时，查看 game_read 并按当前阶段和合法字段使用 game_act；成功即结束本轮。'});
+  instructions:id==='host'?'本房约定：受托主持十二人局时以现有主委托为单位，用规则工具读取本场事实，向公开 eligible 名单的全体同时收取本阶段决策，征询应挂在同一 obligationId，使用房间默认收集期限。玩家收到邀请后需通过 game_read 和 game_act 独立登记。收到真实汇总再结算该 epoch；新阶段自行组织，至真实终局公开交付。':'依据本轮委托独立作出选择。收到本房的游戏邀请时，查看 game_read 并按当前阶段和合法字段使用 game_act；成功即结束本轮。'});
  const room=await post('/api/conversations',{requestId:randomUUID(),title:'标准十二人狼人杀',memberIds:roster,defaultMemberId:'host'});
  cid=room.conversation.id;
  await post('/api/conversations/'+cid+'/messages',{requestId:randomUUID(),content:roomRequest});
@@ -120,7 +120,7 @@ try{
    idle=Date.now();
   }
   if(!running&&Date.now()-idle>18_000)throw Error('No next execution / durable wait after member exit');
-  if(Date.now()-idle>4*60_000)throw Error('No progress for four minutes');
+  if(Date.now()-idle>perProcessMs+60_000)throw Error('No progress after the maximum carrier timeout');
   await sleep(800);
  }
  const current=app.collaborationStore,details=await (await fetch(url+'/api/conversations/'+cid)).json();
