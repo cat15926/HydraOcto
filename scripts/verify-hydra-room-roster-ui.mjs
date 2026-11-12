@@ -60,9 +60,10 @@ async function exercise(width) {
     assert.equal(await page.$eval(input,t=>t.value),'保留草稿');
     await page.click('.cc-mention-button');
     const choices=await labels('.cc-mention-menu button strong');assert.deepEqual(choices.toSorted(),selected.toSorted());
-    await page.click(input);
+    await page.keyboard.press('Escape');await check(()=>!document.querySelector('.cc-mention-menu'));
     const privateButton='.cc-private-composer>button';
     await page.click(privateButton);
+    await page.waitForSelector('.cc-private-composer input[type=checkbox]');
     const recipients=await page.$$('.cc-private-composer input[type=checkbox]');
     assert.equal(recipients.length,MAX_ROOM_MEMBERS);
     await recipients[0].click();
@@ -79,10 +80,10 @@ async function exercise(width) {
     assert.equal(message.content,'保留草稿');assert.equal(message.visibility?.memberIds.length,1);assert.equal(message.attachmentIds.length,1);
     assert(room.memberIds.includes(message.visibility.memberIds[0]));
     assert.deepEqual(room.memberIds.map(id=>store.members().find(m=>m.id===id).name).toSorted(),selected.toSorted());
-    await page.click('button[aria-label="工作台"]');
+    await page.waitForSelector('button[aria-label="工作台"]',{visible:true});await page.click('button[aria-label="工作台"]');
     await page.click('.cc-workspace-add');await page.click('[data-workspace-tool="project"]');
     const existing='button[aria-label="设置会话成员与默认成员"]';
-    await page.click(existing);await page.waitForSelector(form);
+    await page.waitForSelector(existing,{visible:true});await page.click(existing);await page.waitForSelector(form);
     assert.equal(await page.$$eval(checks,items=>items.filter(i=>i.checked).length),MAX_ROOM_MEMBERS);
     assert(await page.$$eval(checks,items=>items.filter(i=>!i.checked).every(i=>i.disabled)));
     const changeDefault=room.memberIds.find(id=>id!==defaultId);
@@ -92,8 +93,11 @@ async function exercise(width) {
     await page.click('.cc-workspace-header button[aria-label="关闭工作台"]');
     // Return to a new draft from the sidebar; the old roster doesn't become the next room's default.
     if(width<760)await page.click('button[aria-label="打开会话列表"]');
-    const next=await check(()=>[...document.querySelectorAll('aside button')].find(b=>b.textContent.includes('新的协作')));
-    await next.asElement().click();
+    await check(()=>{
+      const next=document.querySelector('.cc-new-button'),r=next.getBoundingClientRect();
+      return !next.disabled && next.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));
+    });
+    await page.click('.cc-new-button');
     await check(s=>document.querySelector(s)?.textContent.includes('1'),pick);
     assert.equal(await page.$eval(input,t=>t.value),'');
     assert.equal(await page.$('.cc-draft-file'),null);

@@ -119,3 +119,5 @@
 
 .cc-obligation-group {min-width:0;border-bottom:1px solid var(--border, #d8e1d4);padding-bottom:.35rem}
 .cc-obligation-group p {white-space:pre-wrap}
+
+.cc-mention-menu { max-height: min(42dvh, 22rem); overflow-y: auto; }
