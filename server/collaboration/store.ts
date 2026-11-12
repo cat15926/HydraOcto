@@ -538,7 +538,7 @@ export class CollaborationStore {
       !conversation.importedFor && !input.visibility && !input.excerptRefs?.length && !input.publicStatement &&
       !input.crossRef && !input.actionRef && !input.projectWork && !input.projectReview && handoffPolicy !== 'candidate-v1';
     const packageReplyReceipt = coordinate && (parent ? this.contract(parent.id).packageReplyReceipt : origin ? origin.packageReplyReceipt : true);
-    const roomRuleTurn = coordinate && (input.roomRuleTurn ?? (origin?.roomRuleTurn?.kind === 'host' || (input.kind === 'user' && conversation.memberIds.length === 13) ? {kind:'host' as const} : undefined));
+    const roomRuleTurn = coordinate ? (input.roomRuleTurn ?? (origin?.roomRuleTurn?.kind === 'host' || (input.kind === 'user' && conversation.memberIds.length === 13) ? {kind:'host' as const} : undefined)) : undefined;
     const externalMember = coordinate && input.requestedTargets.length===1 ? this.roomMembers.resolve(conversation.id,input.requestedTargets[0]!) : undefined;
     let externalScope;
     if (roomRuleTurn?.kind!=='player' && externalMember?.active && !parent) {
