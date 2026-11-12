@@ -141,4 +141,3 @@ finally{
   await app?.close();const out=join(dir,'result.json');
   await writeFile(out,JSON.stringify(proof,null,2)+'\n',{flag:'wx',mode:0o600});console.log(failure?'failed':'passed',out);
 }
-
