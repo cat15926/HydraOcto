@@ -49,6 +49,7 @@ function assess(d) {
   assert.equal(root?.state,'delivered','The original commitment was not delivered');
   const answer=d.messages.find(m=>m.id===root.delivery?.messageId);
   assert(answer && answer.memberId===root.owner.memberId && answer.content.includes(token),'Missing owner delivery for the requested object');
+  assert(root.delivery?.summary && answer.content.includes(root.delivery.summary),'The public reply must contain the registered delivery verbatim');
   assert.equal(d.messages.filter(m=>m.author==='user').length,1);
   assert(d.invocations.every(i=>i.acceptance==='accepted' && i.teardown==='confirmed' && i.nativeSessionId));
   Object.assign(evidence,{root:root.id,final:answer.id,answer:answer.content,runs:d.invocations.map(i=>({id:i.id,instance:i.roomMember?.id,status:i.status,teardown:i.teardown}))});
