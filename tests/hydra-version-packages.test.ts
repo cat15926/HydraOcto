@@ -397,7 +397,7 @@ test('an older frozen execution or a root without a package keeps the literal-on
       const result=requestReceipt(f);assert.equal(result.finalReplyMarker,undefined);
       f.finish(f.id,receiptSummary);
       assert.equal(f.store.obligations.list(f.room.id)[0]!.state,'delivered');
-      assert.equal(f.store.response(f.store.invocation(f.id).responseId).carrierContentDigest,undefined);
+      assert.equal(Boolean(f.store.response(f.store.invocation(f.id).responseId).carrierContentDigest), !frozen);
     }finally{f.close();}
   }
 });

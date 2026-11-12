@@ -88,8 +88,8 @@ export function obligationTools(scope: ObligationToolScope) {
   if (scope.finalTextPolicy==='registered-v1') {
     const index=tools.findIndex(t=>t.name==='obligation_deliver');
     const deliver=tools[index]!;
-    tools[index]={...deliver,description:deliver.description+' For a requested directly usable deliverable or exact output format, set publication to exact and put the ENTIRE final public text, including any required evidence, in summary. On verified successful exit the platform publishes that text verbatim with your authorship. The closing model utterance is not part of this exact delivery.',
-      inputSchema:object({obligationId:text,summary:text,publication:{type:'string',enum:['exact']}},['obligationId','summary'])};
+    tools[index]={...deliver,description:'Submit your ENTIRE final public body, with all evidence the user requested, in summary (up to 20000 characters). By default on an ordinary commitment, and whenever publication=exact, the platform publishes that exact body after verified release. No extra prose is added. For an edition-bound package, follow its returned receipt unless you choose exact. To add notes in your own closing message choose publication=reply and include summary verbatim.',
+      inputSchema:object({obligationId:text,summary:text,publication:{type:'string',enum:['exact','reply']}},['obligationId','summary'])};
   }
   if(scope.deliveryEvidencePolicy==='source-grounded-v1') {
     for(const [i,tool] of tools.entries()) {

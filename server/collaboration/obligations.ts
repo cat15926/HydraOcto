@@ -203,6 +203,14 @@ export class ObligationService {
     const rows = this.store.db.prepare('SELECT o.value FROM cc_obligation_sources s JOIN cc_obligations o ON o.id=s.obligation_id WHERE s.source_id=?').all(id) as {value:string}[];
     return rows.map(r => JSON.parse(r.value));
   }
+  /** A successful closing utterance is not the public body in this explicit delivery mode. */
+  hasPendingPublicText(run:CollaborationInvocation) {
+    const c=this.store.contract(run.id);
+    if(!c.primarySourceId || c.finalTextPolicy!=='registered-v1' || c.visibility) return false;
+    return this.forSource(c.primarySourceId).some(o=>o.state==='delivery_pending' && !o.parentId &&
+      o.currentSourceId===c.primarySourceId && o.conversationId===run.conversationId && o.owner.instanceId===run.roomMember?.id &&
+      o.delivery?.publication==='exact' && o.delivery.invocationId===run.id);
+  }
   /** Adoption uses the applied TaskHandoff and the actual task-source delivery. */
   private owner(o: Obligation) {
     if (!o.taskId || ended(o)) return o;
@@ -382,9 +390,10 @@ export class ObligationService {
     this.opinions.assertDelivery(o);
     const packageEdition = this.store.versionPackages.deliveryProof(o.id);
     const c = this.store.contract(id);
-    if(args.publication!==undefined && (args.publication!=='exact' || c.finalTextPolicy!=='registered-v1'))
+    if(args.publication!==undefined && ((!['exact','reply'].includes(String(args.publication))) || c.finalTextPolicy!=='registered-v1'))
       conflict('本次冻结的执行契约不支持指定交付正文。');
-    const exact=args.publication==='exact';
+    const exact=c.finalTextPolicy==='registered-v1' && (args.publication==='exact' ||
+      (args.publication===undefined && !packageEdition));
     const finalReplyMarker = !exact && packageEdition && c.coordinationPolicy && c.packageReplyReceipt
       ? '[delivery:' + randomUUID() + ']' : undefined;
     o.delivery = {invocationId:id,summary:exact ? this.publicText(args.summary) : value(args.summary,'最终交付'),...(exact && {publication:'exact' as const}),...(packageEdition && {packageEdition}),...(finalReplyMarker && {finalReplyMarker})}; o.state = 'delivery_pending';
@@ -657,7 +666,7 @@ export class ObligationService {
           ? o.delivery.summary : marker && o.delivery.packageEdition && this.store.contract(run.id).packageReplyReceipt
           ? expandDeliveryReply(message.content,marker,o.delivery.summary) : message.content;
         if (!content.includes(o.delivery.summary)) conflict('公开回复未包含登记的交付内容。');
-        if (content !== message.content) this.store.recordDeliveryReply(message,content);
+        if (content !== message.content) this.store.recordDeliveryReply(message,content,o.delivery.publication==='exact');
         o.delivery.messageId = message.id;
         if (o.acceptBy === 'delivery') this.finishTask(o);
         o.state = o.acceptBy === 'user' ? 'awaiting_acceptance' : 'delivered';

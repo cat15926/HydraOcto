@@ -71,7 +71,10 @@ test('旁观读取公开主责及其交付，私聊不留痕迹，撤回公开�
       assert.ok(done.messages.some(message => message.id === factor.messageId));
     }
     for (const secret of [rootId, issued.factorId, 'codex', '私密处理', '查验原件']) assert.ok(!JSON.stringify(done).includes(secret));
-    await post(path + '/messages/' + receipt.id + '/visibility', { expectedRevision: 1, action: 'delete' });
+    const ownerView=await (await fetch(url+path)).json();
+    const ownerReceipt=ownerView.messages.find((m:{id:string})=>m.id===receipt.id);
+    assert(ownerReceipt?.revision);
+    await post(path + '/messages/' + receipt.id + '/visibility', { expectedRevision: ownerReceipt.revision, action: 'delete' });
     const redacted = await observe();
     assert.deepEqual(redacted.progress, []);
     assert.ok(!JSON.stringify(redacted).includes(receipt.id));

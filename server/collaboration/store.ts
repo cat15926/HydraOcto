@@ -36,6 +36,7 @@ import { migrateObligations } from './obligations.js';
 import { OrdinaryTaskService } from './tasks.js';
 
 const id = () => randomUUID();
+const pendingPublicText='成员已提交交付正文，结果见原委托。';
 const hash = (v: unknown) => createHash('sha256').update(canonical(v)).digest('hex');
 const terminal = new Set(['succeeded', 'failed', 'interrupted', 'cancelled']);
 const supported = Object.keys(carrierNames);
@@ -243,7 +244,7 @@ export class CollaborationStore {
     const coordinationPolicy = roomMember && !requiresFreshMemberContext(memberContext) ? source.coordinationPolicy : undefined;
     const externalScope = snapshotOrigin==='admission' && source.roomRuleTurn?.kind!=='player' && obligationPolicy && coordinationPolicy && source.externalScope?.instanceId === roomMember?.id ? source.externalScope : undefined;
     const deliveryEvidencePolicy=snapshotOrigin==='admission' && coordinationPolicy ? source.deliveryEvidencePolicy : undefined;
-    const finalTextPolicy=deliveryEvidencePolicy && obligationPolicy && snapshotOrigin==='admission' ? source.finalTextPolicy : undefined;
+    const finalTextPolicy=obligationPolicy && (!coordinationPolicy || deliveryEvidencePolicy) && !source.projectReview && !requiresFreshMemberContext(memberContext) && snapshotOrigin==='admission' ? source.finalTextPolicy : undefined;
     return { ...(finalTextPolicy && {finalTextPolicy}), ...(deliveryEvidencePolicy && {deliveryEvidencePolicy}), ...(externalScope && {externalScope}), ...(coordinationPolicy && source.roomRuleTurn && {roomRuleTurn: source.roomRuleTurn}), ...(coordinationPolicy && source.packageReplyReceipt && {packageReplyReceipt:true as const}), ...(coordinationPolicy && {coordinationPolicy}), ...(roomMember && !source.visibility && !source.publicStatement && !source.projectWork && !source.projectReview && source.handoffPolicy && {handoffPolicy:source.handoffPolicy}), ...(roomMember && canRequestPublicStatement(source) && {mayRequestPublicStatement: true as const}), ...(memberContext && { memberContext }), ...(roomMember && {roomMember}), ...(obligationPolicy && {obligationPolicy: true as const, continuationPolicy: source.continuationPolicy}), id: id(), invocationId: i.id, primarySourceId: source.id, ...((publicProject || peerBrowser) && {projectBrowser:true as const}), ...(publicProject ? {webResearch:true as const,projectPreview:true as const} : {}),
       ...((publicProject || source.projectCiRepair) && projectWork ? {gitDelivery:true as const} : {}), ...(mayProposeProject ? { mayProposeProject: true as const } : {}), ...(projectWork ? { projectWork: true as const, projectContinuity: true as const, mayRequestProjectReview:true as const, mayExportProjectFile:true as const, mayRunProjectNpmTest:true as const, ...(projectNpmChecks ? {projectNpmChecks:true as const} : {}) } : {}), ...(snapshotOrigin === 'admission' && source.projectReview ? {projectReview: structuredClone(source.projectReview)} : {}), behaviorVersion: '0.11.0', ...(snapshotOrigin === 'admission' && { crossDisclosure: 'excerpt-only-v1' as const }), visibility: source.visibility, visibilityEpoch: this.visibility.epoch(), materialDigest: textDigest(JSON.stringify({ content: this.visibility.sourceContent(source), refs: source.excerptRefs, visibility: source.visibility })), memorySnapshot: source.roomRuleTurn?.kind==='player' || requiresFreshMemberContext(memberContext) ? [] : this.memory.snapshot(i.conversationId, i.memberId, source.visibility), routingDecisionId: routing?.id, routingPolicyVersion: routing?.policyVersion ?? 'a2a-exact-v1', contextPolicyVersion: 'bounded-visible-context-v5', toolPolicyVersion: 'cross-action-v1', adapterCapabilityVersion: 'native-continuity-v1', memberSnapshot: structuredClone(i.member), accountMetadataSnapshot: this.accountFor(i.id), workspaceScope: detail.conversation.workspaceGrant?.path ?? this.options.workspace ?? '', ...(detail.conversation.workspaceGrant ? { workspaceGrant: structuredClone(detail.conversation.workspaceGrant) } : {}), roster: this.members().filter(m => detail.conversation.memberIds.includes(m.id)), historyCutoff: cutoff, historyMessageIds, historySnapshot, historySourceSnapshots, sourceRevision: source.revision, sourceDigest: hash(source.content), ...(source.taskRef ? { taskSnapshot: this.tasks.getTask(source.taskRef.taskId) } : {}), ...(source.reviewRef ? { reviewSnapshot: this.artifacts.review(source.reviewRef.reviewId) } : {}), createdAt: now(), snapshotOrigin };
   }
@@ -508,10 +509,10 @@ export class CollaborationStore {
     const c = this.get<Conversation>('cc_conversations', value.conversationId); c.updatedAt = value.createdAt; this.put('cc_conversations', c);
   }
   /** Called inside settlement after the successful public run and its exact edition have been verified. */
-  recordDeliveryReply(message: ConversationMessage, rendered: string) {
+  recordDeliveryReply(message: ConversationMessage, rendered: string, exact=false) {
     const response = this.response(message.responseId!);
-    if (response.content !== message.content || response.carrierContentDigest) throw new AppError(409, '原执行回复已变化，无法登记此次交付。');
-    response.carrierContentDigest = hash(response.content);
+    if (response.content !== message.content || (response.carrierContentDigest && (!exact || response.content!==pendingPublicText))) throw new AppError(409, '原执行回复已变化，无法登记此次交付。');
+    response.carrierContentDigest ??= hash(response.content);
     response.content = rendered;
     this.put('cc_responses',response);
     message.content = rendered;
@@ -556,7 +557,10 @@ export class CollaborationStore {
       (input.kind==='user' || !!parent || !!origin) &&
       (!parent || this.contract(parent.id).deliveryEvidencePolicy==='source-grounded-v1') &&
       (!origin || origin.deliveryEvidencePolicy==='source-grounded-v1');
-    const finalText=grounded && (!parent || this.contract(parent.id).finalTextPolicy==='registered-v1') &&
+    const publicProjectDelivery=continuation && !conversation.importedFor && !input.visibility && !input.excerptRefs?.length &&
+      !input.publicStatement && !input.crossRef && !input.actionRef && !input.projectReview &&
+      ((input.kind==='user' && !!input.projectWork) || (input.kind==='job_result' && !!origin?.projectWork));
+    const finalText=(grounded || publicProjectDelivery) && (!parent || this.contract(parent.id).finalTextPolicy==='registered-v1') &&
       (!origin || origin.finalTextPolicy==='registered-v1');
     const source: SourceWork = { ...sourceInput, ...(finalText && {finalTextPolicy:'registered-v1' as const}), ...(grounded && {deliveryEvidencePolicy:'source-grounded-v1' as const}), ...(externalScope && {externalScope}), ...(roomRuleTurn && {roomRuleTurn}), ...(packageReplyReceipt && {packageReplyReceipt:true as const}), ...(coordinate && {coordinationPolicy:'decision-material-v1' as const}), handoffPolicy, ...(personal && { memberContextPolicy: 'member-context-v1' as const }), ...(continuation && {continuationPolicy: 'durable-v1' as const}), ...(instanceBound && {roomPolicy: 'instance-v1' as const}), id: input.id ?? id(), requestedTargets: [...new Set(input.requestedTargets)], bindingState: input.bindingState ?? 'bound', revision: 1, sequence, createdAt: now(), enqueuedAt: new Date(Math.max(Date.now(), ...this.rows<SourceWork>('cc_sources').slice(-1).map(s => Date.parse(s.enqueuedAt ?? s.createdAt) + 1))).toISOString(), priority: 'normal', orderRevision: 1 };
     this.db.prepare('INSERT INTO cc_sources VALUES(?,?,?,?)').run(source.id, source.conversationId, sequence, JSON.stringify(source));
@@ -982,6 +986,11 @@ export class CollaborationStore {
       if (status === 'interrupted') { i.interruptionCause ??= (i.cancelRevision ?? 0) > 0 ? 'user_cancel' : interruptionCause ?? 'service_stop'; i.recoveryState = 'pending'; }
       if (recoveryId) { i.recoveryState = 'resolved'; i.resolutionId = recoveryId; }
       this.saveInvocation(i); this.settleSession(i);
+      if(status==='succeeded' && this.obligations.hasPendingPublicText(i)) {
+        // Late teardown, a superseded edition or cancellation must never publish an unverified body.
+        // Keep the original replay identity without introducing the closing prose into room history.
+        response.carrierContentDigest=hash(content);content=pendingPublicText;
+      }
       response.status = status; response.content = content; response.finishedAt = i.finishedAt; this.put('cc_responses', response);
       if (recoveryId) {
         const message = this.rows<ConversationMessage>('cc_messages', 'WHERE response_id=?', [response.id])[0];

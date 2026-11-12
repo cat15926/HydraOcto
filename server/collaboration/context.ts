@@ -155,7 +155,7 @@ export function assembleContext(input: ContextInput): ContextAssembly {
     ? '\n综合多份材料或同伴回报时，区分原件直接支持的事实、成员的判断和仍缺的证据。说明关键结论依据哪份材料或谁的回报。对相互冲突的部分，只陈述共同可证实的范围，指出分歧和待核实之处。若正式批准或新版原件明确覆盖某个对象和用途，可以在该范围给出肯定结论，说明覆盖范围或已替代的旧依据。备选方案写明成立条件，缺少依据时注明待核实；材料没有提到限制，授权仍未知。只有取得对应操作的回执才报告已执行。交付摘要和最终答复中的补充说明都遵循这些边界。\n'
     : '';
   const exactTextHint=input.finalTextPolicy && obligations.includes('obligation_deliver')
-    ? '\n向用户交付可直接使用的清单、表格或限定格式的正文时，在 obligation_deliver 中设 publication=exact，把完整、最终可发布的内容填入 summary。逐项提供用户要求的依据；没有依据就说明缺口。平台在本次执行成功退出、核验完成后原样交付，成员无需再抄写或添加说明。\n' : '';
+    ? '\n交付时把用户要收到的完整正文填入 obligation_deliver.summary；普通主委托默认使用该原文。用户要求特定格式时设 publication=exact，逐项列出用户要求的依据，没有依据就说明缺口。平台在成功退出并核验完成后原样交付，无需重新抄写。若有更正，应在登记前完成。需另外附注时可选 publication=reply，并把登记摘要原样列入最终发言。\n' : '';
   const coordinationHint = input.coordinationPolicy
     ? '\n多人意见有最低人数、截止时间或异议核查约定时，从原委托调用 opinion_open。受邀评审用 opinion_submit 登记意见，负责人用 opinion_read 核对意见版本并锁定，按约定核查异议后决定；达到人数不能自动结案。制作依赖多份资料的交付时，用 package_ 工具将原委托、实际使用的资料版本和交付验收关联起来。资料改版时只重验受影响的产物，然后再汇编交付。\n' + (input.packageReplyReceipt ? '资料包交付时，若 obligation_deliver 返回 finalReplyMarker，优先把它原样放在最终公开答复的独立一行，可在上下行补充说明。平台会当场展开已登记的 summary。也可直接逐字贴回摘要，宜写简短。\n' : '') : '';
   const handoffHint = obligations.includes('obligation_handoff')

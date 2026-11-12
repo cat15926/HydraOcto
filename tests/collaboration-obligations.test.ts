@@ -429,6 +429,7 @@ test('the exact public body is the member-authored receipt, published once after
     assert.deepEqual(h.tool(run,'obligation_deliver',args,'publish'),h.tool(run,'obligation_deliver',args,'publish'));
     const carrier='已准备好清单。';
     h.store.finish(run,'succeeded',carrier);assert.equal(h.read(root).state,'delivery_pending');
+    assert(!h.store.detail(h.cid).messages.some(m=>m.content===body || m.content===carrier));
     h.store.recordEvidence(run,{kind:'process_exit',detail:{confirmed:true,code:0}});h.store.obligations.reconcile();
     assert.equal(h.read(root).state,'awaiting_acceptance');
     const msg=h.store.detail(h.cid).messages.find(m=>m.id===h.read(root).delivery?.messageId)!;
@@ -440,7 +441,7 @@ test('the exact public body is the member-authored receipt, published once after
   }finally{h.owner.close();}
 });
 
-test('exact publication is opt-in, frozen to the source, and cannot close a cancelled delivery', () => {
+test('separate closing prose is opt-in, exact publication is frozen to the source, and cannot close a cancelled delivery', () => {
   for(const mode of ['ordinary','legacy','cancel'] as const) {
     const h=setup();try {
       const source=h.store.send(h.cid,{requestId:randomUUID(),content:'交付正文。'}).source;
@@ -451,7 +452,7 @@ test('exact publication is opt-in, frozen to the source, and cannot close a canc
         const spec=runtimeTools(h.store.contract(run)).find(t=>t.name==='obligation_deliver')!;
         assert(!('publication' in spec.inputSchema.properties));continue;
       }
-      if(mode==='ordinary'){h.tool(run,'obligation_deliver',args);h.finish(run,'不同的正文');}
+      if(mode==='ordinary'){h.tool(run,'obligation_deliver',{...args,publication:'reply'});h.finish(run,'不同的正文');}
       else {
         h.tool(run,'obligation_deliver',{...args,publication:'exact'});
         h.store.cancel(run);h.store.recordEvidence(run,{kind:'process_exit',detail:{confirmed:true}});
