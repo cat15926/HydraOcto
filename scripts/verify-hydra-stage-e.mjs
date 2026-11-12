@@ -16,6 +16,8 @@ const cases = {
   '03-passed': ['ci-live','--live','passed'],
   '03-failed': ['ci-live','--live','failed'],
   '03-expired': ['ci-live','--live','expired'],
+  '04-standard': ['werewolf-live','--normal'],
+  '04-restart': ['werewolf-live','--restart'],
   '05-accepted': ['shift-live'],
   '05-declined-restart': ['shift-live','--decline-first','--restart-on-accept'],
   '06-opinions': ['decision-material-live','opinions'],
@@ -24,6 +26,8 @@ const cases = {
   '07-relocation': ['decision-material-live','relocation'],
   '08-shared': ['cross-excerpt-live'],
   '08-revoked': ['cross-excerpt-live','--revoke-before-dispatch'],
+  '09-booked': ['external-live'],
+  '09-unknown-restart': ['external-live','--lost-receipt'],
   '10-and-control': ['research-live'],
 };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -77,8 +81,53 @@ async function runCase(name,base,source) {
   return record.passed;
 }
 
+async function audit(base, source) {
+  // Never infer a pass from a log, another checkout or an earlier failed/superseded attempt.
+  const groups = new Map(Object.keys(cases).map(name => [name, []]));
+  const entries = await readdir(base, {withFileTypes:true}).catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+    return [];
+  });
+  for (const dir of entries) {
+    if (!dir.isDirectory()) continue;
+    const name = [...groups.keys()].find(k => dir.name.startsWith(k+'-'));
+    if (!name) continue;
+    const path = join(base,dir.name);
+    let record;
+    try {
+      record=JSON.parse(await readFile(join(path,'branch.json'),'utf8'));
+      assert.deepEqual(record.source,source);
+      assert.equal(record.name,name);
+      assert.deepEqual([record.script,...record.args],cases[name]);
+      assert(record.finishedAt && record.startedAt);
+      const onDisk=await receipts(path);
+      assert(onDisk.length>0);
+      const sortByPath=(a,b)=>a.path.localeCompare(b.path);
+      assert.deepEqual(onDisk.sort(sortByPath),record.receipts.sort(sortByPath));
+      assert.equal(record.code,0);
+      assert(!record.signal && record.passed && onDisk.every(r=>r.passed));
+      groups.get(name).push({attempt:dir.name,status:'passed'});
+    } catch (error) {
+      groups.get(name).push({attempt:dir.name,status:error.code==='ENOENT' && !record ? 'incomplete' : 'failed',reason:error.message});
+    }
+  }
+  // Keep every failed/incomplete attempt visible; never silently pick the best run.
+  const branches=Object.fromEntries([...groups].map(([name,attempts]) => [name,{
+    status: !attempts.length?'unverified':attempts.every(r=>r.status==='passed')?'passed':'needs_review',attempts
+  }]));
+  const knownMatrixPassed = Object.values(branches).every(item=>item.status==='passed');
+  return {source,knownMatrixPassed,branches,blindTest:'independent_report_required',release:'independent_signoff_required'};
+}
+
 const args=process.argv.slice(2);
 if(args.length===1 && args[0]==='--list')console.log(Object.keys(cases).join('\n'));
+else if(args.length===1 && args[0]==='--audit'){
+  const source=snapshot();
+  const base=join(resolve(process.env.VALIDATION_OUTPUT_DIR || join(root,'.local-data','validation','stage-e')),source.commit);
+  const report=await audit(base,source);
+  console.log(JSON.stringify(report,null,2));
+  if(!report.knownMatrixPassed)process.exitCode=1;
+}
 else {
   assert(args.length>0 && args.every(n=>Object.hasOwn(cases,n)),'Use --list and select one or more known branches');
   const source=snapshot();

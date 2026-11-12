@@ -153,7 +153,7 @@ export class CollaborationStore {
         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES cc_conversations(id),
         state TEXT NOT NULL, value TEXT NOT NULL
       ); CREATE INDEX IF NOT EXISTS cc_project_intents_pending ON cc_project_intents(conversation_id,state)`);
-      if (version > 17) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
+      if (version > 18) throw new AppError(503, '数据库版本较新，当前服务不能安全启动。', 'schema_not_supported');
       this.db.prepare('INSERT OR IGNORE INTO cc_meta VALUES(?,?)').run('configuration_revision', 1);
       this.roomMembers.migrate(version < 14);
       migrateObligations(this.db);
@@ -163,8 +163,8 @@ export class CollaborationStore {
       this.db.exec(`CREATE TABLE IF NOT EXISTS cc_obligation_wait_wakes(
         wait_id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES cc_obligations(id),
         source_id TEXT NOT NULL UNIQUE REFERENCES cc_sources(id), event_key TEXT NOT NULL, value TEXT NOT NULL)`);
-      if (version === 17) return;
-      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=17'); return; }
+      if (version === 18) return;
+      if (version >= 2) { this.db.exec('UPDATE cc_schema SET version=18'); return; }
       for (const table of ['cc_members', 'cc_accounts', 'cc_conversations']) for (const row of this.rows<{ id: string; revision?: number }>(table)) { row.revision ??= 1; this.put(table, row); }
       for (const row of this.db.prepare('SELECT rowid,value FROM cc_messages').all() as { rowid: number; value: string }[]) {
         const m = JSON.parse(row.value) as ConversationMessage; m.sequence = Number(row.rowid); this.put('cc_messages', m);
@@ -181,7 +181,7 @@ export class CollaborationStore {
         this.db.prepare('INSERT INTO cc_contracts VALUES(?,?,?)').run(c.id, i.id, JSON.stringify(c));
         i.contractId = c.id; this.put('cc_invocations', i);
       }
-      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(17)');
+      this.db.exec('DELETE FROM cc_schema; INSERT INTO cc_schema VALUES(18)');
     });
   }
   configurationRevision(): number { return (this.db.prepare('SELECT value FROM cc_meta WHERE key=?').get('configuration_revision') as { value: number }).value; }

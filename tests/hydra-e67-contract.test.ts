@@ -9,7 +9,7 @@ import { CollaborationStore } from '../server/collaboration/store.js';
 import { runtimeTools } from '../server/collaboration/runtime-common.js';
 import { sessionFingerprint } from '../server/collaboration/continuity.js';
 
-test('schema 16 to 17 preserves old input and authority, new contracts bind decision tools to public in-room work', () => {
+test('upgrading schema 16 preserves old input and authority, new contracts bind decision tools to public in-room work', () => {
   const directory=mkdtempSync(join(tmpdir(),'hydra-e67-migrate-')), file=join(directory,'state.sqlite');
   let owner=new Store(file);
   let store=new CollaborationStore(owner);
@@ -27,7 +27,7 @@ test('schema 16 to 17 preserves old input and authority, new contracts bind deci
     owner.close();
     owner=new Store(file);
     store=new CollaborationStore(owner);
-    assert.equal(owner.db.prepare('SELECT version FROM cc_schema').get()?.version,17);
+    assert.equal(owner.db.prepare('SELECT version FROM cc_schema').get()?.version,18);
     assert.deepEqual(historical(),before);
     assert.deepEqual(store.prepareInput(run.id),frozen);
     assert.deepEqual(store.obligations.opinions.list(room.id),[]);
