@@ -86,7 +86,7 @@ try {
       assert.equal(root.owner.memberId,rejectFirst?'standby':'evening');
       const final=d.messages.find(m=>m.id===root.delivery?.messageId);
       assert(final && final.memberId===root.owner.memberId && final.content.includes(serial) && final.content.includes(String(cents)));
-      assert(/一[笔次]|1[笔次]|未重复|没有重复|未被重复|并未重复/.test(final.content));
+      assert(/一[笔次]|(?<!\p{Nd})1[\t\p{Zs}]*[笔次]|未重复|没有重复|未被重复|并未重复/u.test(final.content));
       assert.equal(d.messages.filter(m=>m.author==='user').length,1);
       assert(d.invocations.every(i=>i.acceptance==='accepted' && i.teardown==='confirmed' && i.nativeSessionId && i.roomMember?.id));
       if(restart){
