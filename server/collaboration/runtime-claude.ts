@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { anthropicContent } from './runtime-images.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -51,11 +53,38 @@ async function createClaudeBridge(request: RuntimeRequest) {
   }};
 }
 
-export async function invokeClaude(request: RuntimeRequest, command: string, project?: ProjectCli): Promise<RuntimeResult> {
+const exec=promisify(execFile);
+
+// This CLI version was measured to retry the same Anthropic Messages request
+// on a withheld HTTP response header. It may continue waiting on a stalled body;
+// the runtime-wide AbortSignal remains the final deadline in both cases.
+async function privateHeaderTimeout(request:RuntimeRequest,command:string,budget:number|undefined):Promise<number|undefined>{
+  const turn=request.roomRuleTurn;
+  if(turn?.kind!=='player' || turn.requestPolicy!=='claude-header-v1' || !turn.gameId || !Number.isSafeInteger(turn.epoch) ||
+    turn.epoch<1 || request.member.carrier!=='claude-cli' || request.account.auth!=='api' || request.account.provider!=='claude' ||
+    request.member.accountId!==request.account.id || request.projectWork || request.projectReview || request.nativeSessionId ||
+    request.visibility || request.memberContextMode || !budget || !Number.isSafeInteger(budget) || budget<3)return;
+  try{
+    const env={...cliEnv(),HOME:request.cwd,CLAUDE_CONFIG_DIR:join(request.cwd,'.claude'),XDG_CONFIG_HOME:request.cwd,XDG_CACHE_HOME:request.cwd};
+    const version=await exec(command,['--version'],{cwd:request.cwd,env,timeout:3000,maxBuffer:2048,signal:request.signal});
+    if(version.stdout.trim()==='2.1.220 (Claude Code)')return Math.min(60_000,Math.floor(budget/3));
+  }catch{
+    // An unverified CLI keeps its prior transport settings. Explicit cancellation
+    // and the outer deadline still prevent a new provider request from starting.
+    request.signal.throwIfAborted();
+  }
+}
+
+export async function invokeClaude(request: RuntimeRequest, command: string, project?: ProjectCli, executionBudget?:number): Promise<RuntimeResult> {
   if (request.roomRuleTurn?.kind === 'player' || request.memberContextMode === 'private' || request.memberContextMode === 'writing') {
     if (project || request.account.auth!=='api' || request.nativeSessionId) throw new Error('私密工作记录需要全新隔离的 Claude 执行。');
     const cwd = await mkdtemp(join(await realpath(tmpdir()), 'hydra-private-member-'));
-    try { return await invokeClaudeProcess({...request,cwd},command); }
+    try {
+      const isolated={...request,cwd};
+      const headerTimeout=await privateHeaderTimeout(isolated,command,executionBudget);
+      request.signal.throwIfAborted();
+      return await invokeClaudeProcess(isolated,command,undefined,undefined,headerTimeout);
+    }
     finally { await rm(cwd,{recursive:true,force:true}); }
   }
   if (project && request.account.auth === 'cli') {
@@ -74,7 +103,7 @@ export async function invokeClaude(request: RuntimeRequest, command: string, pro
   return invokeClaudeProcess(request,command,project);
 }
 
-async function invokeClaudeProcess(request: RuntimeRequest, command: string, project?: ProjectCli, official?: {cwd:string;email:string}): Promise<RuntimeResult> {
+async function invokeClaudeProcess(request: RuntimeRequest, command: string, project?: ProjectCli, official?: {cwd:string;email:string}, headerTimeout?:number): Promise<RuntimeResult> {
   const api = request.account.auth === 'api' ? cliApiSettings(request) : undefined;
   let resumeId = request.nativeSessionId;
   if (resumeId) {
@@ -87,6 +116,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
   const env = official ? await officialProjectNetworkEnv(officialClaudeEnv()) : project ? {} as NodeJS.ProcessEnv : cliEnv();
   const personal = request.roomRuleTurn?.kind === 'player' || request.memberContextMode === 'private' || request.memberContextMode === 'writing';
   if (personal) {
+    if(headerTimeout!==undefined)env.API_TIMEOUT_MS=String(headerTimeout);
     env.HOME = request.cwd;
     env.CLAUDE_CONFIG_DIR = join(request.cwd,'.claude');
     env.XDG_CONFIG_HOME = request.cwd;

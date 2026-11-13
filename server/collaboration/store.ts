@@ -552,7 +552,17 @@ export class CollaborationStore {
       !conversation.importedFor && !input.visibility && !input.excerptRefs?.length && !input.publicStatement &&
       !input.crossRef && !input.actionRef && !input.projectWork && !input.projectReview && handoffPolicy !== 'candidate-v1';
     const packageReplyReceipt = coordinate && (parent ? this.contract(parent.id).packageReplyReceipt : origin ? origin.packageReplyReceipt : true);
-    const roomRuleTurn = coordinate ? (input.roomRuleTurn ?? (origin?.roomRuleTurn?.kind === 'host' || (input.kind === 'user' && conversation.memberIds.length === 13) ? {kind:'host' as const} : undefined)) : undefined;
+    // Derive the player's policy only from the frozen issuing host. A legacy
+    // collection or return must keep the request behaviour of its original source.
+    let roomRuleTurn:SourceWork['roomRuleTurn'];
+    if(coordinate){
+      if(input.roomRuleTurn?.kind==='player'){
+        const {gameId,epoch}=input.roomRuleTurn;
+        const parentTurn=parent?.conversationId===conversation.id ? this.contract(parent.id).roomRuleTurn : undefined;
+        roomRuleTurn={kind:'player',gameId,epoch,...(parentTurn?.kind==='host' && parentTurn.requestPolicy && {requestPolicy:parentTurn.requestPolicy})};
+      }else if(origin?.roomRuleTurn?.kind==='host')roomRuleTurn=origin.roomRuleTurn;
+      else if(input.kind==='user' && conversation.memberIds.length===13)roomRuleTurn={kind:'host',requestPolicy:'claude-header-v1'};
+    }
     const externalMember = coordinate && input.requestedTargets.length===1 ? this.roomMembers.resolve(conversation.id,input.requestedTargets[0]!) : undefined;
     let externalScope;
     if (roomRuleTurn?.kind!=='player' && externalMember?.active && !parent) {

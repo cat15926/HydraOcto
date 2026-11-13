@@ -96,7 +96,8 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
       ? Promise.resolve({ supported: false, reason: 'Hermes 使用本轮平台历史。' }) : describeNativeSession(input, input.member.carrier === 'codex-app-server' ? codex : claude),
     async invoke(input: RuntimeRequest) {
       const projectTest = input.mayRunProjectNpmTest || input.projectReview?.npmTest;
-      const timeout = AbortSignal.timeout(options.timeoutMs ?? (projectTest ? 600_000 : 180_000));
+      const executionBudget=options.timeoutMs ?? (projectTest ? 600_000 : 180_000);
+      const timeout=AbortSignal.timeout(executionBudget);
       let exposed = false, nativeHostStarted = false, nativeTerminal = false;
       const request: RuntimeRequest = { ...input, signal: AbortSignal.any([input.signal, timeout]), onEvent: event => {
         if (event.kind === 'exposed' || event.kind === 'accepted') exposed = true;
@@ -194,7 +195,7 @@ export function createCollaborationRuntime(options: { codexPath?: string; claude
       if (!api && request.account.auth === 'api') cliApiSettings(request);
       if (request.member.carrier === 'codex-app-server') return await invokeCodex(request, codex);
       if (request.member.carrier === 'claude-cli') {
-        if (request.account.auth === 'api') return await invokeClaude(request, claude);
+        if (request.account.auth === 'api') return await invokeClaude(request,claude,undefined,executionBudget);
         let loggedIn = false;
         try { loggedIn = await claudeLoggedIn(claude); } catch { /* No credential details enter persisted errors. */ }
         if (!loggedIn) { request.onEvent({ kind: 'not_accepted', detail: { reason: 'Claude official CLI login is unavailable; no model request sent.' } }); throw new Error('Claude CLI requires official login: claude auth login. API keys must use an API account.'); }

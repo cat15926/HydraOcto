@@ -76,7 +76,10 @@ export interface MemberContextSnapshot {
   factors: Pick<import('./factors.js').FactorView, 'id' | 'version' | 'kind' | 'content' | 'parentIds' | 'sourceRef' | 'issuer' | 'expressionOptions'>[];
   obligations: {id:string; revision:number; goal:string; state:string; wait?:string}[];
 }
-export type RoomRuleTurn = { kind:'host' } | { kind:'player'; gameId:string; epoch:number };
+export type RoomRuleTurn = ({ kind:'host' } | { kind:'player'; gameId:string; epoch:number }) & {
+  /** New room sources may pass this policy to the private actions they actually authorize. */
+  requestPolicy?: 'claude-header-v1';
+};
 export interface SourceWork {
   publicStatement?: true;
   memberContextPolicy?: 'member-context-v1';

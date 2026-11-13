@@ -81,6 +81,7 @@ test('Frozen room authorizations protect old sources, collector, public projecti
   store.db.prepare('UPDATE cc_sources SET value=? WHERE id=?').run(JSON.stringify(old),old.id);
   const legacy=start()[0]!;assert(!tools(store.contract(legacy.id)).includes('game_open'));end(legacy.id);
   post();const host=start()[0]!,contract=store.contract(host.id);
+  assert.equal(contract.roomRuleTurn?.requestPolicy,'claude-header-v1');
   assert(tools(contract).includes('game_open'));assert(!tools({...contract,roomRuleTurn:undefined}).includes('game_open'));
   const root=(store.obligations.tool(host.id,'obligation_open',{goal:'标准局'},'open') as {obligation:Obligation}).obligation;
   const group=(targets:string[],obligationId?:string)=>store.cooperation.createGroup(cid,{requestId:randomUUID(),question:'按本房规则独立行动',targets,...(obligationId&&{obligationId})},host.id);
@@ -92,6 +93,7 @@ test('Frozen room authorizations protect old sources, collector, public projecti
   assert(ttl>=24*60_000&&ttl<=24*60_000+100);
   end(host.id);
   const runs=start(),game=store.werewolf.get(root.id,cid)!;
+  assert(runs.every(r=>store.contract(r.id).roomRuleTurn?.requestPolicy==='claude-header-v1'));
   const seer=game.players.find(s=>s.role==='seer')!,s=runs.find(i=>i.memberId===seer.memberId)!;
   const target=game.players.find(p=>p!==seer)!.memberId;
   assert.deepEqual(tools(store.contract(s.id)).toSorted(),['game_act','game_read']);
@@ -145,6 +147,32 @@ test('Frozen room authorizations protect old sources, collector, public projecti
   assert.equal(blocked.state,'blocked');assert.equal(blocked.owner.instanceId,root.owner.instanceId);
   assert.equal(store.cooperation.groups(cid).length,2);assert.equal(store.admitNext(),undefined);
  }finally{owner.close();rmSync(path,{recursive:true,force:true});}
+});
+
+test('A pending legacy host source and its later player invitations retain the previous request policy',()=>{
+ const path=mkdtempSync(join(tmpdir(),'hydra-game-legacy-source-')),db=new Store(join(path,'state.sqlite'));
+ try{
+  const store=new CollaborationStore(db),template=store.members().find(m=>m.id==='claude')!;
+  for(const id of ids)store.saveMember({...template,id,name:id});
+  const room=store.create({title:'原会话',memberIds:['claude',...ids],defaultMemberId:'claude',requestId:randomUUID()}).conversation;
+  store.send(room.id,{requestId:randomUUID(),content:'原有十二人局'});
+  const source=JSON.parse(String(store.db.prepare('select value from cc_sources limit 1').get()!.value));
+  assert.equal(source.roomRuleTurn.requestPolicy,'claude-header-v1');
+  delete source.roomRuleTurn.requestPolicy;
+  store.db.prepare('update cc_sources set value=? where id=?').run(JSON.stringify(source),source.id);
+  const host=store.admitNext()!.invocations[0]!;
+  assert.deepEqual(store.contract(host.id).roomRuleTurn,{kind:'host'});
+  store.startInvocation(host.id);store.recordEvidence(host.id,{kind:'accepted',detail:{}});
+  const root=(store.obligations.tool(host.id,'obligation_open',{goal:'完成本局'},'open') as {obligation:Obligation}).obligation;
+  store.werewolf.tool(host.id,'game_open',{obligationId:root.id});
+  const group=store.cooperation.createGroup(room.id,{requestId:randomUUID(),question:'请全体行动',targets:ids,obligationId:root.id},host.id).group;
+  const invitation=store.cooperation.source(group.sourceId);
+  assert.deepEqual(invitation.roomRuleTurn,{kind:'player',epoch:1,gameId:root.id});
+  store.recordEvidence(host.id,{kind:'process_exit',detail:{confirmed:true}});store.finish(host.id,'succeeded','已邀请');
+  const seats=store.admitNext()!.invocations;
+  assert.equal(seats.length,12);
+  assert(seats.every(r=>store.contract(r.id).roomRuleTurn?.requestPolicy===undefined));
+ }finally{db.close();rmSync(path,{recursive:true,force:true});}
 });
 
 test('A released player who only read must return one failure and be re-invited by the exact owner before counting one successful action', async()=>{

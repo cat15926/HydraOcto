@@ -122,6 +122,48 @@ test('personal reading and approved public writing run in separate disposable Cl
   }
 });
 
+test('only a new isolated Claude API player on the measured CLI version receives the bounded request timeout',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'claude-room-budget-'));
+  const prior=process.env.API_TIMEOUT_MS,key='HYDRA_TEST_PRIVATE_HEADER_KEY';
+  process.env.API_TIMEOUT_MS='987654';process.env[key]='fixture';
+  t.after(async()=>{
+    if(prior===undefined)delete process.env.API_TIMEOUT_MS;else process.env.API_TIMEOUT_MS=prior;
+    delete process.env[key];await rm(dir,{recursive:true,force:true});
+  });
+  const player={kind:'player',epoch:2,gameId:'g',requestPolicy:'claude-header-v1'} as const;
+  const supported='2.1.220 (Claude Code)';
+  const cases:{name:string;version:string;budget:number;expected:string;extra:Partial<RuntimeRequest>}[]=[
+    {name:'production',version:supported,budget:180_000,expected:'60000',extra:{roomRuleTurn:player}},
+    {name:'acceptance',version:supported,budget:300_000,expected:'60000',extra:{roomRuleTurn:player}},
+    {name:'smaller',version:supported,budget:10_500,expected:'3500',extra:{roomRuleTurn:player}},
+    {name:'old-player',version:supported,budget:9000,expected:'unset',extra:{roomRuleTurn:{kind:'player',epoch:2,gameId:'g'}}},
+    {name:'untested-version',version:'2.1.221 (Claude Code)',budget:9000,expected:'unset',extra:{roomRuleTurn:player}},
+    {name:'probe-failure',version:'',budget:9000,expected:'unset',extra:{roomRuleTurn:player}},
+    {name:'host',version:supported,budget:9000,expected:'unset',extra:{roomRuleTurn:{kind:'host',requestPolicy:'claude-header-v1'}}},
+    {name:'ordinary',version:supported,budget:9000,expected:'unset',extra:{}},
+    {name:'private-note',version:supported,budget:9000,expected:'unset',extra:{memberContextMode:'private',visibility:{kind:'private',memberIds:['member-1']}}}
+  ];
+  for(const c of cases){
+    const events:RuntimeEvent[]=[],req=request('claude-cli',dir,events,[],c.extra);
+    req.account={...req.account,auth:'api',apiKeyEnv:key,baseUrl:'http://127.0.0.1:1'};
+    const tools=runtimeTools(req).map(t=>'mcp__platform__'+t.name);
+    const cmd=await script(dir,c.name+'.cjs',`
+      if(process.argv.includes('--version')){
+        if(!${JSON.stringify(c.version)} || process.env.API_TIMEOUT_MS || process.env.HOME!==process.cwd())process.exit(1);
+        console.log(${JSON.stringify(c.version)});process.exit(0);
+      }
+      const sid=process.argv[process.argv.indexOf('--session-id')+1];
+      const send=m=>console.log(JSON.stringify({...m,session_id:sid}));
+      process.stdin.resume();process.stdin.on('end',()=>{
+        send({type:'system',subtype:'init',model:'test-model',apiKeySource:'ANTHROPIC_AUTH_TOKEN',tools:${JSON.stringify(tools)}});
+        send({type:'result',subtype:'success',result:process.env.API_TIMEOUT_MS??'unset'});
+      });`);
+    const runtime=createCollaborationRuntime({claudePath:cmd,timeoutMs:c.budget});
+    assert.equal((await runtime.invoke(req)).text,c.expected,c.name);
+    assert.equal(events.filter(e=>e.kind==='process_exit'&&e.detail.confirmed).length,1,c.name);
+  }
+});
+
 test('Claude login prompt is offered for a signed-out account, and a failed probe cannot establish login', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'collab-login-probe-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
