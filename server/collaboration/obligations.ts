@@ -219,7 +219,7 @@ export class ObligationService {
   itemEvidenceForReturn(source:SourceWork,instanceId:string) {
     if(source.kind!=='job_result' && source.kind!=='task_handoff')return;
     const roots=this.forSource(source.id).filter(o=>!o.parentId && !ended(o) && o.currentSourceId===source.id && o.owner.instanceId===instanceId);
-    return roots.length===1 ? this.store.contract(roots[0]!.originInvocationId).itemEvidenceField : undefined;
+    return roots.length===1 ? this.store.contract(roots[0]!.originInvocationId) : undefined;
   }
   private itemMaterials(id:string,field:EvidenceField,o?:Obligation):string[] {
     const run=this.store.invocation(id), contract=this.store.contract(o?.originInvocationId??id);
@@ -257,7 +257,7 @@ export class ObligationService {
       o.owner.instanceId===run.roomMember?.id);
     if(root?.state==='delivery_pending' && root.delivery?.publication==='exact')return false;
     try {
-      checkItemEvidence(body,field,this.itemMaterials(run.id,field,root));
+      checkItemEvidence(body,field,this.itemMaterials(run.id,field,root),c.itemNames);
       return false;
     } catch(error) {
       if(!(error instanceof AppError))throw error;
@@ -478,7 +478,7 @@ export class ObligationService {
     }
     if(c.itemEvidenceField){
       if(args.publication!==undefined && args.publication!=='exact')conflict('证据表需按用户约定的 JSON 正文交付。');
-      checkItemEvidence(this.publicText(args.summary),c.itemEvidenceField,this.itemMaterials(id,c.itemEvidenceField,o));
+      checkItemEvidence(this.publicText(args.summary),c.itemEvidenceField,this.itemMaterials(id,c.itemEvidenceField,o),c.itemNames);
     }
     const last = this.raw(o.conversationId).filter(x => x.parentId === o.id).at(-1);
     if (last && (last.state !== 'delivered' || last.report?.outcome !== 'passed')) conflict('子委托未通过，不能完成最终交付。');
@@ -760,8 +760,8 @@ export class ObligationService {
         this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
-        const field=this.store.contract(run.id).itemEvidenceField;
-        if(field)checkItemEvidence(o.delivery.summary,field,this.itemMaterials(run.id,field,o));
+        const {itemEvidenceField:field,itemNames}=this.store.contract(run.id);
+        if(field)checkItemEvidence(o.delivery.summary,field,this.itemMaterials(run.id,field,o),itemNames);
         const marker = o.delivery.finalReplyMarker;
         const content = o.delivery.publication==='exact' && this.store.contract(run.id).finalTextPolicy==='registered-v1'
           ? o.delivery.summary : marker && o.delivery.packageEdition && this.store.contract(run.id).packageReplyReceipt
@@ -961,8 +961,8 @@ export class ObligationService {
         this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
-        const field=this.store.contract(o.delivery.invocationId).itemEvidenceField;
-        if(field)checkItemEvidence(o.delivery.summary,field,this.itemMaterials(o.delivery.invocationId,field,o));
+        const {itemEvidenceField:field,itemNames}=this.store.contract(o.delivery.invocationId);
+        if(field)checkItemEvidence(o.delivery.summary,field,this.itemMaterials(o.delivery.invocationId,field,o),itemNames);
         this.endpoint(cid,o.owner.memberId); this.finishTask(o); o.state = 'delivered';
       } else if (input.decision === 'retry') {
         this.requireRetry(o);

@@ -92,6 +92,7 @@ export interface SourceWork {
   deliveryEvidencePolicy?: 'source-grounded-v1';
   finalTextPolicy?: 'registered-v1';
   itemEvidenceField?: 'refs'|'sources';
+  itemNames?: string[];
   externalScope?: import('./obligations.js').ExternalScope;
   roomPolicy?: 'instance-v1';
   projectRepair?: ProjectRepair;
@@ -427,6 +428,7 @@ export interface ExecutionContractSnapshot {
   roomPublicationRootId?: string;
   finalTextPolicy?: 'registered-v1';
   itemEvidenceField?: 'refs'|'sources';
+  itemNames?: string[];
   externalScope?: import('./obligations.js').ExternalScope;
   id: string; invocationId: string; behaviorVersion: string; routingDecisionId?: string; routingPolicyVersion: string;
   contextPolicyVersion: string; toolPolicyVersion: string; adapterCapabilityVersion: string;

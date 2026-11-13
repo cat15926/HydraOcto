@@ -29,6 +29,7 @@ export interface ContextInput {
   packageReplyReceipt?: true;
   finalTextPolicy?: 'registered-v1';
   itemEvidenceField?: 'refs'|'sources';
+  itemNames?:string[];
   collectionOwnerPolicy?: import('../../shared/collaboration.js').RuntimeRequest['collectionOwnerPolicy'];
   deliveryEvidencePolicy?: import('../../shared/collaboration.js').RuntimeRequest['deliveryEvidencePolicy'];
   externalScope?: import('../../shared/obligations.js').ExternalScope;
@@ -156,8 +157,9 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   const evidenceHint=input.deliveryEvidencePolicy==='source-grounded-v1'
     ? '\n综合多份材料或同伴回报时，区分原件直接支持的事实、成员的判断和仍缺的证据。说明关键结论依据哪份材料或谁的回报。对相互冲突的部分，只陈述共同可证实的范围，指出分歧和待核实之处。若正式批准或新版原件明确覆盖某个对象和用途，可以在该范围给出肯定结论，说明覆盖范围或已替代的旧依据。备选方案写明成立条件，缺少依据时注明待核实；材料没有提到限制，授权仍未知。只有取得对应操作的回执才报告已执行。交付摘要和最终答复中的补充说明都遵循这些边界。\n'
     : '';
+  const namesHint=input.itemNames ? 'item 的值请逐字使用原委托的短名，每项恰好一次：'+JSON.stringify(input.itemNames)+'。\n' : '';
   const itemEvidenceHint=input.itemEvidenceField
-    ? '\n用户要求逐项引用原始记录。能当场答完可直接交付完整 JSON 数组。需要同伴回报或持续跟进时，请先用 obligation_open 登记原委托，最后以 obligation_deliver.summary 登记完整正文。每项的 '+input.itemEvidenceField+' 都应包含原始委托或其文本附件中、与该判断有关的记录编号。若记录明确限定适用范围，可引用该记录说明边界。某项确实没有相关记录时，用同一工具仅传 obligationId 和 missingEvidence，说明缺哪一项的哪份依据，保留原委托待补证。\n' : '';
+    ? '\n用户要求逐项引用原始记录。能当场答完可直接交付完整 JSON 数组。需要同伴回报或持续跟进时，请先用 obligation_open 登记原委托，最后以 obligation_deliver.summary 登记完整正文。每项的 '+input.itemEvidenceField+' 都应包含原始委托或其文本附件中、与该判断有关的记录编号。若记录明确限定适用范围，可引用该记录说明边界。某项确实没有相关记录时，用同一工具仅传 obligationId 和 missingEvidence，说明缺哪一项的哪份依据，保留原委托待补证。\n'+namesHint : '';
   const exactTextHint=input.finalTextPolicy && obligations.includes('obligation_deliver')
     ? '\n交付时把用户要收到的完整正文填入 obligation_deliver.summary；普通主委托默认使用该原文。用户要求特定格式时设 publication=exact，逐项列出用户要求的依据，没有依据就说明缺口。平台在成功退出并核验完成后原样交付，无需重新抄写。若有更正，应在登记前完成。需另外附注时可选 publication=reply，并把登记摘要原样列入最终发言。\n' : '';
   const coordinationHint = input.coordinationPolicy
@@ -212,5 +214,5 @@ export function assembleContext(input: ContextInput): ContextAssembly {
   }
   items.push({ kind: 'request', reference: `source:${source.id}@${source.revision}`, representation: 'full', characters: source.content.length, complete: true });
   const prompt = render(selected);
-  return { prompt, renderDigest: digest(prompt), renderVersion: itemEvidenceHint ? 'room-item-evidence-v1' : exactTextHint ? 'room-exact-delivery-v1' : evidenceHint ? 'room-grounded-delivery-v1' : input.packageReplyReceipt && coordinationHint ? 'room-package-reply-v1' : coordinationHint ? 'room-decision-material-v1' : handoffHint ? 'room-obligation-handoff-v2' : personal ? 'room-member-context-v1' : continuation ? 'room-continuation-input-v1' : obligations.length ? 'room-obligations-input-v1' : input.memorySnapshot ? 'platform-visible-input-v5' : input.cooperationPolicy ? 'platform-input-json-cooperation-v4' : input.artifactPolicy ? 'platform-input-json-artifacts-v3' : input.taskPolicy ? 'platform-input-json-tasks-v2' : CONTEXT_RENDER_VERSION, policyVersion: input.memorySnapshot ? 'bounded-visible-context-v5' : input.cooperationPolicy ? 'bounded-public-context-cooperation-v4' : input.artifactPolicy ? 'bounded-public-context-artifacts-v3' : input.taskPolicy ? 'bounded-public-context-tasks-v2' : CONTEXT_POLICY_VERSION, digestStage: 'platform_prompt', items, budget: { maxEstimatedTokens: limit, usedEstimatedTokens: estimate(prompt), method: CONTEXT_BUDGET_METHOD }, ...(caller ? { caller } : {}) };
+  return { prompt, renderDigest: digest(prompt), renderVersion: namesHint ? 'room-exact-item-names-v1' : itemEvidenceHint ? 'room-item-evidence-v1' : exactTextHint ? 'room-exact-delivery-v1' : evidenceHint ? 'room-grounded-delivery-v1' : input.packageReplyReceipt && coordinationHint ? 'room-package-reply-v1' : coordinationHint ? 'room-decision-material-v1' : handoffHint ? 'room-obligation-handoff-v2' : personal ? 'room-member-context-v1' : continuation ? 'room-continuation-input-v1' : obligations.length ? 'room-obligations-input-v1' : input.memorySnapshot ? 'platform-visible-input-v5' : input.cooperationPolicy ? 'platform-input-json-cooperation-v4' : input.artifactPolicy ? 'platform-input-json-artifacts-v3' : input.taskPolicy ? 'platform-input-json-tasks-v2' : CONTEXT_RENDER_VERSION, policyVersion: input.memorySnapshot ? 'bounded-visible-context-v5' : input.cooperationPolicy ? 'bounded-public-context-cooperation-v4' : input.artifactPolicy ? 'bounded-public-context-artifacts-v3' : input.taskPolicy ? 'bounded-public-context-tasks-v2' : CONTEXT_POLICY_VERSION, digestStage: 'platform_prompt', items, budget: { maxEstimatedTokens: limit, usedEstimatedTokens: estimate(prompt), method: CONTEXT_BUDGET_METHOD }, ...(caller ? { caller } : {}) };
 }

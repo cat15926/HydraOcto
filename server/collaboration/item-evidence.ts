@@ -3,12 +3,15 @@ import {AppError} from '../store.js';
 export type EvidenceField='refs'|'sources';
 
 // Recognize an explicit output request, never the attachment text or the shape of a proposed answer.
-export function requestedEvidenceField(request:string):EvidenceField|undefined {
-  const instructions=request.replace(/(\x60{3,}|~{3,})[\s\S]*?(?:\1|$)/g,' ')
+function requestInstructions(request:string) {
+  return request.replace(/(\x60{3,}|~{3,})[\s\S]*?(?:\1|$)/g,' ')
     .replace(/^[\t ]*>[^\n]*$/gm,' ')
     .replace(/(?:示例|举例|例如|example|样例)[：:][^\n]*(?:\n[^\n]+)*/gi,' ')
     .replace(/“(?!refs”|sources”)[^”]*”|「[^」]*」|『[^』]*』|["\x60][^"\x60\n]*(?:请|return|output|deliver)[^"\x60\n]*["\x60]/gi,' ');
-  const directives=instructions.split(/[。！!？?；;\n]/).map(s=>s.trim());
+}
+
+export function requestedEvidenceField(request:string):EvidenceField|undefined {
+  const directives=requestInstructions(request).split(/[。！!？?；;\n]/).map(s=>s.trim());
   const output=/(?:交付|输出|返回|生成|给出|整理为|格式(?:为|是|要求)|return\b|output\b|deliver\b|provide\b)[^。\n]{0,55}?\bJSON\s*(?:数组|array\b)/i;
   for(let i=0;i<directives.length;i++) {
     const directive=directives[i]!;
@@ -24,6 +27,38 @@ export function requestedEvidenceField(request:string):EvidenceField|undefined {
         /(?:数组|列表|集合|array|list)/i.test(explanation))return match[1]!.toLowerCase() as EvidenceField;
     }
   }
+}
+
+// Freeze only a single complete list explicitly referenced by the item field of the
+// same output instruction. Attachments, quoted examples and peer input never supply keys.
+export function requestedItemNames(request:string):string[]|undefined {
+  const instructions=requestInstructions(request);
+  const clauses=instructions.split(/[。！!？?；;\n]/);
+  const namedItem=/\bitem\b[\x60"'”’）)]*\s*(?:[（(:：=]\s*|\s+(?:is|must be)\s+)(?:(?:与|对应|填写|使用|保留|等于|采用|取|为)\s*)?(?:(?:上述|上列|上面|上文|前述|以下|下列|下面|下文|列出)的?\s*(?:项目|条目|事项|条款|任务|行|标签)(?:名称|名|短名|标签)?|(?:项目|条目|事项|任务)(?:名称|名|短名)[（( ]*(?:同上|见上|如上)|(?:the\s+)?(?:exact\s+)?(?:item |project |row |entry )?(?:names?|labels?)\s+(?:(?:listed|given|specified)\s+)?(?:above|below))\s*(?=[）),，。;；\s]|$)/i;
+  const asksForNames=clauses.some((clause,i)=>{
+    const pair=clause+'。'+(clauses[i+1]??'');
+    return namedItem.test(pair) && !!requestedEvidenceField(pair);
+  });
+  if(!asksForNames)return;
+  const lines=instructions.split(/\r?\n/).map(line=>line.trim());
+  const entry=/^(?:[-*•]\s+|\d{1,3}[.、)]\s*)?([\p{L}\p{N}][\p{L}\p{M}\p{N} _.·&+\-/]{0,63}?)\s*[：:]\s*(\S.*)$/u;
+  const groups:string[][]=[];
+  let group:string[]=[];
+  for(const line of [...lines,'']){
+    const name=entry.exec(line)?.[1];
+    if(name){
+      group.push(name);
+    }else if(group.length){
+      groups.push(group);
+      group=[];
+    }
+  }
+  if(groups.length!==1)return;
+  const names=groups[0]!;
+  // A single labelled line could be a heading. The strict list is opt-in and ambiguous
+  // or repeated declarations keep ordinary evidence validation.
+  if(names.length<2 || new Set(names).size!==names.length)return;
+  return names;
 }
 
 function reject(message:string):never {
@@ -49,10 +84,20 @@ function recordIds(materials:string[]) {
   return ids;
 }
 
-export function checkItemEvidence(body:string,field:EvidenceField,materials:string[]) {
+export function checkItemEvidence(body:string,field:EvidenceField,materials:string[],itemNames?:readonly string[]) {
   let rows:unknown;
   try {rows=JSON.parse(body);} catch {reject('请交付可直接解析的 JSON 数组。');}
   if(!Array.isArray(rows) || rows.length===0)reject('逐项证据表至少需要一行。');
+  if(itemNames){
+    const expected=new Set(itemNames);
+    const received=new Set<string>();
+    for(const row of rows){
+      if(!row || typeof row.item!=='string' || !expected.has(row.item) || received.has(row.item))break;
+      received.add(row.item);
+    }
+    if(received.size!==expected.size || rows.length!==expected.size)
+      throw new AppError(422,'item 需逐行原样填写原委托短名，每项恰好出现一次：'+JSON.stringify(itemNames)+'。请保留原文大小写及空格，把说明放在其他字段，然后重新提交。','invalid_item_names');
+  }
   const tokens=recordIds(materials);
   for(const [i,row] of rows.entries()) {
     const refs=row && typeof row==='object' && !Array.isArray(row)?row[field]:undefined;
