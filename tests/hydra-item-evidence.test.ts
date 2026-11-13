@@ -3,7 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {test} from 'node:test';
 import {Store} from '../server/store.js';
 import {CollaborationStore} from '../server/collaboration/store.js';
-import {checkItemEvidence, requestedEvidenceField} from '../server/collaboration/item-evidence.js';
+import {checkItemEvidence, requestedEvidenceField, requestedItemNames} from '../server/collaboration/item-evidence.js';
 import {runtimeTools} from '../server/collaboration/runtime-common.js';
 import {sessionFingerprint} from '../server/collaboration/continuity.js';
 import type {Obligation} from '../shared/obligations.js';
@@ -164,5 +164,73 @@ test('an old source, quoted example, attachment instruction or private invitatio
       assert(!spec||!JSON.stringify(spec.inputSchema).includes('missingEvidence'));
       f.finish(run,invalid);assert.equal(f.store.obligations.list(f.cid).length,0);
     } finally{f.owner.close();}
+  }
+});
+
+const labelled='甲站：门牌需核对。\n北区 B-2：核对场地。\n交接单请只交付一个 JSON 数组，每项含 item（上述项目名）、status（现况）、refs（原始回执编号数组）。';
+const names=['甲站','北区 B-2'];
+
+test('only an explicit item label contract freezes a single unambiguous original list',()=>{
+  assert.deepEqual(requestedItemNames(labelled),names);
+  assert.deepEqual(requestedItemNames(labelled.replace('item（上述项目名）','item=上述项目名称')),names);
+  assert.deepEqual(requestedItemNames(labelled.replace('item（上述项目名）','item（原样使用上文标签）')),names);
+  assert.deepEqual(requestedItemNames('Return a JSON array. Each row includes item (the labels listed below), sources (a list of original document IDs).\n- Desk A: one.\n- Desk B: two.'),['Desk A','Desk B']);
+  for(const text of [
+    labelled.replace('上述项目名','项目名'),labelled.replace('上述项目名','上述项目'),
+    labelled.replace('上述项目名','上述项目名称及说明'), labelled.replace('上述项目名','下列项目名'),
+    labelled.replace('item（上述项目名）','item（描述）、other（上述项目名）'),
+    labelled.replace('item（上述项目名）','spec.item（上述项目名）'),
+    labelled.replace('甲站：','北区 B-2：'), '旧项：先前事项。\n\n'+labelled,
+    labelled.replace('北区 B-2：','北区 B-2（旧）：'),'示例：\n'+labelled,
+    labelled.split('\n').map(line=>'> '+line).join('\n'), '“'+labelled+'”','\x60\x60\x60\n'+labelled+'\n\x60\x60\x60',
+    labelled.replace('item（上述项目名）','title').replace('。\n交接单','。\n请保留 item（上述项目名）。\n交接单'),
+    labelled.replace('refs（原始回执编号数组）','refs（可选）'),
+    labelled.replace('请只交付','不要交付')
+  ])assert.equal(requestedItemNames(text),undefined,text);
+});
+
+test('published labels are exact strings; the returned owner may repair the same tool receipt once',()=>{
+  const f=fixture();
+  try{
+    const ask=f.store.send(f.cid,{requestId:randomUUID(),content:'@Codex '+labelled.replace('甲站：','核对以下材料。\n甲站：'),attachmentIds:[f.file.id]}).source;
+    assert.deepEqual(ask.itemNames,names);
+    const first=f.run(),root=f.open(first);
+    assert.deepEqual(f.store.contract(first).itemNames,names);
+    assert.equal(f.store.prepareInput(first).manifest.renderVersion,'room-exact-item-names-v1');
+    f.store.requestCollaboration(first,'check',{targets:['claude'],content:'请独立核对。',delivery:{obligationId:root.id,version:'v1',acceptance:'给出意见'}});
+    f.finish(first,'已邀请核对。');
+    const peer=f.run();assert.equal(f.store.contract(peer).itemNames,undefined);
+    const child=f.store.obligations.context(peer)[0]!;
+    f.tool(peer,'obligation_report',{obligationId:child.id,version:'v1',outcome:'passed',summary:'北区 B-2 已核对。'});f.finish(peer,'已回报。');
+    const author=f.run();
+    assert.deepEqual(f.store.contract(author).itemNames,names);
+    const table=(keys:unknown[])=>JSON.stringify(keys.map(item=>({item,refs:['QZ-618-3']})));
+    const deliver=(body:string)=>f.tool(author,'obligation_deliver',{obligationId:root.id,summary:body},'deliver');
+    for(const [keys,error] of [
+      [['甲站（门牌需核对）','北区 B-2'],/第 1 行/],[['甲站','北区 B-2 '],/第 2 行/],
+      [['甲站','北区 b-2'],/第 2 行/],[['甲站','甲站'],/第 2 行重复/],[['甲站','北区 B-2','新增'],/第 3 行/],
+      [[null,'北区 B-2'],/第 1 行/],[['北区 B-2'],/缺少.*甲站/],[[],/缺少/]
+    ] as [unknown[],RegExp][]){
+      assert.throws(()=>deliver(table(keys)),e=>e instanceof Error && error.test(e.message) && names.every(n=>e.message.includes(n)));
+      assert.equal(f.read(root.id).state,'open');assert.equal(f.read(root.id).delivery,undefined);
+    }
+    const body=table([...names].reverse());
+    assert.equal(deliver(body).state,'delivery_pending');assert.equal(deliver(body).state,'delivery_pending');
+    f.finish(author,'交接单已整理。');
+    assert.equal(f.read(root.id).state,'delivered');assert.equal(f.store.detail(f.cid).messages.filter(m=>m.content===body).length,1);
+  }finally{f.owner.close();}
+});
+
+test('prior sources and attachment-only lists keep their original evidence-only contract',()=>{
+  for(const old of [true,false]){
+    const f=fixture();
+    try{
+      const attachment=f.attachment(f.cid,labelled+'\nG-37 已收到。');
+      const source=f.store.send(f.cid,{requestId:randomUUID(),content:old?'@Codex 请核对。\n'+labelled:'@Codex '+labelled.split('\n').at(-1),attachmentIds:[attachment.id]}).source;
+      if(old){assert.deepEqual(source.itemNames,names);delete source.itemNames;f.store.visibility.put('cc_sources',source);}
+      const run=f.run();assert.equal(f.store.contract(run).itemEvidenceField,'refs');assert.equal(f.store.contract(run).itemNames,undefined);
+      const root=f.open(run),body=JSON.stringify([{item:'自由标题',refs:['G-37']}]);
+      f.tool(run,'obligation_deliver',{obligationId:root.id,summary:body});f.finish(run,'就绪。');assert.equal(f.read(root.id).state,'delivered');
+    }finally{f.owner.close();}
   }
 });

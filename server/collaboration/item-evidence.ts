@@ -29,36 +29,57 @@ export function requestedEvidenceField(request:string):EvidenceField|undefined {
   }
 }
 
-// Freeze only a single complete list explicitly referenced by the item field of the
-// same output instruction. Attachments, quoted examples and peer input never supply keys.
+// Parse a declaration like item（上述项目名） or item = the names listed below.
+// A bare item field, an example, or a request for descriptions has no name contract.
+function nameDirection(instruction:string):'above'|'below'|undefined {
+  const fields=[...instruction.matchAll(/(?:^|[^\w.])['"\x60]?item['"\x60]?\s*(?:[（(=:：]|\bis\b)\s*([^，,。;；)）\n]+)/g)];
+  if(fields.length!==1)return;
+  const meaning=fields[0]![1]!.trim();
+  const cn=/^(?:原样使用|填写|使用|采用|为|取)?(?:与)?(上述|上列|上文|前述|以上|下列|下文|以下)的?(?:(?:项目|事项|条目|任务|条款)(?:名称|短名|名)|(?:短名|标签))(?:一致)?$/u.exec(meaning);
+  if(cn)return /下/.test(cn[1]!)?'below':'above';
+  return /^(?:the )?(?:exact )?(?:item |project |entry |row )?(?:names?|labels?) (?:listed |given )?(above|below)$/i.exec(meaning)?.[1]?.toLowerCase() as 'above'|'below'|undefined;
+}
+
 export function requestedItemNames(request:string):string[]|undefined {
-  const instructions=requestInstructions(request);
-  const clauses=instructions.split(/[。！!？?；;\n]/);
-  const namedItem=/\bitem\b[\x60"'”’）)]*\s*(?:[（(:：=]\s*|\s+(?:is|must be)\s+)(?:(?:与|对应|填写|使用|保留|等于|采用|取|为)\s*)?(?:(?:上述|上列|上面|上文|前述|以下|下列|下面|下文|列出)的?\s*(?:项目|条目|事项|条款|任务|行|标签)(?:名称|名|短名|标签)?|(?:项目|条目|事项|任务)(?:名称|名|短名)[（( ]*(?:同上|见上|如上)|(?:the\s+)?(?:exact\s+)?(?:item |project |row |entry )?(?:names?|labels?)\s+(?:(?:listed|given|specified)\s+)?(?:above|below))\s*(?=[）),，。;；\s]|$)/i;
-  const asksForNames=clauses.some((clause,i)=>{
-    const pair=clause+'。'+(clauses[i+1]??'');
-    return namedItem.test(pair) && !!requestedEvidenceField(pair);
+  const lines=requestInstructions(request.replace(/“item”/g,'item')).split(/\r?\n/).map(s=>s.trim());
+  const directives=lines.flatMap((line,i)=>{
+    if(!requestedEvidenceField(line+'\n'+(lines[i+1]??'')))return [];
+    // Do not treat a field in the preceding or following unrelated sentence as a schema.
+    const clauses=line.split(/[。！!？?；;]/);
+    for(let j=0;j<clauses.length;j++){
+      const out=clauses[j]!;
+      if(!/\bJSON\s*(?:数组|array\b)/i.test(out))continue;
+      const continuation=clauses[j+1]?.trim() || lines[i+1] || '';
+      const schema=/(?:每(?:一)?(?:条|项|行|个对象)|逐(?:条|项|行)|each (?:item|row|entry|object))/i.test(out) ? out :
+        out+'。'+continuation;
+      const direction=nameDirection(schema);
+      if(direction && requestedEvidenceField(schema))return [{index:i,direction}];
+    }
+    return [];
   });
-  if(!asksForNames)return;
-  const lines=instructions.split(/\r?\n/).map(line=>line.trim());
-  const entry=/^(?:[-*•]\s+|\d{1,3}[.、)]\s*)?([\p{L}\p{N}][\p{L}\p{M}\p{N} _.·&+\-/]{0,63}?)\s*[：:]\s*(\S.*)$/u;
-  const groups:string[][]=[];
-  let group:string[]=[];
-  for(const line of [...lines,'']){
-    const name=entry.exec(line)?.[1];
+  if(directives.length!==1)return;
+  const {index,direction}=directives[0]!;
+  const entry=/^(?:[-*•]\s+|\d{1,3}[.、)]\s*)?([\p{L}\p{N}][\p{L}\p{M}\p{N} _.·&+\-/]{0,63}?)\s*[：:]\s*\S/u;
+  const groups:{start:number;end:number;names:string[]}[]=[];
+  let names:string[]=[];
+  for(let i=0;i<=lines.length;i++){
+    const name=entry.exec(lines[i]??'')?.[1];
     if(name){
-      group.push(name);
-    }else if(group.length){
-      groups.push(group);
-      group=[];
+      names.push(name);
+    }else if(names.length){
+      groups.push({start:i-names.length,end:i-1,names});
+      names=[];
     }
   }
   if(groups.length!==1)return;
-  const names=groups[0]!;
-  // A single labelled line could be a heading. The strict list is opt-in and ambiguous
-  // or repeated declarations keep ordinary evidence validation.
-  if(names.length<2 || new Set(names).size!==names.length)return;
-  return names;
+  const list=groups[0]!;
+  if(direction==='above' ? list.end>=index : list.start<=index)return;
+  if(list.names.length<2 || new Set(list.names).size!==list.names.length)return;
+  // A malformed adjacent entry could belong to this same list. Never freeze a partial list.
+  const adjacent=[lines[list.start-1],lines[list.end+1]];
+  if(adjacent.some(line=>line && !line.includes('JSON') &&
+    (/^\s*(?:[-*•]|\d+[.、)])/.test(line) || /^[^。.!?！？]{1,80}[：:]\s*\S/.test(line))))return;
+  return list.names;
 }
 
 function reject(message:string):never {
@@ -87,17 +108,23 @@ function recordIds(materials:string[]) {
 export function checkItemEvidence(body:string,field:EvidenceField,materials:string[],itemNames?:readonly string[]) {
   let rows:unknown;
   try {rows=JSON.parse(body);} catch {reject('请交付可直接解析的 JSON 数组。');}
-  if(!Array.isArray(rows) || rows.length===0)reject('逐项证据表至少需要一行。');
+  if(!Array.isArray(rows))reject('请交付可直接解析的 JSON 数组。');
   if(itemNames){
     const expected=new Set(itemNames);
     const received=new Set<string>();
-    for(const row of rows){
-      if(!row || typeof row.item!=='string' || !expected.has(row.item) || received.has(row.item))break;
+    function nameError(detail:string):never {
+      throw new AppError(422,detail+' 原委托要求的 item 短名是 '+JSON.stringify(itemNames)+'；请逐字填写，每项恰好一行，然后重新提交。','invalid_item_names');
+    }
+    for(const [i,row] of rows.entries()){
+      if(!row || typeof row.item!=='string' || !expected.has(row.item))
+        nameError('第 '+(i+1)+' 行 item 缺失或与原文短名不符。');
+      if(received.has(row.item))nameError('第 '+(i+1)+' 行重复了 '+JSON.stringify(row.item)+'。');
       received.add(row.item);
     }
-    if(received.size!==expected.size || rows.length!==expected.size)
-      throw new AppError(422,'item 需逐行原样填写原委托短名，每项恰好出现一次：'+JSON.stringify(itemNames)+'。请保留原文大小写及空格，把说明放在其他字段，然后重新提交。','invalid_item_names');
+    const missing=itemNames.filter(name=>!received.has(name));
+    if(missing.length)nameError('缺少 '+JSON.stringify(missing)+'。');
   }
+  if(!rows.length)reject('逐项证据表至少需要一行。');
   const tokens=recordIds(materials);
   for(const [i,row] of rows.entries()) {
     const refs=row && typeof row==='object' && !Array.isArray(row)?row[field]:undefined;
