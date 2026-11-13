@@ -197,6 +197,25 @@ export class ObligationService {
   private link(source: string, id: string) {
     this.store.db.prepare('INSERT OR IGNORE INTO cc_obligation_sources VALUES(?,?)').run(source, id);
   }
+  publicRoomRootForReturn(source:SourceWork,memberId:string,instanceId:string) {
+    if(source.kind!=='job_result' || source.withdrawnAt || source.roomRuleTurn?.kind!=='host' ||
+       source.roomRuleTurn.publicationPolicy!=='room-root-v1')return;
+    const roots=this.forSource(source.id).filter(o=>!o.parentId && !ended(o) && o.conversationId===source.conversationId &&
+      o.currentSourceId===source.id && o.wakeSourceId===source.id && o.owner.memberId===memberId && o.owner.instanceId===instanceId);
+    if(roots.length!==1)return;
+    const root=roots[0]!, origin=this.store.contract(root.originInvocationId);
+    return origin.roomRuleTurn?.kind==='host' && origin.roomRuleTurn.publicationPolicy==='room-root-v1' &&
+      origin.primarySourceId===root.originSourceId && origin.roomMember?.id===instanceId &&
+      this.store.roomRules.ownsPublicRoot(root.id,source.conversationId,memberId,instanceId) ? root.id : undefined;
+  }
+  private assertRoomPublication(id:string,o:Obligation) {
+    const c=this.store.contract(id);
+    if(c.roomPublicationRootId===undefined)return;
+    const source=this.store.visibility.primary(id);
+    if(c.roomPublicationRootId!==o.id || !c.roomMember || !this.store.roomMembers.isCurrent(c.roomMember) ||
+       this.publicRoomRootForReturn(source,c.roomMember.memberId,c.roomMember.id)!==o.id)
+      conflict('此执行只可为原房间的当前主委托登记和交付正文。');
+  }
   itemEvidenceForReturn(source:SourceWork,instanceId:string) {
     if(source.kind!=='job_result' && source.kind!=='task_handoff')return;
     const roots=this.forSource(source.id).filter(o=>!o.parentId && !ended(o) && o.currentSourceId===source.id && o.owner.instanceId===instanceId);
@@ -451,6 +470,7 @@ export class ObligationService {
     if(o.externalOperation && (o.externalOperation.stage!=='recorded' || !o.externalOperation.receipt ||
       !value(args.summary,'最终交付').includes(o.externalOperation.receipt))) conflict('交付需要核实的外部回执，并在摘要中列出回执编号。');
     const c = this.store.contract(id);
+    this.assertRoomPublication(id,o);
     if(args.missingEvidence!==undefined) {
       if(!c.itemEvidenceField || args.summary!==undefined || args.publication!==undefined)
         conflict('缺证报告只适用于逐项证据表，请单独说明具体缺少的依据。');
@@ -729,6 +749,7 @@ export class ObligationService {
         this.save(o,'report_checked'); this.returnReport(o); return;
       }
       if (o.delivery?.invocationId === run.id) {
+        this.assertRoomPublication(run.id,o);
         const raw = this.store.db.prepare('SELECT value FROM cc_messages WHERE response_id=? AND conversation_id=?').get(run.responseId,run.conversationId) as {value:string} | undefined;
         const message: ConversationMessage | undefined = raw && JSON.parse(raw.value);
         if (!message || message.author !== 'member' || message.memberId !== run.memberId || message.visibility || message.deletedAt ||
@@ -936,6 +957,7 @@ export class ObligationService {
       if (o.parentId || ended(o)) conflict('责任已终结或不属于用户交付。');
       if (input.decision === 'accept') {
         if (o.state !== 'awaiting_acceptance' || !o.delivery?.messageId) conflict('当前没有待确认的最终交付。');
+        this.assertRoomPublication(o.delivery.invocationId,o);
         this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);

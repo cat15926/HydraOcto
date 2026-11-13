@@ -16,11 +16,15 @@ export function collectionWindow(targetCount:number, authorization?:RoomCollecti
  return {defaultMs:Math.min(authorizedCollectionMaxMs,Math.max(120_000,targetCount*120_000)),maximumMs:authorizedCollectionMaxMs};
 }
 interface RoomRulesProvider {
+ ownsPublicRoot(id:string,room:string,member:string,instance:string):boolean;
  collection(id:unknown,room:string,owner:string):RoomCollectionAuthorization|undefined;
  assertDelivery(id:string,room:string,summary:unknown):void;
 }
 export class RoomRules {
  constructor(private readonly providers:RoomRulesProvider[]){}
+ ownsPublicRoot(id:string,room:string,member:string,instance:string){
+  return this.providers.some(provider=>provider.ownsPublicRoot(id,room,member,instance));
+ }
  collection(id:unknown,room:string,owner:string){
   for(const provider of this.providers){const scope=provider.collection(id,room,owner);if(scope)return scope;}
  }

@@ -76,7 +76,7 @@ export interface MemberContextSnapshot {
   factors: Pick<import('./factors.js').FactorView, 'id' | 'version' | 'kind' | 'content' | 'parentIds' | 'sourceRef' | 'issuer' | 'expressionOptions'>[];
   obligations: {id:string; revision:number; goal:string; state:string; wait?:string}[];
 }
-export type RoomRuleTurn = ({ kind:'host' } | { kind:'player'; gameId:string; epoch:number }) & {
+export type RoomRuleTurn = ({ kind:'host'; publicationPolicy?:'room-root-v1' } | { kind:'player'; gameId:string; epoch:number }) & {
   /** New room sources may pass this policy to the private actions they actually authorize. */
   requestPolicy?: 'claude-header-v1';
 };
@@ -423,6 +423,8 @@ export interface ExecutionContractSnapshot {
   packageReplyReceipt?: true;
   collectionOwnerPolicy?: 'same-execution-v1';
   deliveryEvidencePolicy?: 'source-grounded-v1';
+  /** Exact publication for a room-rule host is bound to one current root and one host instance. */
+  roomPublicationRootId?: string;
   finalTextPolicy?: 'registered-v1';
   itemEvidenceField?: 'refs'|'sources';
   externalScope?: import('./obligations.js').ExternalScope;

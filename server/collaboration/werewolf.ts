@@ -136,6 +136,10 @@ export class WerewolfRules {
   const row=this.store.db.prepare('SELECT value FROM cc_werewolf WHERE id=? AND conversation_id=?').get(id,cid) as {value:string}|undefined;
   return row?JSON.parse(row.value) as Game:undefined;
  }
+ ownsPublicRoot(id:string,room:string,member:string,instance:string) {
+  const game=this.get(id,room);
+  return game?.host===member && game.hostInstance===instance;
+ }
  private receipt(action:PhaseActions) {
   const prior=this.store.invocation(action.invocation);
   if(prior.teardown!=='confirmed')return 'pending';

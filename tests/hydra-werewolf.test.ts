@@ -158,7 +158,7 @@ test('A pending legacy host source and its later player invitations retain the p
   store.send(room.id,{requestId:randomUUID(),content:'原有十二人局'});
   const source=JSON.parse(String(store.db.prepare('select value from cc_sources limit 1').get()!.value));
   assert.equal(source.roomRuleTurn.requestPolicy,'claude-header-v1');
-  delete source.roomRuleTurn.requestPolicy;
+  delete source.roomRuleTurn.requestPolicy;delete source.roomRuleTurn.publicationPolicy;
   store.db.prepare('update cc_sources set value=? where id=?').run(JSON.stringify(source),source.id);
   const host=store.admitNext()!.invocations[0]!;
   assert.deepEqual(store.contract(host.id).roomRuleTurn,{kind:'host'});
@@ -250,4 +250,82 @@ test('A released player who only read must return one failure and be re-invited 
   assert.throws(()=>verify({calls:calls.filter(c=>c.id!==replacement.id)}));
   assert.throws(()=>verify({game:{...game,actions:[...game.actions,game.actions.find(a=>a.by===missing.memberId)!]}}));
  }finally{owner.close();rmSync(path,{recursive:true,force:true});}
+});
+
+for(const mode of ['root','legacy','other-task','cancelled','user-acceptance'] as const)test('A public room host publishes its exact registered body only on its confirmed root return: '+mode,async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'hydra-host-default-delivery-')),db=new Store(join(dir,'state.sqlite'));
+ try{
+  const store=new CollaborationStore(db),template=store.members().find(m=>m.id==='claude')!;
+  for(const id of ids)store.saveMember({...template,id,name:id});
+  const room=store.create({title:'房间归属',memberIds:['claude',...ids],defaultMemberId:'claude',requestId:randomUUID()}).conversation.id;
+  const source=store.send(room,{requestId:randomUUID(),content:mode==='user-acceptance'?'请主持本局，最后交我验收。':'请主持本局并向我交付'}).source;
+  if(mode==='legacy'){
+   assert(source.roomRuleTurn?.kind==='host');delete source.roomRuleTurn.publicationPolicy;
+   store.visibility.put('cc_sources',source);
+  }
+  const start=()=>{
+   const admitted=store.admitNext()?.invocations;assert(admitted?.length);
+   for(const i of admitted){store.startInvocation(i.id);store.recordEvidence(i.id,{kind:'accepted',detail:{}});}
+   return admitted;
+  };
+  const end=(id:string,reply:string)=>{store.recordEvidence(id,{kind:'process_exit',detail:{confirmed:true,code:0}});store.finish(id,'succeeded',reply);};
+  const host=start()[0]!,root=(store.obligations.tool(host.id,'obligation_open',{goal:'原主委托',...(mode==='user-acceptance'&&{acceptance:'user'})},'open') as {obligation:Obligation}).obligation;
+  assert.equal(store.contract(host.id).finalTextPolicy,undefined);
+  const useGame=mode!=='other-task';
+  if(useGame){
+   store.werewolf.tool(host.id,'game_open',{obligationId:root.id});
+   // A legal final day position; ballots, settlement and acknowledgement all run through production code.
+   const game=store.werewolf.get(root.id,room)!;game.phase='vote';
+   const wolves=game.players.filter(p=>p.role==='wolf');wolves.slice(1).forEach(p=>p.alive=false);
+   store.db.prepare('UPDATE cc_werewolf SET value=? WHERE id=?').run(JSON.stringify(game),root.id);
+  }
+  const game=store.werewolf.get(root.id,room),targets=game?game.players.filter(p=>p.alive).map(p=>p.memberId):ids.slice(0,2);
+  const group=store.cooperation.createGroup(room,{requestId:randomUUID(),question:'表决',targets,obligationId:root.id},host.id).group;
+  end(host.id,'请各位表决。');
+  for(const s of start()){
+   assert.equal(store.contract(s.id).roomPublicationRootId,undefined);
+   if(game){
+    assert.deepEqual(runtimeTools(store.contract(s.id)).map(t=>t.name).sort(),['game_act','game_read']);
+    const wolf=game.players.find(p=>p.alive && p.role==='wolf')!;
+    store.werewolf.tool(s.id,'game_act',{epoch:1,target:s.memberId===wolf.memberId?targets.find(id=>id!==s.memberId):wolf.memberId});
+   }
+   end(s.id,'回报');
+  }
+  store.cooperation.groupTick();
+  const resumed=start()[0]!,current=store.contract(resumed.id),o=()=>store.obligations.list(room).find(o=>o.id===root.id)!;
+  assert.equal(current.primarySourceId,store.cooperation.groups(room).find(g=>g.id===group.id)!.contract?.wakeSourceId);
+  const submit=(summary:string,publication?:string)=>store.obligations.tool(resumed.id,'obligation_deliver',
+   {obligationId:root.id,summary,...(publication&&{publication})},'deliver-'+summary+(publication??''));
+  if(useGame){
+   assert.throws(()=>submit('提前交付'),/尚未结算/);
+   store.werewolf.tool(resumed.id,'game_settle',{epoch:1,obligationId:root.id});
+   assert.equal(store.werewolf.get(root.id,room)?.winner,'好人胜利');
+   assert.throws(()=>submit('狼人胜利'),/写明/);
+  }
+  if(mode==='legacy'||mode==='other-task'){
+   assert.equal(current.finalTextPolicy,undefined);assert.equal(current.roomPublicationRootId,undefined);
+   assert.throws(()=>submit('好人胜利','exact'),/冻结/);return;
+  }
+  assert.equal(current.finalTextPolicy,'registered-v1');assert.equal(current.roomPublicationRootId,root.id);
+  const foreign=store.create({title:'另一房间',memberIds:['claude',...ids],defaultMemberId:'claude',requestId:randomUUID()}).conversation.id;
+  assert.equal(store.roomRules.ownsPublicRoot(root.id,foreign,'claude',resumed.roomMember!.id),false);
+  assert.equal(store.roomRules.ownsPublicRoot(root.id,room,'claude',store.roomMembers.resolve(foreign,'claude').id),false);
+  const body='第 1 天投票结束。\n\n好人胜利。\n',carrier='主持已汇报完毕，感谢参与。';
+  submit(body);assert.equal(o().delivery?.publication,'exact');assert.equal(o().state,'delivery_pending');
+  if(mode==='cancelled'){
+   store.cancel(resumed.id);store.recordEvidence(resumed.id,{kind:'process_exit',detail:{confirmed:true}});store.finish(resumed.id,'cancelled','终止');
+   assert.equal(o().state,'blocked');assert(!store.detail(room).messages.some(m=>m.content===body));return;
+  }
+  store.finish(resumed.id,'succeeded',carrier);
+  assert.equal(o().state,'delivery_pending');assert(!store.detail(room).messages.some(m=>m.content===body||m.content===carrier));
+  store.recordEvidence(resumed.id,{kind:'process_exit',detail:{confirmed:true,code:0}});store.obligations.reconcile();
+  if(mode==='user-acceptance'){
+   assert.equal(o().state,'awaiting_acceptance');
+   await store.obligations.decide(room,root.id,{decision:'accept',expectedRevision:o().revision,requestId:randomUUID()});
+  }
+  assert.equal(o().state,'delivered');store.obligations.reconcile();
+  const pub=store.detail(room).messages.filter(m=>m.responseId===resumed.responseId);assert.equal(pub.length,1);
+  assert.equal(pub[0]?.id,o().delivery?.messageId);assert.equal(pub[0]?.content,body);
+  assert.equal(store.response(resumed.responseId).content,body);
+ }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });
