@@ -32,7 +32,7 @@ export function requestedEvidenceField(request:string):EvidenceField|undefined {
 // Parse a declaration like item（上述项目名） or item = the names listed below.
 // A bare item field, an example, or a request for descriptions has no name contract.
 function nameDirection(instruction:string):'above'|'below'|undefined {
-  const fields=[...instruction.matchAll(/(?:^|[^\w.])['"\x60]?item['"\x60]?\s*(?:[（(=:：]|\bis\b)\s*([^，,。;；)）\n]+)/g)];
+  const fields=[...instruction.matchAll(/(?:^|[^\w.])['"\x60]?item['"\x60]?\s*(?:[（(=:：]|\bis\b)\s*([^，,、。;；)）\n]+)/g)];
   if(fields.length!==1)return;
   const meaning=fields[0]![1]!.trim();
   const cn=/^(?:原样使用|填写|使用|采用|为|取)?(?:与)?(上述|上列|上文|前述|以上|下列|下文|以下)的?(?:(?:项目|事项|条目|任务|条款)(?:名称|短名|名)|(?:短名|标签))(?:一致)?$/u.exec(meaning);
@@ -41,9 +41,13 @@ function nameDirection(instruction:string):'above'|'below'|undefined {
 }
 
 export function requestedItemNames(request:string):string[]|undefined {
+  const rawLines=request.split(/\r?\n/).map(s=>s.trim());
   const lines=requestInstructions(request.replace(/“item”/g,'item')).split(/\r?\n/).map(s=>s.trim());
+  // Removing a multiline quotation can shift line numbers. Without an exact original
+  // list we cannot promise to preserve the user's labels.
+  if(lines.length!==rawLines.length)return;
   const directives=lines.flatMap((line,i)=>{
-    if(!requestedEvidenceField(line+'\n'+(lines[i+1]??'')))return [];
+    if(!/\bJSON\s*(?:数组|array\b)/i.test(line))return [];
     // Do not treat a field in the preceding or following unrelated sentence as a schema.
     const clauses=line.split(/[。！!？?；;]/);
     for(let j=0;j<clauses.length;j++){
@@ -65,6 +69,7 @@ export function requestedItemNames(request:string):string[]|undefined {
   for(let i=0;i<=lines.length;i++){
     const name=entry.exec(lines[i]??'')?.[1];
     if(name){
+      if(entry.exec(rawLines[i]!)?.[1]!==name)return;
       names.push(name);
     }else if(names.length){
       groups.push({start:i-names.length,end:i-1,names});

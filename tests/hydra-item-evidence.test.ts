@@ -181,7 +181,7 @@ test('only an explicit item label contract freezes a single unambiguous original
     labelled.replace('item（上述项目名）','item（描述）、other（上述项目名）'),
     labelled.replace('item（上述项目名）','spec.item（上述项目名）'),
     labelled.replace('甲站：','北区 B-2：'), '旧项：先前事项。\n\n'+labelled,
-    labelled.replace('北区 B-2：','北区 B-2（旧）：'),'示例：\n'+labelled,
+    labelled.replace('北区 B-2：','北区 B-2（旧）：'), labelled.replace('甲站：','甲“主”站：'),'示例：\n'+labelled,
     labelled.split('\n').map(line=>'> '+line).join('\n'), '“'+labelled+'”','\x60\x60\x60\n'+labelled+'\n\x60\x60\x60',
     labelled.replace('item（上述项目名）','title').replace('。\n交接单','。\n请保留 item（上述项目名）。\n交接单'),
     labelled.replace('refs（原始回执编号数组）','refs（可选）'),
