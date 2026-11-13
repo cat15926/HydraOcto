@@ -146,3 +146,80 @@ test('Frozen room authorizations protect old sources, collector, public projecti
   assert.equal(store.cooperation.groups(cid).length,2);assert.equal(store.admitNext(),undefined);
  }finally{owner.close();rmSync(path,{recursive:true,force:true});}
 });
+
+test('A released player who only read must return one failure and be re-invited by the exact owner before counting one successful action', async()=>{
+ const {inspectFailedPlayer,verifyPlayerRecovery}=await import('../scripts/hydra-werewolf-recovery.mjs');
+ const path=mkdtempSync(join(tmpdir(),'hydra-game-release-')),owner=new Store(join(path,'state.sqlite'));
+ try{
+  const store=new CollaborationStore(owner),template=store.members().find(m=>m.id==='claude')!;
+  for(const id of ids)store.saveMember({...template,id,name:id});
+  const cid=store.create({title:'重启分支',memberIds:['claude',...ids],defaultMemberId:'claude',requestId:randomUUID()}).conversation.id;
+  const calls:{id:string;room:string;member:string;session:string;pid:number;spawn:number;exit?:number;end?:number;tools:Record<string,unknown>[]}[]=[];
+  const start=()=>{
+   const runs=store.admitNext()?.invocations;assert(runs?.length);
+   for(const r of runs){
+    store.startInvocation(r.id);
+    const pid=calls.length+100,session=r.id;
+    store.recordEvidence(r.id,{kind:'prepared',detail:{pid}});
+    store.recordEvidence(r.id,{kind:'session',detail:{nativeSessionId:session,continuity:'fresh'}});
+    store.recordEvidence(r.id,{kind:'accepted',detail:{nativeSessionId:session}});
+    if(store.contract(r.id).roomRuleTurn?.kind==='player')store.recordEvidence(r.id,{kind:'diagnostic',detail:{observation:'game_player_tools'}});
+    calls.push({id:r.id,room:cid,member:r.memberId,session,pid,spawn:1,tools:[]});
+   }
+   return runs;
+  };
+  const trace=(id:string)=>calls.find(c=>c.id===id)!;
+  const end=(id:string,success=true)=>{
+   trace(id).end=trace(id).exit=success?100:300_001;
+   store.recordEvidence(id,{kind:'process_exit',detail:{confirmed:true,code:success?0:143}});
+   store.finish(id,success?'succeeded':'failed',success?'完成':'原生进程超时');
+  };
+  store.send(cid,{requestId:randomUUID(),content:'请本房十二位参赛成员完成标准局。'});
+  const host=start()[0]!,root=(store.obligations.tool(host.id,'obligation_open',{goal:'完成本局'},'open') as {obligation:Obligation}).obligation;
+  store.werewolf.tool(host.id,'game_open',{obligationId:root.id});
+  const invite=(id:string,targets:string[])=>{
+   const group=store.cooperation.createGroup(cid,{requestId:randomUUID(),question:'请各席签发决定',targets,obligationId:root.id},id).group;
+   trace(id).tools.push({name:'multi_mention',ok:true,group:group.id,obligation:root.id,targets});
+   return group;
+  };
+  const original=invite(host.id,ids);end(host.id);
+  const seats=start(),play=()=>store.werewolf.get(root.id,cid)!;
+  const missing=seats.find(r=>r.memberId===play().players.find(p=>p.role==='villager')!.memberId)!;
+  store.werewolf.tool(missing.id,'game_read',{});trace(missing.id).tools.push({name:'game_read',ok:true});end(missing.id,false);
+  const audit=store.detail(cid),contract=store.contract(missing.id),run=store.invocation(missing.id);
+  const input={mode:'--restart',run,contract,game:play(),groups:audit.groups,evidence:audit.evidence,call:trace(missing.id)};
+  const attempt=inspectFailedPlayer(input);
+  assert.equal(attempt.exitCode,143);assert.equal(attempt.group,original.id);
+  for(const changes of [{mode:'--normal'},{run:{...run,teardown:'unknown'}},{run:{...run,status:'interrupted'}},
+   {run:{...run,cancelRevision:1}},{contract:{...contract,roomRuleTurn:{kind:'host'}}},
+   {call:{...input.call,tools:[{name:'game_act',ok:false}]}},
+   {game:{...input.game,actions:[{epoch:1,by:missing.memberId,invocation:missing.id}]}},
+   {groups:[]},{evidence:input.evidence.filter(e=>e.kind!=='process_exit')}])assert.throws(()=>inspectFailedPlayer({...input,...changes}));
+  assert.equal(store.obligations.list(cid)[0]!.activeGroupId,original.id);
+  const act=(id:string)=>{
+   const g=play(),p=g.players.find(p=>p.memberId===store.invocation(id).memberId)!;
+   const target=p.role==='wolf'?g.players.find(s=>s.role==='villager')!.memberId:p.role==='seer'?g.players.find(s=>s!==p)!.memberId:undefined;
+   store.werewolf.tool(id,'game_act',{epoch:1,...(target&&{target})});
+   trace(id).tools.push({name:'game_act',epoch:1,ok:true});
+  };
+  for(const s of seats.filter(r=>r.id!==missing.id)){act(s.id);end(s.id);}
+  store.cooperation.groupTick();store.cooperation.groupTick();
+  const resumed=start()[0]!,read=store.werewolf.tool(resumed.id,'game_read',{obligationId:root.id});
+  assert('missing' in read);assert.deepEqual(read.missing,[missing.memberId]);
+  trace(resumed.id).tools.push({name:'game_read',ok:true,epoch:1,missing:read.missing});
+  assert.throws(()=>store.werewolf.tool(resumed.id,'game_settle',{epoch:1,obligationId:root.id}));
+  const repair=invite(resumed.id,read.missing);end(resumed.id);
+  const replacement=start()[0]!;act(replacement.id);act(replacement.id);end(replacement.id);
+  store.cooperation.groupTick();const judge=start()[0]!;
+  store.werewolf.tool(judge.id,'game_settle',{epoch:1,obligationId:root.id});
+  const details=store.detail(cid),game=play();
+  assert.equal(game.epoch,2);assert.equal(game.actions.length,12);
+  const verify=(overrides={})=>verifyPlayerRecovery(attempt,{details,game,calls,contractFor:(id:string)=>store.contract(id),...overrides});
+  const recovered=verify();assert.equal(recovered.repairGroup,repair.id);assert.equal(recovered.replacement,replacement.id);
+  const consumed=details.consumptions.find(c=>c.sourceId===recovered.wake)!;
+  assert.throws(()=>verify({details:{...details,consumptions:[...details.consumptions,consumed]}}));
+  assert.throws(()=>verify({details:{...details,groups:details.groups.filter(g=>g.id!==repair.id)}}));
+  assert.throws(()=>verify({calls:calls.filter(c=>c.id!==replacement.id)}));
+  assert.throws(()=>verify({game:{...game,actions:[...game.actions,game.actions.find(a=>a.by===missing.memberId)!]}}));
+ }finally{owner.close();rmSync(path,{recursive:true,force:true});}
+});

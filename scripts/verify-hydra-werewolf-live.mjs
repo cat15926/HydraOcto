@@ -11,6 +11,7 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {createApplication} from '../server/index.ts';
 import {createCollaborationRuntime} from '../server/collaboration/runtime.ts';
 import {isolatedClaude} from './hydra-test-native.mjs';
+import {inspectFailedPlayer,verifyPlayerRecovery} from './hydra-werewolf-recovery.mjs';
 
 const mode=process.argv[2];
 assert(['--check-config','--normal','--restart'].includes(mode));
@@ -24,7 +25,7 @@ if(mode==='--check-config'){console.log({mode,model:selected.model,maxCalls,maxM
 const calls=[], projections=[], observations=[], seals=new Set(), checks={};
 const sourceDir=fileURLToPath(new URL('../',import.meta.url));
 const sourceHash=createHash('sha256');
-const paths=execFileSync('git',['ls-files','-z','server','shared','scripts/verify-hydra-werewolf-live.mjs','scripts/hydra-test-native.mjs','package-lock.json'],{cwd:sourceDir}).toString().split('\0').filter(Boolean);
+const paths=execFileSync('git',['ls-files','-z','server','shared','scripts/verify-hydra-werewolf-live.mjs','scripts/hydra-werewolf-recovery.mjs','scripts/hydra-test-native.mjs','package-lock.json'],{cwd:sourceDir}).toString().split('\0').filter(Boolean);
 for(const path of paths)sourceHash.update(path).update('\0').update(readFileSync(join(sourceDir,path)));
 const source={commit:execFileSync('git',['rev-parse','HEAD'],{cwd:sourceDir}).toString().trim(),sha256:sourceHash.digest('hex')};
 const proof={passed:false,mode,model:selected.model,source,maxCalls,maxMinutes,perProcessMs,checks,calls,userSubmissions:0,userAdvances:0};
@@ -34,7 +35,8 @@ const roster=['host',...players];
 const roomRequest='@主持 请组织其余十二名成员打一局标准十二人预女猎白，由你负责到终局。大家自主决定夜间行动、白天公开观点和投票，我全程旁观，不查看身份、查验原件，也不参与推进。按本房既定规则结算后，向我报告真实胜方和关键公开经过。';
 const native=createCollaborationRuntime({privateRoots:[join(dir,'db')],timeoutMs:perProcessMs});
 let app,url,cid,sideId,sideMember,sideStart,restarted=false,pause=false,budgetStopped=false;
-const reservations=new Set();
+const reservations=new Set(),failedPlayers=new Map();
+proof.failedPlayerAttempts=[];
 async function post(path,body){
  const response=await fetch(url+path,{method:'POST',headers:{'content-type':'application/json','x-csrf-token':app.csrfToken},body:JSON.stringify(body)});
  assert(response.ok,'HTTP '+response.status+' '+path+': '+(response.ok?'':await response.text()));
@@ -62,6 +64,7 @@ const runtime={...native,async invoke(req){
     observations.push({room:entry.room,member:entry.member,data:JSON.stringify(out)??''});
     if(name.startsWith('game_')){
      tool.epoch=out.epoch;tool.phase=out.phase;
+     if(name==='game_read' && entry.member==='host' && out.missing)tool.missing=[...out.missing];
      if(name==='game_read'||name==='game_act'){
       for(const r of out.investigations??[])seals.add(r.seal);
       if(mode==='--restart'&&!sideStart&&out.yourRole==='seer'){
@@ -83,7 +86,12 @@ async function boot(){
  app=await createApplication({dataDir:join(dir,'db'),workspace,port:0,collaborationRuntime:runtime});
  const store=app.collaborationStore,launch=store.cooperation.canLaunch.bind(store.cooperation);
  store.cooperation.canLaunch=i=>{
-  if((pause&&i.conversationId===cid&&i.memberId==='host')||!launch(i))return false;
+  if(pause && i.conversationId===cid && i.memberId==='host'){
+   const root=store.obligations.list(cid).find(o=>!o.parentId);
+   const actions=root&&store.werewolf.get(root.id,cid)?.actions.filter(a=>a.epoch===1);
+   if(actions?.length===12 && actions.every(a=>store.invocation(a.invocation).status==='succeeded'))return false;
+  }
+  if(!launch(i))return false;
   if(!reservations.has(i.id)&&reservations.size>=maxCalls){budgetStopped=true;return false;}
   reservations.add(i.id);return true;
  };
@@ -109,10 +117,19 @@ try{
   if(budgetStopped&&!inv.some(i=>i.dispatchStarted&&['running','cancel_requested'].includes(i.status)))throw Error('Native budget reached. Remaining deliveries stay unstarted on the original obligation.');
   const stamp=[inv.length,ob?.revision,g?.actions.length,calls.reduce((n,c)=>n+c.tools.length,0)].join('/');
   if(stamp!==last){last=stamp;idle=Date.now();}
-  if(inv.some(i=>['failed','interrupted','cancelled'].includes(i.status)))throw Error('A native game execution failed');
+  for(const run of inv.filter(i=>['failed','interrupted','cancelled'].includes(i.status))){
+   if(failedPlayers.has(run.id))continue;
+   const receipt={id:run.id,member:run.memberId,status:run.status,acceptance:run.acceptance,teardown:run.teardown};
+   proof.failedPlayerAttempts.push(receipt);
+   const evidence=current.db.prepare('SELECT value FROM cc_evidence WHERE invocation_id=?').all(run.id).map(row=>JSON.parse(row.value));
+   const attempt=inspectFailedPlayer({mode,run,contract:current.contract(run.id),game:g,groups:current.cooperation.groups(cid),
+    evidence,call:calls.find(c=>c.id===run.id)});
+   Object.assign(receipt,attempt);
+   failedPlayers.set(run.id,attempt);
+  }
   if(ob&&['blocked','cancelled','awaiting_acceptance'].includes(ob.state))throw Error('Main obligation '+ob.state+' '+ob.reason);
   if(ob?.state==='delivered'&&!running)break;
-  if(mode==='--restart'&&pause&&!restarted&&g?.actions.filter(a=>a.epoch===1).length===12&&inv.filter(i=>i.memberId!=='host').every(i=>i.status==='succeeded')&&sideStart){
+  if(mode==='--restart'&&pause&&!restarted&&g?.actions.filter(a=>a.epoch===1).length===12&&inv.filter(i=>i.memberId!=='host').every(i=>i.status==='succeeded'||failedPlayers.has(i.id))&&sideStart){
    await sideStart;
    if(!current.invocations().some(i=>i.conversationId===sideId&&i.status==='succeeded')){await sleep(600);continue;}
    const before=hash(JSON.stringify(g));await app.close();app=undefined;pause=false;restarted=true;await boot();
@@ -128,7 +145,15 @@ try{
  check('acceptedTerminalWinner',root.state==='delivered'&&game.phase==='finished'&&game.winner&&details.messages.find(m=>m.id===root.delivery?.messageId)?.content.includes(game.winner));
  check('zeroUserAdvances',proof.userSubmissions===1&&details.messages.filter(m=>m.author==='user').length===1);
  const all=details.invocations;
- check('acceptedConfirmedExecutions',all.every(i=>i.status==='succeeded'&&i.nativeSessionId&&i.teardown==='confirmed'&&i.acceptance==='accepted'));
+ if(mode==='--normal'){
+  check('acceptedConfirmedExecutions',all.every(i=>i.status==='succeeded'&&i.nativeSessionId&&i.teardown==='confirmed'&&i.acceptance==='accepted'));
+ }else{
+  const audit=current.detail(cid);
+  proof.recoveredPlayerAttempts=Array.from(failedPlayers.values(),attempt=>verifyPlayerRecovery(attempt,{
+   details:audit,game,calls,contractFor:id=>current.contract(id)}));
+  check('confirmedExecutionsWithAuditedPlayerRecoveries',all.every(i=>
+   (i.status==='succeeded'||(i.status==='failed'&&failedPlayers.has(i.id)))&&i.nativeSessionId&&i.teardown==='confirmed'&&i.acceptance==='accepted'));
+ }
  check('actionsBoundToNativeAuthors',game.actions.every(a=>calls.find(c=>c.id===a.invocation&&c.member===a.by&&c.tools.some(t=>t.name==='game_act'&&t.ok))));
  check('actualHostInvitations',details.groups.every(g=>calls.find(c=>c.id===g.callerInvocationId&&c.tools.some(t=>t.name==='multi_mention'&&t.group===g.id&&t.obligation===root.id))));
  check('allWakesConsumedOnce',details.groups.every(g=>g.state==='done'&&g.contract?.wakeSourceId&&details.consumptions.filter(c=>c.sourceId===g.contract.wakeSourceId&&c.memberId==='host').length===1));
@@ -143,12 +168,24 @@ try{
  check('stagesCovered',['night','discuss','vote','finished'].every(phase=>calls.some(c=>c.tools.some(t=>t.name.startsWith('game_')&&t.phase===phase))));
  if(mode==='--restart'){
   const other=calls.find(c=>c.room===sideId),counterpart=calls.find(c=>c.room===cid&&c.member===sideMember&&c.spawn<other?.exit&&other?.spawn<c.exit);
-  check('distinctOverlappingProcesses',restarted&&other?.pid&&counterpart?.pid&&other.pid!==counterpart.pid&&other.session!==counterpart.session);
+  check('distinctOverlappingProcesses',restarted&&other?.pid&&counterpart?.pid&&other.pid!==counterpart.pid&&
+   other.session&&counterpart.session&&other.session!==counterpart.session);
   const peer=await(await fetch(url+'/api/conversations/'+sideId)).json();
   check('independentInstanceAndInputs',!Array.from(seals).some(s=>JSON.stringify(peer).includes(s))&&current.roomMembers.resolve(cid,sideMember).id!==current.roomMembers.resolve(sideId,sideMember).id);
-  proof.isolation={sideId,sideMember,sidePid:other.pid,primaryPid:counterpart.pid};
+  const inputs=[other,counterpart].map(c=>{
+   const contract=current.contract(c.id),run=current.invocation(c.id);
+   const manifests=current.db.prepare('SELECT value FROM cc_manifests WHERE invocation_id=?').all(c.id).map(row=>JSON.parse(row.value));
+   assert(contract.roomMember?.conversationId===c.room && contract.roomMember.memberId===c.member &&
+    run.status==='succeeded' && run.nativeSessionId===c.session && manifests.length===1 &&
+    manifests[0].responseId===run.responseId && manifests[0].contractId===contract.id && manifests[0].renderDigest);
+   return {invocation:c.id,memberInstance:contract.roomMember.id,source:contract.primarySourceId,
+    manifest:manifests[0].id,digest:manifests[0].renderDigest,session:c.session};
+  });
+  check('distinctFrozenInputs',inputs[0].source!==inputs[1].source && inputs[0].manifest!==inputs[1].manifest && inputs[0].digest!==inputs[1].digest);
+  proof.isolation={sideId,sideMember,sidePid:other.pid,primaryPid:counterpart.pid,inputs,
+   overlapMs:Math.min(other.exit,counterpart.exit)-Math.max(other.spawn,counterpart.spawn)};
  }
- proof.root=root;proof.acceptedInstances=all.map(i=>({id:i.id,room:i.conversationId,member:i.roomMember?.id,session:i.nativeSessionId,receipt:i.responseId}));proof.initialSource=root.originSourceId;proof.rounds=details.groups.map(g=>({id:g.id,source:g.sourceId,wake:g.contract.wakeSourceId,participants:g.targets,actual:g.results.map(r=>r.invocationId)}));
+ proof.root=root;proof.acceptedInstances=all.filter(i=>i.status==='succeeded').map(i=>({id:i.id,room:i.conversationId,member:i.roomMember?.id,session:i.nativeSessionId,receipt:i.responseId}));proof.initialSource=root.originSourceId;proof.rounds=details.groups.map(g=>({id:g.id,source:g.sourceId,wake:g.contract.wakeSourceId,participants:g.targets,actual:g.results.map(r=>r.invocationId)}));
  proof.publicTimeline=game.history;proof.epochs=game.epoch;proof.privateMarkDigests=[...seals].map(hash);proof.passed=true;
 }catch(e){proof.error=e.message;process.exitCode=1;}
 finally{
