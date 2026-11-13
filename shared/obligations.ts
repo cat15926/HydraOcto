@@ -74,6 +74,7 @@ export interface Obligation {
   delivery?: { invocationId: string; summary: string; publication?: 'exact'; messageId?: string; packageEdition?: string; finalReplyMarker?: string };
   /** A failed report may still have one intentional return to the owner. */
   blockedReturnSourceId?: string;
+  itemEvidenceSupplements?: {sourceId:string;revision:number;digest:string;content:string}[];
   reminderCount: number;
   reason?: string;
   revision: number;

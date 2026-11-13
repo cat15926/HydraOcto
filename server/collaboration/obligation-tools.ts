@@ -51,6 +51,7 @@ interface ObligationToolScope {
   obligationPolicy?: boolean;
   packageReplyReceipt?: true;
   finalTextPolicy?: 'registered-v1';
+  itemEvidenceField?: 'refs'|'sources';
   deliveryEvidencePolicy?: import('../../shared/collaboration.js').RuntimeRequest['deliveryEvidencePolicy'];
   continuationPolicy?: 'durable-v1';
   toolPolicyVersion?: string;
@@ -90,6 +91,11 @@ export function obligationTools(scope: ObligationToolScope) {
     const deliver=tools[index]!;
     tools[index]={...deliver,description:'Submit your ENTIRE final public body, with all evidence the user requested, in summary (up to 20000 characters). By default on an ordinary commitment, and whenever publication=exact, the platform publishes that exact body after verified release. No extra prose is added. For an edition-bound package, follow its returned receipt unless you choose exact. To add notes in your own closing message choose publication=reply and include summary verbatim.',
       inputSchema:object({obligationId:text,summary:text,publication:{type:'string',enum:['exact','reply']}},['obligationId','summary'])};
+  }
+  if(scope.finalTextPolicy && scope.itemEvidenceField) {
+    const index=tools.findIndex(t=>t.name==='obligation_deliver'),deliver=tools[index]!;
+    tools[index]={...deliver,description:'Submit the entire JSON array requested by the user (up to 20000 characters). After verified release the platform publishes exactly that body. Every row must cite original record IDs in its '+scope.itemEvidenceField+' array. For a genuinely unsupported item, submit missingEvidence explaining the gap instead of summary; this keeps the commitment blocked for evidence.',
+      inputSchema:object({obligationId:text,summary:text,publication:{type:'string',enum:['exact']},missingEvidence:text},['obligationId'])};
   }
   if(scope.deliveryEvidencePolicy==='source-grounded-v1') {
     for(const [i,tool] of tools.entries()) {

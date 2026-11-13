@@ -1,3 +1,4 @@
+import {checkItemEvidence, type EvidenceField} from './item-evidence.js';
 import { externalTargets, type ExternalReceipt } from './external-operations.js';
 import { expandDeliveryReply } from './delivery-reply.js';
 import { OpinionService } from './opinions.js';
@@ -196,6 +197,62 @@ export class ObligationService {
   private link(source: string, id: string) {
     this.store.db.prepare('INSERT OR IGNORE INTO cc_obligation_sources VALUES(?,?)').run(source, id);
   }
+  itemEvidenceForReturn(source:SourceWork,instanceId:string) {
+    if(source.kind!=='job_result' && source.kind!=='task_handoff')return;
+    const roots=this.forSource(source.id).filter(o=>!o.parentId && !ended(o) && o.currentSourceId===source.id && o.owner.instanceId===instanceId);
+    return roots.length===1 ? this.store.contract(roots[0]!.originInvocationId).itemEvidenceField : undefined;
+  }
+  private itemMaterials(id:string,field:EvidenceField,o?:Obligation):string[] {
+    const run=this.store.invocation(id), contract=this.store.contract(o?.originInvocationId??id);
+    const source=this.store.artifacts.get<SourceWork>('cc_sources',o?.originSourceId??contract.primarySourceId!);
+    if(source.kind!=='user'||source.conversationId!==run.conversationId||source.withdrawnAt||source.visibility||source.itemEvidenceField!==field||
+       source.revision!==contract.sourceRevision||contract.sourceDigest!==this.store.sourceDigest(source))
+      conflict('原始委托已经变化，不能继续引用其中的材料。');
+    const messages=this.store.visibility.messages(run.conversationId);
+    const user=messages.find(m=>m.sourceId===source.id && m.author==='user');
+    if(!user || user.deletedAt || user.branchOrigin || user.importedOrigin || this.store.visibility.messageScope(user) || user.content.trim()!==source.routingContent ||
+      !this.store.visibility.visible(user,run.memberId)) conflict('原始用户消息不可读取。');
+    if(this.store.workbench.compose(run.conversationId,{requestId:source.id,content:user.content,attachmentIds:source.attachmentIds})!==source.content)
+      conflict('原始委托与附件已发生变化，请重新核实。');
+    const materials=[user.content];
+    for(const aid of source.attachmentIds??[]){
+      const a=this.store.workbench.attachment(aid);
+      if(a.conversationId!==run.conversationId || !user.attachmentIds?.includes(aid) ||
+        messages.some(m=>m.attachmentIds?.includes(aid) && (m.deletedAt || this.store.visibility.messageScope(m))))
+        conflict('原始附件的读取范围已变化，请核对本项依据。');
+      if(a.mediaType==='text/plain')materials.push(this.store.workbench.attachmentContent(aid).content);
+    }
+    for(const extra of o?.itemEvidenceSupplements??[]){
+      const witness=this.store.artifacts.get<SourceWork>('cc_sources',extra.sourceId);
+      if(witness.conversationId!==run.conversationId || witness.withdrawnAt || witness.revision!==extra.revision ||
+        this.store.sourceDigest(witness)!==extra.digest)conflict('补充的依据已变化，需要重新核实。');
+      materials.push(extra.content);
+    }
+    return materials;
+  }
+  /** Inspect only a table-shaped final answer. Progress, peer reports and routine messages keep their own identity. */
+  rejectedItemReply(run:CollaborationInvocation,body:string) {
+    const c=this.store.contract(run.id), field=c.itemEvidenceField;
+    if(!field || !c.primarySourceId || !/^\s*(?:\x60{3}(?:json)?\s*)?\[\s*(?:\{|\])/i.test(body))return false;
+    const root=this.forSource(c.primarySourceId).find(o=>!o.parentId && o.currentSourceId===c.primarySourceId &&
+      o.owner.instanceId===run.roomMember?.id);
+    if(root?.state==='delivery_pending' && root.delivery?.publication==='exact')return false;
+    try {
+      checkItemEvidence(body,field,this.itemMaterials(run.id,field,root));
+      return false;
+    } catch(error) {
+      if(!(error instanceof AppError))throw error;
+      if((!root || root.state==='open') && run.status==='running' && run.acceptance==='accepted') {
+        const o=root??this.open(run.id,{goal:'按原委托逐项提交含记录编号的证据表'},'item-evidence-correction');
+        if(o.reminderCount>=1)this.block(o,'逐项证据表仍需修正：'+error.message);
+        else {
+          this.wake(o,'上一轮的证据表未交付。'+error.message,run.id);
+          o.reminderCount++;this.save(o,'reminded');
+        }
+      }
+      return true;
+    }
+  }
   isBoundSource(id: string): boolean {
     return !!this.store.db.prepare('SELECT 1 FROM cc_obligation_sources WHERE source_id=? LIMIT 1').get(id);
   }
@@ -393,16 +450,25 @@ export class ObligationService {
     if (o.parentId || o.state !== 'open') conflict('当前责任尚不具备最终交付条件。');
     if(o.externalOperation && (o.externalOperation.stage!=='recorded' || !o.externalOperation.receipt ||
       !value(args.summary,'最终交付').includes(o.externalOperation.receipt))) conflict('交付需要核实的外部回执，并在摘要中列出回执编号。');
+    const c = this.store.contract(id);
+    if(args.missingEvidence!==undefined) {
+      if(!c.itemEvidenceField || args.summary!==undefined || args.publication!==undefined)
+        conflict('缺证报告只适用于逐项证据表，请单独说明具体缺少的依据。');
+      return this.block(o,'交付缺少依据：'+value(args.missingEvidence,'缺证说明',1000));
+    }
+    if(c.itemEvidenceField){
+      if(args.publication!==undefined && args.publication!=='exact')conflict('证据表需按用户约定的 JSON 正文交付。');
+      checkItemEvidence(this.publicText(args.summary),c.itemEvidenceField,this.itemMaterials(id,c.itemEvidenceField,o));
+    }
     const last = this.raw(o.conversationId).filter(x => x.parentId === o.id).at(-1);
     if (last && (last.state !== 'delivered' || last.report?.outcome !== 'passed')) conflict('子委托未通过，不能完成最终交付。');
     this.store.roomRules.assertDelivery(o.id,o.conversationId,args.summary);
     this.opinions.assertDelivery(o);
     const packageEdition = this.store.versionPackages.deliveryProof(o.id);
-    const c = this.store.contract(id);
     if(args.publication!==undefined && ((!['exact','reply'].includes(String(args.publication))) || c.finalTextPolicy!=='registered-v1'))
       conflict('本次冻结的执行契约不支持指定交付正文。');
     const exact=c.finalTextPolicy==='registered-v1' && (args.publication==='exact' ||
-      (args.publication===undefined && !packageEdition));
+      (args.publication===undefined && (!packageEdition || !!c.itemEvidenceField)));
     const finalReplyMarker = !exact && packageEdition && c.coordinationPolicy && c.packageReplyReceipt
       ? '[delivery:' + randomUUID() + ']' : undefined;
     o.delivery = {invocationId:id,summary:exact ? this.publicText(args.summary) : value(args.summary,'最终交付'),...(exact && {publication:'exact' as const}),...(packageEdition && {packageEdition}),...(finalReplyMarker && {finalReplyMarker})}; o.state = 'delivery_pending';
@@ -434,6 +500,7 @@ export class ObligationService {
   tool(id: string, name: string, args: Record<string,unknown>, callId: string) {
     this.actor(id);
     const keys:Record<string,string[]> = {obligation_list:[],obligation_open:['goal','acceptance'],obligation_handoff:['obligationId','targetMemberId','reason'],obligation_report:['obligationId','version','outcome','summary','evidenceId'],obligation_deliver:['obligationId','summary','publication'],obligation_wait:['obligationId','condition','deadline','kind']};
+    if(name==='obligation_deliver' && this.store.contract(id).itemEvidenceField)keys.obligation_deliver!.push('missingEvidence');
     if (!keys[name] || Object.keys(args).some(k => !keys[name]!.includes(k))) throw new AppError(400,'责任工具参数无效；身份与执行只能由平台提供。');
     if (name === 'obligation_list') {
       const obligations = this.context(id);
@@ -466,6 +533,8 @@ export class ObligationService {
         case 'obligation_wait': obligation = this.wait(id,args); break;
         default: throw new AppError(400,'未知责任工具。');
       }
+      if(name==='obligation_deliver' && args.missingEvidence!==undefined) return {obligation,needsEvidence:true,
+        instruction:'已保留原委托和负责人。请在本轮说明缺证项并结束执行；用户可在原委托补充有编号的材料后复核。'};
       if(name==='obligation_deliver' && obligation.delivery?.publication==='exact') return {
         obligation, publication:'exact', instruction:'已登记你指定的最终公开正文。请结束本次执行；实际退出和验收条件满足后才会公开交付。'
       };
@@ -670,6 +739,8 @@ export class ObligationService {
         this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
+        const field=this.store.contract(run.id).itemEvidenceField;
+        if(field)checkItemEvidence(o.delivery.summary,field,this.itemMaterials(run.id,field,o));
         const marker = o.delivery.finalReplyMarker;
         const content = o.delivery.publication==='exact' && this.store.contract(run.id).finalTextPolicy==='registered-v1'
           ? o.delivery.summary : marker && o.delivery.packageEdition && this.store.contract(run.id).packageReplyReceipt
@@ -868,11 +939,17 @@ export class ObligationService {
         this.store.roomRules.assertDelivery(o.id,o.conversationId,o.delivery?.summary);
         this.opinions.assertDelivery(o);
         this.store.versionPackages.assertDelivery(o.id,o.delivery.packageEdition);
+        const field=this.store.contract(o.delivery.invocationId).itemEvidenceField;
+        if(field)checkItemEvidence(o.delivery.summary,field,this.itemMaterials(o.delivery.invocationId,field,o));
         this.endpoint(cid,o.owner.memberId); this.finishTask(o); o.state = 'delivered';
       } else if (input.decision === 'retry') {
         this.requireRetry(o);
         const note = input.reason === undefined ? '' : '\n用户补充的公开材料，请独立核对：' + value(input.reason,'补充材料',1000);
         this.wake(o,o.externalOperation?.stage==='unknown'?'请只用 obligation_external_lookup 查询原操作 '+o.externalOperation.id+' 并报告实际结果。':'用户要求复核先前的阻塞：' + (o.reason ?? '待核对') + '。请核对现有证据，需要新的项目操作时重新申请授权。' + note);
+        if(note && this.store.artifacts.get<SourceWork>('cc_sources',o.originSourceId).itemEvidenceField){
+          const s=this.store.artifacts.get<SourceWork>('cc_sources',o.currentSourceId);
+          (o.itemEvidenceSupplements??=[]).push({sourceId:s.id,revision:s.revision,digest:this.store.sourceDigest(s),content:input.reason!.trim()});
+        }
         o.state = 'open'; o.reminderCount = 0; o.waitCount = 0; o.groupCount = 0; delete o.reason; delete o.delivery;
       } else if (input.decision === 'cancel') {
         this.opinions.cancel(o);
