@@ -124,7 +124,7 @@ try {
   await click('确认项目工作授权'); await wait(()=>document.querySelector('#cc-workspace .cc-project-current')?.textContent.includes('已授权项目工作'));
   assert.equal(observed.length,2); checks.push('workbench can save grant independently without dispatching a request');
   const initialRevision = detail().conversation.workspaceGrant.revision;
-  const permission = card + ' input[type="checkbox"]';
+  const permission = card + ' input[type="checkbox"]:not([data-project-native-approval])';
   async function expandReviewPermission() {
     await click('项目权限');
     await see(permission); await page.focus(permission); await page.keyboard.press('Space');
