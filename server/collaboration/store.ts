@@ -16,7 +16,7 @@ import type { HistoryLine, ImportedOrigin } from '../../shared/collaboration.js'
 import type { SQLInputValue } from 'node:sqlite';
 import type { AcceptanceEvidence, CollaborationAccount, CollaborationEvent, CollaborationInvocation, CollaborationResponse, Consumption, Conversation, ConversationDetail, ConversationMessage, CreateConversation, Delivery, DispatchBatch, Member, RuntimeEvent, SendMessage, SourceWork, ExecutionContractSnapshot, InputManifest, RoutingDecision, RecoveryCheck, RecoveryRequest, RuntimeInspection, HoldRecheck, InputExposure, NativeSessionBinding, NativeSessionIdentity, NativeSessionPlan } from '../../shared/collaboration.js';
 import { AppError, canonical, now, Store } from '../store.js';
-import { parseMentions, resolveRouting } from './routing.js';
+import { parseMentions, resolveRouting, withoutLeadingMemberAddress } from './routing.js';
 import { assembleContext, CONTEXT_POLICY_VERSION } from './context.js';
 import { nativeUsage, sessionFingerprint } from './continuity.js';
 import { resolve, sep } from 'node:path';
@@ -502,7 +502,7 @@ export class CollaborationStore {
         if(!project && !input.resolveWhenIdle && !input.replyTo && !visibility && !input.excerptRefs?.length && !input.publicStatementFor &&
           source.finalTextPolicy && source.deliveryEvidencePolicy && source.requestedTargets.length===1){
           source.itemEvidenceField=requestedEvidenceField(input.content);
-          if(source.itemEvidenceField)source.itemNames=requestedItemNames(input.content);
+          if(source.itemEvidenceField)source.itemNames=requestedItemNames(withoutLeadingMemberAddress(input.content, c, this.members()));
         }
         source.routingContent = routingContent; source.attachmentIds = input.attachmentIds; this.put('cc_sources', source);
         if (routing) { routing.id = id(); routing.sourceId = source.id; source.routingDecisionId = routing.id;
