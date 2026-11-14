@@ -24,7 +24,7 @@ async function setup(folderPicker?: FolderPicker) {
 async function until(fn: () => boolean) { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 20)); } }
 test('N7 HTTP: configure real-directory member -> explicit workspace grant -> pure attachment -> actual runtime request and reply reference', async () => {
   const h = await setup(); try {
-    assert.equal(h.boot.version, '0.32.0-hydra-e');
+    assert.equal(h.boot.version, '0.32.1-folder');
     assert.equal((await h.api('/api/accounts/codex-cli/probe', { identity: 'forged' })).status, 400);
     assert.equal((await h.api('/api/accounts/codex-cli/probe', {})).status, 200);
     const member = { ...h.boot.members[0], aliases: ['reviewer'], model: 'fixture-model', expectedRevision: 1, requestId: rid() };

@@ -198,7 +198,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
     </>}
     {readonly ? <p className="cc-note">恢复会话后可设置项目文件夹。</p> : <>
       <div className="cc-project-actions">
-        <button ref={chooseButton} className={selected ? '' : 'cc-project-primary'} disabled={!!busy || waitingForExit} onClick={() => void candidate(intent && grant && !selected ? 'current' : 'pick', intent ? 'project-work' : 'read-only', intent && !selected ? grant?.reviewMode : undefined)}><WorkspaceIcon name="folder" />{busy === 'pick' ? '正在选择…' : selected ? '重新选择…' : intent && grant ? '核对当前项目' : grant ? '更换文件夹…' : '选择文件夹…'}</button>
+        <button ref={chooseButton} className={selected ? '' : 'cc-project-primary'} disabled={!!busy || waitingForExit} onClick={() => void candidate(intent && grant && !selected ? 'current' : 'pick', intent || (!grant && detail.messages.length === 0) ? 'project-work' : 'read-only', intent && !selected ? grant?.reviewMode : undefined)}><WorkspaceIcon name="folder" />{busy === 'pick' ? '正在选择…' : selected ? '重新选择…' : intent && grant ? '核对当前项目' : grant ? '更换文件夹…' : '选择文件夹…'}</button>
         {!intent && !c.importedFor && grant && !preview && !revoking && <button disabled={!!busy} onClick={() => {
           if (grant.mode === 'project-work') { nextFocus.current = 'confirm'; setRevokeAt(c.revision ?? 1); setError(''); setNotice(''); }
           else void candidate('current', 'project-work');

@@ -109,7 +109,7 @@ export function collaborationHttp(deps: HttpDependencies) {
       }
       if (request.method === 'GET' && path === '/api/collaboration/bootstrap') {
         const runtimes = await probe();
-        const body: CollaborationBootstrap = { version: '0.32.0-hydra-e', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
+        const body: CollaborationBootstrap = { version: '0.32.1-folder', workspace: deps.workspace, mcpReaders:store.options.mcpReaders?.catalog(), csrfToken: deps.csrfToken, members: store.members(), defaults: store.workbench.defaults(), accountObservations: store.workbench.observations(), configurationRevision: store.configurationRevision(), accounts: store.accounts().filter(a => !a.deletedAt).map(a => publicAccount(a, runtimes)), conversations: store.list(), runtimes, eventCursor: store.cursor() };
         json(response, 200, body); return true;
       }
       if (request.method === 'GET' && path === '/api/collaboration/runtimes') { json(response, 200, { runtimes: await probe() }); return true; }
