@@ -234,3 +234,21 @@ test('prior sources and attachment-only lists keep their original evidence-only 
     }finally{f.owner.close();}
   }
 });
+
+
+test('a real leading member address preserves the first exact label on the same line',()=>{
+  for(const address of ['@Codex ', '@codex\t', '@Codex\u3000']){
+    const f=fixture();
+    try{
+      const source=f.store.send(f.cid,{requestId:randomUUID(),content:address+labelled,attachmentIds:[f.file.id]}).source;
+      assert.deepEqual(source.itemNames,names);
+      const run=f.run(),root=f.open(run);
+      const malformed=JSON.stringify([{item:'甲站：门牌需核对',refs:['QZ-618-3']},{item:'北区 B-2',refs:['QZ-618-3']}]);
+      assert.throws(()=>f.tool(run,'obligation_deliver',{obligationId:root.id,summary:malformed}),/第 1 行/);
+      assert.equal(f.read(root.id).delivery,undefined);
+      const body=JSON.stringify(names.map(item=>({item,refs:['QZ-618-3']})));
+      f.tool(run,'obligation_deliver',{obligationId:root.id,summary:body});f.finish(run,'已完成');
+      assert.equal(f.read(root.id).state,'delivered');
+    }finally{f.owner.close();}
+  }
+});

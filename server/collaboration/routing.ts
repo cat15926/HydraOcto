@@ -38,6 +38,21 @@ export function parseMentions(content: string, conversation: Conversation, membe
   return targets;
 }
 
+/** Remove only an actual participant's leading address for schema parsing. */
+export function withoutLeadingMemberAddress(content: string, conversation: Conversation, members: Member[]): string {
+  const start = content.trimStart();
+  if (!start.startsWith('@')) return content;
+  const aliases = members.filter(member => conversation.memberIds.includes(member.id))
+    .flatMap(member => [member.id, member.name, ...(member.aliases ?? [])]).filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  const alias = aliases.find(name => start.slice(1, name.length + 1).toLocaleLowerCase() === name.toLocaleLowerCase()
+    && /^\s/.test(start.slice(name.length + 1)));
+  if (!alias) return content;
+  const address = start.slice(0, alias.length + 1);
+  if (parseMentions(address, conversation, members).length !== 1) return content;
+  return start.slice(address.length).trimStart();
+}
+
 /** A pure resolver shared by preview and the atomic source-admission transaction. */
 export function resolveRouting(input: RoutingInput): RoutingResolution {
   const { conversation, members, historyCursor, configurationRevision } = input;
