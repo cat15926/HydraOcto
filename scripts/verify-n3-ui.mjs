@@ -40,7 +40,7 @@ try {
   const page = await browser.newPage(); page.on('pageerror', e => errors.push(e.message)); await page.setViewport({ width: 1512, height: 982 });
   await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
   check('natural composer has no required routing controls', !(await page.$('.cc-composer select')));
-  const send = async (text, count) => { await page.type('#cc-message-input', text); await page.click('.cc-send-button'); await page.waitForFunction(n => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === n, {}, count); };
+  const send = async (text, count) => { await page.type('#cc-message-input', text); await page.click('.cc-send-button'); await page.waitForFunction(n => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === n, {}, count); };
   await send('@codex 首轮合成消息', 1); await send('继续处理', 2);
   check('second invocation carries exact saved native session', calls[1].nativeSessionId && calls[1].nativeSessionId !== undefined && calls[1].sessionPlan.mode === 'resume');
   await openWorkspaceTool(page, 'activity'); await page.waitForSelector('.cc-session-chain');

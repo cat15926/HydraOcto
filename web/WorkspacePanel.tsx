@@ -143,7 +143,7 @@ function WorkspacePanel({ detail, members, visible, request, onClose, onMessage,
       const done = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', done); handle.removeEventListener('pointercancel', done); };
       handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', done); handle.addEventListener('pointercancel', done);
     }}><span /></button>
-    <header className="cc-workspace-header"><span className="cc-workspace-eyebrow"><i />工作台</span><div><button className="cc-workspace-icon" onClick={() => dispatch({ type: 'expand' }, false)} aria-label={layout.expanded ? '还原工作台宽度' : '展开工作台'} aria-pressed={layout.expanded}><WorkspaceIcon name="expand" /></button><button className="cc-workspace-close" onClick={onClose} aria-label="关闭工作台"><WorkspaceIcon name="close" /></button></div></header>
+    <header className="cc-workspace-header"><span className="cc-workspace-eyebrow"><i />工作台</span><div><button className="cc-workspace-icon" onClick={() => dispatch({ type: 'expand' }, false)} aria-label={layout.expanded ? '还原工作台宽度' : '展开工作台'} aria-pressed={layout.expanded}><WorkspaceIcon name="expand" /></button><button className="cc-workspace-close" onClick={onClose} aria-label="关闭工作台"><WorkspaceIcon name="close" />收起</button></div></header>
     <div className="cc-workspace-tabs" ref={toolbar} role="navigation" aria-label="已打开的工作" onKeyDown={e => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
       const buttons = Array.from(toolbar.current?.querySelectorAll<HTMLButtonElement>('[data-view-tab],.cc-workspace-home-tab,.cc-workspace-add') ?? []), index = buttons.indexOf(e.target as HTMLButtonElement); if (index < 0) return;

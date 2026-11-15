@@ -54,7 +54,6 @@ export function NativeProjectActivity({ detail, run, cancelling, stop, command, 
   const approvals = (detail.interactions ?? []).filter(i => i.invocationId === run.id && i.kind === 'approval');
   const service=detail.evidence.find(e=>e.invocationId===run.id && e.detail.origin==='project_service');
   const browserChecks=detail.evidence.filter(e=>e.invocationId===run.id && e.detail.origin==='project_browser' && e.detail.result);
-  if (!browserChecks.length && !service && !approvals.length && !operations.length && !projectWork && !review && !exports.length && !detail.evidence.some(e => e.invocationId === run.id && e.detail.origin === 'project_web')) return null;
   const replacement = detail.evidence.find(event => event.invocationId === run.id && event.kind === 'session_replaced');
   const reason = typeof replacement?.detail.reason === 'string' ? replacement.detail.reason :
     run.sessionPlan?.mode === 'replace' ? run.sessionPlan.reason : undefined;

@@ -1,24 +1,4 @@
-import type { ReactNode } from 'react';
 import type { AcceptanceEvidence } from '../shared/collaboration';
-
-export function CitedReply({body,events,invocationId}:{body:string;events:AcceptanceEvidence[];invocationId:string}) {
-  const verified=new Set<string>();
-  for (const event of events) {
-    const result=event.detail.result as {url?:string} | undefined;
-    if (event.invocationId===invocationId && event.detail.origin==='project_web' && event.detail.name==='project_web_read' &&
-        event.detail.state==='completed' && result?.url && /^https?:\/\//.test(result.url)) verified.add(result.url);
-  }
-  if (!verified.size) return body;
-  const parts:ReactNode[]=[];
-  let at=0;
-  for (const match of body.matchAll(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>\x22）)。，、]+)/g)) {
-    const candidate=(match[2] ?? match[3]).replace(/[.,;]+$/,'');
-    if (!verified.has(candidate.split('#')[0])) continue;
-    parts.push(body.slice(at,match.index),<a key={match.index} href={candidate} target="_blank" rel="noreferrer">{match[1] ?? candidate}</a>);
-    at=match.index+(match[2] ? match[0].length : candidate.length);
-  }
-  return <>{parts}{body.slice(at)}</>;
-}
 
 export function ProjectWebSources({events,invocationId,running}:{events:AcceptanceEvidence[];invocationId:string;running:boolean}) {
   const calls = new Map<string,AcceptanceEvidence>();

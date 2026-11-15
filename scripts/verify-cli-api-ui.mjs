@@ -57,7 +57,7 @@ try {
   await page.screenshot({ path: join(output, 'cli-api-ui-empty-desktop.png') });
   await page.type('#cc-message-input', '请梳理持续协作方案，并请另一位成员复核。');
   await page.click('.cc-send-button');
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 2);
   check('one natural input creates a conversation and two real HTTP response records', calls.length === 2);
   check('second member is reached through A2A, not a fixed step list', calls[1].member.id === 'claude');
   const bootstrap = await (await fetch(url + '/api/collaboration/bootstrap')).json();
@@ -71,7 +71,7 @@ try {
   await page.screenshot({ path: join(output, 'cli-api-ui-desktop.png') });
   await page.type('#cc-message-input', '继续整理最终交付。');
   await page.click('.cc-send-button');
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 3);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 3);
   check('follow-up uses the same persistent conversation', (await (await fetch(url + '/api/collaboration/bootstrap')).json()).conversations.length === 1);
   check('follow-up includes earlier member output', calls[2].prompt.includes('复核完成'));
   await openWorkspaceTool(page, 'project');
@@ -123,7 +123,7 @@ try {
   await openWorkspaceTool(page, 'activity');
   await page.waitForSelector('.cc-run-card');
   await page.click('.cc-run-card .cc-text-button');
-  await page.waitForFunction(() => document.querySelector('.cc-message-member .cc-status-cancelled'));
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].some(button => button.textContent?.startsWith('已停止')));
   check('stop action waits for confirmed fixture exit', (await (await fetch(url + '/api/conversations/' + conversationId)).json()).invocations.at(-1).teardown === 'confirmed');
   await page.click('[aria-label="关闭工作台"]');
   await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });

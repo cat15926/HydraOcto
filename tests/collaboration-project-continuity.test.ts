@@ -132,3 +132,12 @@ for (const state of ['resumed','missing','changed_parent'] as const) test(`P2 gu
   assert.equal(events.some(e=>e.kind==='session'&&e.detail.historyVerified),state!=='changed_parent');
   assert.equal(projectTranscript([...before,...before],oldSession),undefined);assert.equal(projectTranscript(before,randomUUID()),undefined);
 });
+
+// Shell tools may persist cd inside the granted project; those records remain in the same native history.
+test('Claude project history accepts normalized child cwd and rejects escapes',()=>{
+ const session=randomUUID(), user=randomUUID(), assistant=randomUUID();
+ const rows=[{sessionId:session,type:'user',uuid:user,cwd:'/mnt/project'},{sessionId:session,type:'assistant',uuid:assistant,parentUuid:user,cwd:'/mnt/project/sub'}];
+ assert.equal(projectTranscript(rows,session)?.length,2);
+ for(const cwd of ['/mnt/project-other','/mnt/project/../private','/tmp','relative'])
+  assert.equal(projectTranscript([rows[0],{...rows[1],cwd}],session),undefined);
+});

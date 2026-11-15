@@ -386,9 +386,15 @@ def history_rows(carrier, path, session, anchor):
     out = []
     seen = set()
     for row in rows:
+        # CLI UI metadata is not a causal transcript node and may have no sessionId/cwd.
+        # Never relax identity checks for user/assistant records or unknown UUID-bearing types.
+        if row.get("type") in ("queue-operation", "ai-title", "last-prompt"):
+            continue
         if "uuid" not in row or row.get("isSidechain"):
             continue
-        require(row.get("sessionId") == session and row.get("cwd", PROJECT) == PROJECT and
+        cwd = row.get("cwd", PROJECT)
+        project_cwd = isinstance(cwd, str) and os.path.normpath(cwd) == cwd and (cwd == PROJECT or cwd.startswith(PROJECT + "/"))
+        require(row.get("sessionId") == session and project_cwd and
                 isinstance(row["uuid"], str) and isinstance(row.get("type"), str) and row["uuid"] not in seen,
                 "invalid Claude message identity")
         seen.add(row["uuid"])

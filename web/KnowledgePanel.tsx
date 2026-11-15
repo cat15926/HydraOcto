@@ -2,6 +2,7 @@ import type { OpenWorkspaceTarget } from './WorkspacePanel';
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { Conversation, ConversationDetail, ConversationMessage, Member, SearchResult } from '../shared/collaboration';
 import type { WorkbenchCommand } from './WorkbenchPanel';
+import { WorkspaceIcon } from './WorkspaceIcon';
 import { Choices, KnowledgeIcon, KnowledgeEmpty } from './KnowledgeUI';
 import { CrossExcerptShare, refFor } from './CrossExcerptShare';
 import { MemberMaterials } from './MemberMaterials';
@@ -11,10 +12,33 @@ const rid = () => crypto.randomUUID();
 const privateMessage = (m: ConversationMessage) => m.visibility?.kind === 'private' && !m.visibility.revealedAt;
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> { const r = await fetch(path, { signal, cache: 'no-store' }), b = await r.json(); if (!r.ok) throw new Error(b.error ?? '读取失败'); return b; }
 export function PrivateComposer({ members, selected, set, disabled }: { members: Member[]; selected: string[]; set: (ids: string[]) => void; disabled: boolean }) {
-  const [open, setOpen] = useState(false);
-  return <div className="cc-private-composer"><button type="button" disabled={disabled} onClick={() => setOpen(v => !v)}>{selected.length ? `私聊 · ${members.filter(m => selected.includes(m.id)).map(m => m.name).join('、')}` : '私聊'}</button>{selected.length > 0 && <button type="button" disabled={disabled} onClick={() => { set([]); setOpen(false); }}>返回公开会话</button>}{open && <div><p className="cc-note">仅你和选定成员可见；公开消息仍可直接发送。</p><Choices members={members} selected={selected} set={set} /></div>}</div>;
+  const [pending, edit] = useState<string[] | null>(null);
+  const root = useRef<HTMLDivElement>(null), trigger = useRef<HTMLButtonElement>(null), first = useRef<HTMLButtonElement>(null);
+  const id = useId(), open = pending !== null && !disabled;
+  const names = selected.map(id => members.find(m => m.id === id)?.name ?? '已移出成员');
+  const label = names.length ? '私聊 · ' + names[0] + (names.length > 1 ? ' 等 ' + names.length + ' 位' : '') : '会话内公开';
+  function close() { edit(null); trigger.current?.focus({preventScroll:true}); }
+  useEffect(() => {
+    if (!open) return;
+    first.current?.focus({preventScroll:true});
+    const outside = (e: PointerEvent) => { if (!root.current?.contains(e.target as Node)) edit(null); };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, [open]);
+  return <div className="cc-private-composer" ref={root} onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) edit(null); }}
+    onKeyDown={e => { if (open && e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } }}>
+    <button type="button" ref={trigger} className="cc-audience-trigger" data-private={!!names.length} aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? id : undefined}
+      title={names.length ? '仅你和' + names.join('、') + '可见' : '本会话所有成员可见'} disabled={disabled} onClick={() => edit(open ? null : [...selected])}>
+      <WorkspaceIcon name={names.length ? 'lock' : 'people'} /><span>{label}</span><WorkspaceIcon name="chevron" /></button>
+    {open && <div id={id} role="dialog" aria-label="消息可见范围" className="cc-audience-menu">
+      <strong>谁可以看到这条消息？</strong>
+      <button type="button" ref={first} onClick={() => { set([]); close(); }}>会话内公开{!names.length && ' ✓'}</button>
+      <small>或私聊指定成员</small><Choices members={members} selected={pending} set={edit} />
+      <button type="button" className="cc-audience-apply" disabled={!pending.length || pending.some(id => !members.some(m => m.id === id))} onClick={() => { set(pending); close(); }}>应用</button>
+    </div>}
+  </div>;
 }
-export function MessageActions({ message: m, detail, members, conversations = [], command, refresh, choose }: { conversations?: Conversation[]; message: ConversationMessage; detail: ConversationDetail; members: Member[]; command: WorkbenchCommand; refresh: () => Promise<void>; choose: (id: string) => void }) {
+export function MessageActions({ raw, toggleRaw, message: m, detail, members, conversations = [], command, refresh, choose }: { raw: boolean; toggleRaw?: () => void; conversations?: Conversation[]; message: ConversationMessage; detail: ConversationDetail; members: Member[]; command: WorkbenchCommand; refresh: () => Promise<void>; choose: (id: string) => void }) {
   const [mode, setMode] = useState<'share' | 'branch' | 'memory'>(), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const [start, setStart] = useState(0), [end, setEnd] = useState(m.content.length), [targets, setTargets] = useState<string[]>([]), [title, setTitle] = useState('');
   const selection = useRef<HTMLTextAreaElement>(null);
@@ -23,7 +47,11 @@ export function MessageActions({ message: m, detail, members, conversations = []
   const open = (next: typeof mode) => { setMode(mode === next ? undefined : next); setTitle(next === 'branch' ? `${detail.conversation.title} · 分支` : ''); setStart(0); setEnd(m.content.length); setTargets(next === 'branch' ? detail.conversation.memberIds : []); setError(''); };
   return <div className="cc-message-actions">
     {privateMessage(m) && <span className="cc-private-badge">私聊 · {m.visibility!.memberIds.map(id => members.find(x => x.id === id)?.name ?? id).join('、')}</span>}
-    <details><summary>更多操作</summary><div className="cc-knowledge-choices"><a href={`/api/conversations/${m.conversationId}/export?messageIds=${m.id}`} download>导出此消息</a><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('share')}>选段分享</button>{!privateMessage(m) && !m.excerptRefs?.length && m.content && <CrossExcerptShare message={m} room={detail.conversation} rooms={conversations} members={members} command={command} />}<button disabled={busy} onClick={() => open('branch')}>从此处分支</button><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('memory')}>存为记忆候选</button>{privateMessage(m) && !m.excerptRefs?.length && <button disabled={busy} onClick={() => void policy('reveal')}>公开此消息</button>}<button disabled={busy} onClick={() => void policy('delete')}>删除此消息</button></div></details>
+    <details><summary>更多操作</summary><div className="cc-knowledge-choices">{toggleRaw && <button type="button" onClick={event => {
+      const menu = event.currentTarget.closest('details');
+      toggleRaw();
+      if (menu) { menu.open = false; menu.querySelector('summary')?.focus({preventScroll:true}); }
+    }}>{raw ? '返回排版视图' : '查看 Markdown 原文'}</button>}<a href={`/api/conversations/${m.conversationId}/export?messageIds=${m.id}`} download>导出此消息</a><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('share')}>选段分享</button>{!privateMessage(m) && !m.excerptRefs?.length && m.content && <CrossExcerptShare message={m} room={detail.conversation} rooms={conversations} members={members} command={command} />}<button disabled={busy} onClick={() => open('branch')}>从此处分支</button><button disabled={busy || !!m.excerptRefs?.length || !m.content} onClick={() => open('memory')}>存为记忆候选</button>{privateMessage(m) && !m.excerptRefs?.length && <button disabled={busy} onClick={() => void policy('reveal')}>公开此消息</button>}<button disabled={busy} onClick={() => void policy('delete')}>删除此消息</button></div></details>
     {mode && <form className="cc-knowledge-form" onSubmit={e => { e.preventDefault(); void run(async () => {
       if (mode === 'branch') { const r = await command<{ result: Conversation }>(`/api/conversations/${m.conversationId}/branch`, { requestId: rid(), messageId: m.id, expectedRevision: m.revision ?? 1, title, memberIds: targets }); choose(r.result.id); }
       else { const ref = await refFor(m, start, end); if (mode === 'share') await command(`/api/conversations/${m.conversationId}/messages`, { requestId: rid(), content: '请查看我分享的选段。', excerptRefs: [ref], excerptTargets: targets });

@@ -1,7 +1,10 @@
+import { memberRuntimeDescription } from './member-runtime-description';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CollaborationBootstrap, ConfigurationPreview, ConversationDetail, ProjectCapability, ProjectIntent, WorkspaceGrant } from '../shared/collaboration';
 import type { WorkbenchCommand } from './WorkbenchPanel';
 import { WorkspaceIcon } from './WorkspaceIcon';
+
+export type DirectoryChoice = { id: string; path?: string; defaultWorkspace?: boolean };
 
 const basename = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
@@ -39,9 +42,10 @@ function memberAccess(data: CollaborationBootstrap, id: string, preview?: Projec
     : reason };
 }
 
-export function ProjectFolder({ detail, data, command, refresh, visible, intent, onResolved }: {
+export function ProjectFolder({ detail, data, command, refresh, visible, intent, onResolved, choice, permissionsOnly, onApplied, onBusy }: {
   detail: ConversationDetail; data: CollaborationBootstrap; command: WorkbenchCommand; refresh: () => Promise<void>;
   visible: boolean; intent?: ProjectIntent; onResolved?: () => void;
+  choice?: DirectoryChoice; permissionsOnly?: boolean; onApplied?: () => void; onBusy?: (busy: boolean) => void;
 }) {
   const c = detail.conversation, grant = c.workspaceGrant;
   const base = '/api/conversations/' + encodeURIComponent(c.id);
@@ -54,6 +58,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
   const filePermission = useRef<HTMLInputElement>(null);
   const readerSelect = useRef<HTMLSelectElement>(null);
   const reviewButton = useRef<HTMLButtonElement>(null);
+  const permissionButton = useRef<HTMLButtonElement>(null);
   const editingReview = useRef(false);
   const previewHeading = useRef<HTMLElement>(null);
   const nextFocus = useRef<'choose' | 'confirm' | 'reader' | 'filePermission' | null>(null);
@@ -81,7 +86,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
     if (!visible || busy || !nextFocus.current) return;
     const target = nextFocus.current === 'filePermission' ? filePermission.current : nextFocus.current === 'reader' ? readerSelect.current : nextFocus.current === 'confirm'
       ? confirmButton.current?.disabled ? previewHeading.current : confirmButton.current ?? chooseButton.current
-      : editingReview.current && reviewButton.current ? reviewButton.current : chooseButton.current;
+      : editingReview.current && reviewButton.current ? reviewButton.current : chooseButton.current ?? permissionButton.current;
     nextFocus.current = null;
     if (target?.getClientRects().length && !target.matches(':disabled') && !target.closest('[hidden], [inert], .cc-page-hidden')) {
       target.focus({ preventScroll: true });
@@ -97,7 +102,15 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
     return () => clearTimeout(timer);
   }, [preview, c.revision]);
 
-  async function candidate(source: 'pick' | 'current' | 'candidate', mode: WorkspaceGrant['mode'], reviewMode?: 'project',
+  useEffect(() => { onBusy?.(busy === 'apply' || busy === 'decision'); }, [busy, onBusy]);
+  useEffect(() => {
+    if (!choice) return;
+    // Defer until after StrictMode's mount cleanup so only one native picker opens.
+    const timer = setTimeout(() => void candidate(choice.path ? 'path' : 'pick', choice.defaultWorkspace || c.importedFor ? 'read-only' : 'project-work'), 0);
+    return () => clearTimeout(timer);
+  }, [choice?.id]);
+
+  async function candidate(source: 'pick' | 'current' | 'candidate' | 'path', mode: WorkspaceGrant['mode'], reviewMode?: 'project',
     option?: { readerId: string } | { nativeFileApprovals: boolean }) {
     const readerId = option && 'readerId' in option ? option.readerId : source === 'candidate'
       ? selected?.mcpReader?.id : source === 'current' && data.mcpReaders?.some(r => r.id === grant?.mcpReader?.id) ? grant?.mcpReader?.id : undefined;
@@ -115,7 +128,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
         next = result.preview;
       } else {
         next = await command<ConfigurationPreview>(base + '/workspace-preview', {
-          ...body, mode, ...(source === 'current' ? { useCurrent: true } : { fromPreviewId: preview?.id }),
+          ...body, mode, ...(source === 'path' ? { path: choice?.path ? choice.path.replace(/[\\/]+$/, '') + '/' : undefined } : source === 'current' ? { useCurrent: true } : { fromPreviewId: preview?.id }),
         }, controller.signal);
       }
       if (controller.signal.aborted) return;
@@ -148,6 +161,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
       } else return;
       if (activeRef.current) { nextFocus.current = 'choose'; if (intent) onResolved?.(); }
       await refresh();
+      if (action === 'apply' && activeRef.current) onApplied?.();
     } catch (e) {
       if (activeRef.current) {
         const stale = (e as {status?: number}).status === 409;
@@ -171,7 +185,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
   }
   function membersList(rows: ReturnType<typeof memberAccess>[]) {
     return <ul className="cc-project-capabilities">{rows.map(row =>
-      <li key={row.id}><strong>{memberName(row.id)}</strong>{row.identity && <span>{row.identity}</span>}<span>{row.reason}</span>
+      <li key={row.id}><strong>{memberName(row.id)}</strong><span>{(() => { const m=data.members.find(m=>m.id===row.id); return m ? memberRuntimeDescription(data,m) : '成员配置不可用'; })()}</span>{row.identity && <span>{row.identity}</span>}<span>{row.reason}</span>
         {row.login && <code>{row.login}</code>}{row.accountId && !readonly && <button type="button" className="cc-text-button" disabled={!!busy} aria-label={'重新检查' + memberName(row.id) + '的账户'} onClick={() => void checkLogin(row.accountId!)}>重新检查</button>}
       </li>)}</ul>;
   }
@@ -182,7 +196,7 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
       <blockquote>{intent.content}</blockquote>
       <p className="cc-note">{intent.origin ? waitingForExit ? '正在等待原执行确认退出。期间可以继续聊天，也可以放弃这一步。' : '原执行已退出。确认后，由原成员只执行上面建议的下一步。' : `确认后交给 ${names(intent.memberIds)}。选择文件夹期间可以继续聊天。`}</p>
     </> : <>
-      <h3>项目文件夹</h3>
+      <h3>{permissionsOnly ? '项目权限' : '项目文件夹'}</h3>
       <div className="cc-project-current"><span className="cc-project-symbol"><WorkspaceIcon name="folder" /></span><div><small>当前工作区</small><strong>{grant ? basename(grant.path) : '默认工作区'}</strong></div><small>{grant?.mode === 'project-work' ? '已授权项目工作' : '只读'}</small></div>
       {grant ? <code className="cc-project-path">{grant.path}</code> : <details className="cc-project-location"><summary>查看默认目录</summary><code>{data.workspace}</code></details>}
       {grant?.mode === 'project-work' && <details className="cc-project-location"><summary>已授权成员 · {workMembers.length}</summary>{membersList(workMembers.map(id => c.memberIds.includes(id) ? memberAccess(data, id) : { id, available: false, reason: '已移出会话' }))}</details>}
@@ -198,8 +212,8 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
     </>}
     {readonly ? <p className="cc-note">恢复会话后可设置项目文件夹。</p> : <>
       <div className="cc-project-actions">
-        <button ref={chooseButton} className={selected ? '' : 'cc-project-primary'} disabled={!!busy || waitingForExit} onClick={() => void candidate(intent && grant && !selected ? 'current' : 'pick', intent || (!grant && detail.messages.length === 0) ? 'project-work' : 'read-only', intent && !selected ? grant?.reviewMode : undefined)}><WorkspaceIcon name="folder" />{busy === 'pick' ? '正在选择…' : selected ? '重新选择…' : intent && grant ? '核对当前项目' : grant ? '更换文件夹…' : '选择文件夹…'}</button>
-        {!intent && !c.importedFor && grant && !preview && !revoking && <button disabled={!!busy} onClick={() => {
+        {!permissionsOnly && <button ref={chooseButton} className={selected ? '' : 'cc-project-primary'} disabled={!!busy || waitingForExit} onClick={() => void candidate(intent && grant && !selected ? 'current' : 'pick', intent || (!grant && detail.messages.length === 0) ? 'project-work' : 'read-only', intent && !selected ? grant?.reviewMode : undefined)}><WorkspaceIcon name="folder" />{busy === 'pick' ? '正在选择…' : selected ? '重新选择…' : intent && grant ? '核对当前项目' : grant ? '更换文件夹…' : '选择文件夹…'}</button>}
+        {!intent && !c.importedFor && grant && !preview && !revoking && <button ref={permissionButton} disabled={!!busy} onClick={() => {
           if (grant.mode === 'project-work') { nextFocus.current = 'confirm'; setRevokeAt(c.revision ?? 1); setError(''); setNotice(''); }
           else void candidate('current', 'project-work');
         }}>{grant.mode === 'project-work' ? '收回工作授权…' : '允许在此项目工作…'}</button>}
@@ -230,9 +244,10 @@ export function ProjectFolder({ detail, data, command, refresh, visible, intent,
           </select>
           {selected.mcpReader && <small>确认后，上列项目成员可将检索词发送到 {selected.mcpReader.origin}，通过 {selected.mcpReader.tool} 读取资料。仅在本会话中作为项目作者工作时生效。</small>}
         </label>}
-        {blocked && <p className="cc-note">这条委托的成员尚不具备项目执行能力。可按只读咨询发送，或保留委托稍后继续。</p>}
+        {blocked && <div className="cc-project-blocked" role="status"><strong>暂无法继续项目委托</strong>{intent?.memberIds.filter(id=>!previewRows.some(row=>row.id===id && row.available)).map(id=><p key={id}>{memberName(id)}：{previewRows.find(row=>row.id===id)?.reason || '当前会话未取得该成员的项目执行授权'}</p>)}<p>可按只读咨询发送，或保留委托，待执行环境就绪后继续。</p></div>}
         <div className="cc-project-actions">
           <button ref={confirmButton} className="cc-project-primary" disabled={!!busy || waitingForExit || blocked || preview.conversationRevision !== (c.revision ?? 1)} onClick={() => void commit('apply')}>{busy === 'apply' ? '正在授权…' : working ? intent ? '确认并继续委托' : '确认项目工作授权' : '确认只读授权'}</button>
+          {working && !intent && <button disabled={!!busy} onClick={() => void candidate('candidate', 'read-only')}>仅浏览文件</button>}
           {!working && !intent && !c.importedFor && <button disabled={!!busy} onClick={() => void candidate('candidate', 'project-work')}>查看项目工作权限</button>}
           <button disabled={!!busy} onClick={() => { nextFocus.current = 'choose'; setPreview(undefined); setError(''); }}>取消</button>
         </div>

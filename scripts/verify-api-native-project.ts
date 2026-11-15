@@ -1,0 +1,73 @@
+/** Real CLI + selected host API accounts; isolated DB and synthetic project. Three invocations per carrier. */
+import assert from 'node:assert/strict';
+import {mkdir,mkdtemp,readFile,realpath,stat,writeFile,unlink} from 'node:fs/promises';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {join,resolve} from 'node:path';
+import {randomUUID,createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
+import {createApplication} from '../server/index.js';
+import {createCollaborationRuntime} from '../server/collaboration/runtime.js';
+import {readProjectVm} from '../server/collaboration/project-vm.js';
+import {rerunMonthlyTest,createMonthlyFixture} from './runtime/monthly-project-fixture.js';
+import type {CollaborationBootstrap,CollaborationRuntime,ConversationDetail,Member,CollaborationAccount} from '../shared/collaboration.js';
+const exec=promisify(execFile),root=await realpath(process.env.HYDRA_SOURCE_ROOT || process.cwd());
+const vm=readProjectVm(process.env.HYDRA_API_VM_CONFIG || join(root,'.local-data/project-runtime/p02.json'));
+assert(vm?.historyProtocol && vm.manageMount,'需要已经核验、支持历史的专用项目执行器');
+const output=await mkdtemp(join(await realpath(process.env.VALIDATION_OUTPUT_DIR || join(root,'.local-data/validation/api-native-execution')),'live-'));
+const selected=process.argv.slice(2);assert(selected.every(x=>['codex','claude'].includes(x)),'仅支持codex/claude');
+const boot=await (await fetch('http://127.0.0.1:4310/api/collaboration/bootstrap')).json() as CollaborationBootstrap;
+const safeJson=(value:unknown)=>Object.entries(process.env).filter(([k,v])=>/API_KEY|AUTH_TOKEN|CREDENTIAL/.test(k)&&v&&v.length>5).reduce((s,[,v])=>s.replaceAll(v!,'[redacted]'),JSON.stringify(value,null,2));
+const results:Record<string,unknown>[]=[];
+for(const id of selected.length?selected:['claude','codex']){
+ const carrier=id==='codex'?'codex-app-server':'claude-cli';
+ const account=boot.accounts.find(a=>a.id===(id==='codex'?'codex-deepseek-key':'claude-glm-key'));
+ const source=boot.members.find(m=>m.id===id);
+ assert(account?.auth==='api' && source?.model && account.apiKeyEnv && process.env[account.apiKeyEnv],'现有API账号或模型未就绪');
+ assert(new URL(account.baseUrl!).hostname===(id==='codex'?'api.deepseek.com':'open.bigmodel.cn'),'账号供应商不匹配');
+ const work=await mkdtemp(join(vm.hostRoot,id+'-monthly-')),relative=work.split('/').at(-1)!;
+ const token=randomUUID().replaceAll('-',''),memory='MEMORY_'+randomUUID().replaceAll('-','');
+ await createMonthlyFixture(work,token);await writeFile(join(work,'marker.txt'),memory,{flag:'wx'});
+ await writeFile(join(work,'cancel_probe.py'),`import time\nfrom pathlib import Path\nPath('cancel-ready.txt').write_text('ready')\nfor i in range(1200):\n Path('heartbeat.txt').write_text(str(i))\n time.sleep(0.1)\n`,{flag:'wx'});
+ const gitEnv={PATH:'/usr/bin:/bin',HOME:'/var/empty',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@localhost',GIT_COMMITTER_NAME:'Fixture',GIT_COMMITTER_EMAIL:'fixture@localhost'};
+ const git=async(...args:string[])=>(await exec('/usr/bin/git',['-c','core.hooksPath=/dev/null','-C',work,...args],{env:gitEnv})).stdout;
+ await git('init','-q');await git('add','.');await git('commit','-qm','fixture');
+ const report:Record<string,unknown>={id,carrier,model:source.model,auth:'api',accountId:account.id,project:work,passed:false,invocationLimit:3};results.push(report);
+ const native=createCollaborationRuntime({projectVm:vm,timeoutMs:210000});let count=0;
+ const runtime:CollaborationRuntime={...native,async invoke(req){assert(++count<=3,'真实调用超过预算');assert.equal(req.member.carrier,carrier);assert.equal(req.account.id,account.id);assert(req.projectWork && req.account.auth==='api');assert(!req.prompt.includes(memory),'文件专用记忆进入平台提示');return native.invoke(req);}};
+ const app=await createApplication({port:0,workspace:join(output,id,'default'),dataDir:join(output,id,'db'),collaborationRuntime:runtime});
+ let cid:string|undefined;
+ try{
+  app.collaborationStore.saveAccount(account as CollaborationAccount);
+  const member:Member={...source,id,carrier,accountId:account.id,accountBinding:'override',modelBinding:'override',instructions:'使用真实原生文件和终端工具完成当前项目任务，仅修改本轮指定子目录，勿委托其他成员。'};
+  app.collaborationStore.saveMember(member);
+  const {url}=await app.start();
+  const post=async(path:string,body:unknown)=>{const r=await fetch(url+path,{method:'POST',headers:{'content-type':'application/json','x-csrf-token':app.csrfToken},body:JSON.stringify(body)});const value=await r.json();assert(r.ok,'HTTP '+r.status+' '+(value.error||path));return value;};
+  cid=(await post('/api/conversations',{title:'API 原生项目验收 '+id,memberIds:[id],defaultMemberId:id,requestId:randomUUID()})).conversation.id;
+  const base='/api/conversations/'+cid;
+  const wait=async(n:number)=>{const end=Date.now()+235000;while(Date.now()<end){const d=app.collaborationStore.detail(cid!);if(d.invocations.length>=n && d.invocations.slice(0,n).every(i=>!['prepared','running','cancel_requested'].includes(i.status)))return d;await delay(300);}throw Error('等待真实执行超时');};
+  const first=await post(base+'/messages',{requestId:randomUUID(),content:`@${member.name} 请修复项目子目录 ${relative} 中 export.py 漏掉零金额的问题。先运行 python3 check.py 复现，再读取并修改 export.py，重跑同一测试。用原生终端执行 git status --short 和 git diff -- export.py 查看改动。源码只改 export.py，保留 ledger.csv、check.py、marker.txt 和其他原文件；允许测试生成 checks.log 和 monthly.json，必须保留这两份验收产物，勿清理。不提交不推送。最后读取 marker.txt 记住其中内容，回复中不要包含该内容，不要另存。结束本轮，等我的下一条消息。`});
+  assert(first.intent?.id);
+  const preview=await post(base+'/workspace-preview',{path:vm.hostRoot,mode:'project-work',intentId:first.intent.id});
+  assert(preview.projectCapabilities.some((x:{memberId:string;available:boolean})=>x.memberId===id&&x.available));
+  await post(base+'/workspace-apply',{previewId:preview.id,requestId:randomUUID()});
+  let d=await wait(1);assert.deepEqual([d.invocations[0]!.status,d.invocations[0]!.acceptance,d.invocations[0]!.teardown],['succeeded','accepted','confirmed']);
+  assert(d.evidence.some(e=>e.invocationId===d.invocations[0]!.id && e.kind==='session' && e.detail.historyVerified===true),'首轮未形成可验证历史，停止付费续接');
+  const checks=await readFile(join(work,'checks.log'),'utf8');assert(checks.startsWith('fail\n')&&checks.includes('pass\n'),'原测试未先失败后通过');
+  await rerunMonthlyTest(vm,relative,'PASS_'+token);const diff=await git('diff','--','export.py');assert(diff.includes('-        if amount:') || diff.length>30);assert(!d.messages.some(m=>m.content.includes(memory)),'私有记忆在回复中泄露');
+  assert(d.evidence.some(e=>e.invocationId===d.invocations[0]!.id && e.detail.origin==='native' && typeof e.detail.commandLabel==='string' && /git (status|diff)/.test(e.detail.commandLabel)),'缺少原生Git命令证据');
+  report.first={invocationId:d.invocations[0]!.id,readWriteTestGit:true,hostDiffSha256:createHash('sha256').update(diff).digest('hex')};
+  await unlink(join(work,'marker.txt'));
+  await post(base+'/messages',{requestId:randomUUID(),content:`@${member.name} 继续。请使用上轮记住的标记，在 ${relative}/recovered.txt 写入该标记，不添加换行。marker.txt 已删除，不要重新读取或猜测，也不要把标记写入回复。`});
+  d=await wait(2);assert.deepEqual([d.invocations[1]!.status,d.invocations[1]!.teardown,d.invocations[1]!.continuity],['succeeded','confirmed','resumed']);
+  assert.equal(await readFile(join(work,'recovered.txt'),'utf8'),memory);report.continuation={nativeSessionId:d.invocations[1]!.nativeSessionId,sameSession:d.invocations[1]!.nativeSessionId===d.invocations[0]!.nativeSessionId,historyRestored:true};assert(report.continuation && (report.continuation as {sameSession:boolean}).sameSession);
+  await post(base+'/messages',{requestId:randomUUID(),content:`@${member.name} 请在 ${relative} 子目录用原生终端执行 python3 cancel_probe.py。它会持续更新 heartbeat.txt；让它在前台运行，不放到后台，不修改脚本，等待我从工作台停止本轮。`});
+  const until=Date.now()+120000;let ready=false;while(Date.now()<until){try{ready=(await readFile(join(work,'cancel-ready.txt'),'utf8'))==='ready';}catch{}if(ready)break;await delay(300);}assert(ready,'取消前没有真实运行的项目命令');
+  d=app.collaborationStore.detail(cid!);const inv=d.invocations[2];assert(inv);await post('/api/invocations/'+inv.id+'/cancel',{expectedInvocationRevision:inv.invocationRevision??1,requestId:randomUUID()});
+  d=await wait(3);assert.equal(d.invocations[2]!.teardown,'confirmed');const heartbeat=await readFile(join(work,'heartbeat.txt'),'utf8');await delay(1500);assert.equal(await readFile(join(work,'heartbeat.txt'),'utf8'),heartbeat,'取消后项目子进程仍在写入');
+  report.cancel={status:d.invocations[2]!.status,teardown:d.invocations[2]!.teardown,heartbeatStopped:true};report.passed=true;
+ }catch(e){report.error=e instanceof Error?e.message:String(e);process.exitCode=1;}
+ finally{report.executions=count;if(cid){const d=app.collaborationStore.detail(cid);await writeFile(join(output,id+'-detail.json'),safeJson(d),{mode:0o600});report.invocations=d.invocations.map(i=>({id:i.id,status:i.status,acceptance:i.acceptance,teardown:i.teardown,continuity:i.continuity,error:i.error}));}await app.close();await writeFile(join(output,'result.json'),safeJson(results),{mode:0o600});}
+ if(!report.passed)break;
+}
+console.log(JSON.stringify({output,results}));

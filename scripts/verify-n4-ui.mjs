@@ -31,7 +31,7 @@ try {
   const click = async (label, scope = 'body') => { await page.waitForFunction((label, scope) => [...document.querySelectorAll(scope + ' button')].some(b => b.textContent.trim() === label && !b.disabled), {}, label, scope); await page.evaluate((label, scope) => [...document.querySelectorAll(scope + ' button')].find(b => b.textContent.trim() === label).click(), label, scope); };
   await page.goto(url, { waitUntil: 'networkidle2' }); await page.waitForSelector('#cc-message-input');
   check('natural composer has no required task or routing options', !(await page.$('.cc-composer select')));
-  await page.type('#cc-message-input', '@codex 一条普通聊天'); await page.click('.cc-send-button'); await page.waitForSelector('.cc-status-succeeded'); await openWorkspaceTool(page, 'tasks');
+  await page.type('#cc-message-input', '@codex 一条普通聊天'); await page.click('.cc-send-button'); await page.waitForFunction(() => document.querySelector('.cc-message-member .cc-record-trigger')?.textContent === '执行记录'); await openWorkspaceTool(page, 'tasks');
   check('ordinary chat creates no mandatory task', (await page.$$('.cc-task-card')).length === 0);
   await click('新建任务'); await page.type('.cc-task-dialog input[name=title]', 'N4 正式交接验收'); await page.type('.cc-task-dialog textarea[name=description]', '这是一项有独立负责人和执行证据的合成任务。');
   await page.select('.cc-task-dialog select[name=ownerMemberId]', 'codex'); await click('保存', '.cc-task-dialog');

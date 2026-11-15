@@ -32,12 +32,12 @@ try {
   await click('返回会话', '.cc-memory-library');
   check('library navigation preserves the unsent conversation draft', await page.$eval('#cc-message-input',e=>e.value==='草稿保留')); await fill('#cc-message-input','');
   check('ordinary composer still has no required recipient/type selects', !(await page.$('.cc-composer select')));
-  await click('私聊', '.cc-private-composer'); await selectCheckbox('.cc-private-composer', 'Codex');
+  await page.click('.cc-audience-trigger'); await selectCheckbox('.cc-private-composer', 'Codex'); await page.click('.cc-audience-apply');
   await page.type('#cc-message-input', 'PRIVATE_BROWSER_TOKEN 保密数据'); await page.click('.cc-send-button'); await until(() => calls.length === 1); await page.waitForSelector('.cc-private-badge');
   const cid = calls[0].conversationId;
   check('private-first message never becomes shared conversation title', !app.collaborationStore.visibility.view(cid, 'claude').conversation.title.includes('PRIVATE_BROWSER_TOKEN'));
   check('optional private composer persists exact audience and actual prompt', calls[0].visibility.memberIds.join() === 'codex' && calls[0].prompt.includes('PRIVATE_BROWSER_TOKEN'));
-  await click('返回公开会话'); await page.type('#cc-message-input', '@claude PUBLIC_BROWSER_TOKEN'); await page.click('.cc-send-button'); await until(() => calls.length === 2);
+  await page.click('.cc-audience-trigger'); await click('会话内公开', '.cc-audience-menu'); await page.type('#cc-message-input', '@claude PUBLIC_BROWSER_TOKEN'); await page.click('.cc-send-button'); await until(() => calls.length === 2);
   check('public run cannot receive private prior content', !calls[1].prompt.includes('PRIVATE_BROWSER_TOKEN') && calls[1].member.id === 'claude');
   check('unread belongs to the conversation title and the chat has no knowledge form', !!(await page.$('.cc-conversation-unread')) && !(await page.$('.cc-chat-column .cc-knowledge')));
   await openInfo(); await click('查找材料', '.cc-knowledge');

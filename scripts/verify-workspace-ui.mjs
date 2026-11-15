@@ -48,7 +48,7 @@ try {
   const storageKey = 'multi-agent:workspace:v1:' + c.id;
   await page.waitForSelector('.cc-workspace-toggle');
   check('single header workspace entry', await page.$$eval('.cc-topbar-actions button', es => es.length === 1));
-  await page.type('#cc-message-input', '@codex 开始工作台验收'); await page.click('.cc-send-button'); await page.waitForSelector('.cc-message-member .cc-status-succeeded');
+  await page.type('#cc-message-input', '@codex 开始工作台验收'); await page.click('.cc-send-button'); await page.waitForFunction(() => document.querySelector('.cc-message-member .cc-record-trigger')?.textContent === '执行记录');
   await page.type('#cc-message-input', '聊天草稿'); await page.click('.cc-workspace-toggle');
   check('object home instead of seven tool cards', await page.$eval('.cc-workspace-home', e => e.textContent.includes('继续手头的工作')) && await page.$eval('.cc-workspace-catalogue', e => e.hidden));
   check('attention deduplicates versions and excludes library and foreign conversation', await page.$eval('.cc-workspace-attention h3', e => e.textContent.includes('3 项')));
@@ -101,7 +101,7 @@ try {
   await closeWorkspace(page); await page.evaluate(() => [...document.querySelectorAll('.cc-conversation-list button')].find(b => b.textContent.includes('工作台验收')).click());
   await page.waitForFunction(() => document.querySelector('h1').textContent === '工作台验收'); await page.click('.cc-workspace-toggle');
   check('conversation return keeps in-page draft', await page.$eval(active + ' textarea', e => e.value) === 'REVIEW_DRAFT_PRIVATE');
-  await closeWorkspace(page); const msg = await page.$eval('.cc-message-member', e => e.id); await click('打开执行记录', '#' + msg); await page.waitForFunction(() => document.querySelector('#cc-workspace [data-workspace-page] .cc-execution')?.open);
+  await closeWorkspace(page); const msg = await page.$eval('.cc-message-member', e => e.id); await page.click('#' + msg + ' .cc-record-trigger'); await click('在工作台查看完整记录', '.cc-record-dialog'); await page.waitForFunction(() => document.querySelector('#cc-workspace [data-workspace-page] .cc-execution')?.open);
   check('chat opens exact invocation record', await page.$eval(active + ' .cc-execution', e => e.open) && (await key()).includes(s.detail(c.id).invocations[0].id));
   await back(); await page.waitForSelector('#cc-workspace', { hidden: true });
   await page.waitForFunction(id => document.activeElement?.id === id, {}, msg); check('source return focuses exact chat message', await page.$eval('#' + msg, e => document.activeElement === e));
@@ -166,7 +166,7 @@ try {
   await page.waitForSelector(active + ' .cc-material-result'); const original = s.detail(c.id).messages.find(m => m.author === 'user' && m.content.includes('开始工作台验收'));
   const retainedResult = await page.$(active + ' .cc-material-result'); await page.focus(active + ' input[aria-label="搜索材料"]');
   s.send(c.id, {requestId:rid(),content:'@codex 一条无关的后台新消息'});
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 2);
   check('normal background append keeps search result DOM and focus', await retainedResult.evaluate(e => e.isConnected && e.getClientRects().length > 0) && await page.$eval(active + ' input[aria-label="搜索材料"]', e => e === document.activeElement));
   await retainedResult.dispose(); s.visibility.messageCommand(c.id, original.id, {action:'delete',requestId:rid(),expectedRevision:original.revision ?? 1});
   await page.waitForFunction(() => !document.querySelector('#cc-workspace [data-workspace-page] [aria-label="检索结果"]'));

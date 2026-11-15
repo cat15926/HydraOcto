@@ -296,7 +296,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
     request.signal.throwIfAborted();
     const verified = verifyClaudeHistory(rows, request.prompt, assistantUuid, resumeId ? request.sessionPlan?.previousAnchor : undefined);
     const continuity = resumeId ? verified && !!request.sessionPlan?.previousAnchor ? 'resumed' : 'unknown' : 'fresh';
-    request.onEvent({ kind: 'session', detail: { nativeSessionId, continuity, historyVerified: verified, ...(verified ? { anchor: assistantUuid } : {}), previousAnchor: resumeId ? request.sessionPlan?.previousAnchor : undefined, evidence: verified ? 'stream assistant UUID + exact input + transcript parent chain' : 'transcript history proof unavailable' } });
+    request.onEvent({ kind: 'session', detail: { nativeSessionId, continuity, historyVerified: verified, observedAssistantUuid: assistantUuid, ...(verified ? { anchor: assistantUuid } : {}), previousAnchor: resumeId ? request.sessionPlan?.previousAnchor : undefined, evidence: verified ? 'stream assistant UUID + exact input + transcript parent chain' : 'transcript history proof unavailable' } });
     if (terminal.usage) request.onEvent({ kind: 'usage', detail: { source: 'stream-json result.usage', scope: 'invocation', inputTokens: terminal.usage.input_tokens, outputTokens: terminal.usage.output_tokens, cachedInputTokens: terminal.usage.cache_read_input_tokens, cacheWriteInputTokens: terminal.usage.cache_creation_input_tokens, costUsd: terminal.total_cost_usd } });
     return { text: typeof terminal.result === 'string' ? terminal.result : text, nativeSessionId, continuity };
   } finally {

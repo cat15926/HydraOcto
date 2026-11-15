@@ -51,13 +51,13 @@ try {
   await page.waitForSelector('#cc-message-input');
   check('composer needs no recipient or message type selector', !(await page.$('.cc-composer select')));
   await page.type('#cc-message-input', '@claude 请分析这条合成输入。'); await page.click('.cc-send-button');
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 1);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 1);
   check('explicit first message reaches Claude', calls.length === 1 && calls[0].member.id === 'claude');
   await page.type('#cc-message-input', '继续说明其中的边界。');
   await page.waitForFunction(() => document.querySelector('.cc-route-preview')?.textContent.includes('预计交给 Claude'));
   check('natural follow-up shows read-only server route preview', await page.$('.cc-route-preview'));
   await page.click('.cc-send-button');
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 2);
   check('natural follow-up stays with Claude despite default Codex', calls.length === 2 && calls[1].member.id === 'claude');
   await openWorkspaceTool(page, 'activity'); await page.waitForSelector('[data-workspace-page="activity"]');
   await page.click('.cc-execution > summary'); await page.waitForSelector('.cc-contract-audit');
@@ -91,7 +91,7 @@ try {
   await page.screenshot({ path: join(output, 'desktop.png') });
   const pending = await post('/api/conversations/' + firstConversation + '/messages', { content: '@codex 尚未执行的后续工作，只作为他人的公开背景。', requestId: crypto.randomUUID() });
   await post('/api/conversations/' + firstConversation + '/messages', { content: '@claude 核对公开背景，保留其他成员的待办责任。', requestId: crypto.randomUUID() });
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 3);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 3);
   const responsibilityDetail = await read('/api/conversations/' + firstConversation);
   const latestRun = responsibilityDetail.invocations.at(-1);
   await page.click(`.cc-execution[data-invocation-id="${latestRun.id}"] > summary`);
@@ -122,7 +122,7 @@ try {
   await post('/api/members', { ...claude, enabled: true });
   await page.click('.cc-recheck-button');
   await page.waitForFunction(() => document.querySelector('.cc-result-banner')?.textContent.includes('投递条件已满足'));
-  await page.waitForFunction(() => document.querySelectorAll('.cc-message-member .cc-status-succeeded').length === 2);
+  await page.waitForFunction(() => [...document.querySelectorAll('.cc-message-member .cc-record-trigger')].filter(button => button.textContent === '执行记录').length === 2);
   check('recheck returns original delivery to scheduling, with no duplicate invocation', calls.length === 6 && calls.at(-1).member.id === 'claude');
   const heldDetail = await read('/api/conversations/' + created.conversation.id);
   check('recheck decision and exact caller persist and show in execution detail', heldDetail.holdRechecks.length === 2 && heldDetail.inputManifests.some(m => m.caller?.memberId === 'codex'));

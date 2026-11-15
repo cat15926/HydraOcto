@@ -66,7 +66,7 @@ async function exercise(width) {
     await page.waitForSelector('.cc-private-composer input[type=checkbox]');
     const recipients=await page.$$('.cc-private-composer input[type=checkbox]');
     assert.equal(recipients.length,MAX_ROOM_MEMBERS);
-    await recipients[0].click();
+    await recipients[0].click(); await page.click('.cc-audience-apply');
     assert.equal(store.list().length,0);
     failNext=true;await page.click('.cc-send-button');
     await check(()=>document.body.innerText.includes('测试网络暂不可用'));
@@ -82,6 +82,9 @@ async function exercise(width) {
     assert.deepEqual(room.memberIds.map(id=>store.members().find(m=>m.id===id).name).toSorted(),selected.toSorted());
     await page.waitForSelector('button[aria-label="工作台"]',{visible:true});await page.click('button[aria-label="工作台"]');
     await page.click('.cc-workspace-add');await page.click('[data-workspace-tool="project"]');
+    // On a phone the open workbench covers the composer. Close it before targeting the member entry.
+    const closeWorkspace='.cc-workspace-header button[aria-label="关闭工作台"]';
+    if(width<760)await page.click(closeWorkspace);
     const existing='button[aria-label="设置会话成员与默认成员"]';
     await page.waitForSelector(existing,{visible:true});await page.click(existing);await page.waitForSelector(form);
     assert.equal(await page.$$eval(checks,items=>items.filter(i=>i.checked).length),MAX_ROOM_MEMBERS);
@@ -90,7 +93,7 @@ async function exercise(width) {
     await page.select(form+' select',changeDefault);await page.click(form+' button.cc-button-primary');
     await check(s=>!document.querySelector(s),form);
     assert.equal(store.list()[0].defaultMemberId,changeDefault);
-    await page.click('.cc-workspace-header button[aria-label="关闭工作台"]');
+    if(width>=760)await page.click(closeWorkspace);
     // Return to a new draft from the sidebar; the old roster doesn't become the next room's default.
     if(width<760)await page.click('button[aria-label="打开会话列表"]');
     await check(()=>{

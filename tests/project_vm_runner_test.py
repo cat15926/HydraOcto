@@ -135,6 +135,33 @@ class NativeHistory(unittest.TestCase):
         self.assertFalse(self.finish("codex")["saved"])
         self.assertFalse(self.restore("codex")[0]["restored"])
 
+    def test_claude_ui_metadata_does_not_break_or_supply_dialogue_identity(self):
+        user = str(uuid.uuid4())
+        base = {"cwd": guest.PROJECT, "sessionId": self.session}
+        rows = [{"type": "ai-title", "uuid": str(uuid.uuid4()), "title": "metadata"},
+                {**base, "type": "user", "uuid": user, "message": {"content": "prompt"}},
+                {**base, "type": "assistant", "uuid": self.turn, "parentUuid": user},
+                {"type": "last-prompt", "uuid": str(uuid.uuid4()), "lastPrompt": "metadata"}]
+        path = self.stage("claude", f"-mnt-project/{self.session}.jsonl", rows)
+        saved = self.finish("claude")
+        self.assertTrue(saved["saved"])
+        self.assertEqual([r["type"] for r in saved["rows"]], ["user", "assistant"])
+        # An actual user from another session remains invalid, even beside permitted metadata.
+        rows[1]["sessionId"] = str(uuid.uuid4())
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.assertFalse(self.finish("claude")["saved"])
+
+    def test_claude_project_child_cwd_is_valid_but_escape_is_not(self):
+        user = str(uuid.uuid4())
+        rows = [{"cwd": guest.PROJECT, "sessionId": self.session, "type": "user", "uuid": user},
+                {"cwd": guest.PROJECT + "/subproject", "sessionId": self.session, "type": "assistant", "uuid": self.turn, "parentUuid": user}]
+        path = self.stage("claude", f"-mnt-project/{self.session}.jsonl", rows)
+        self.assertTrue(self.finish("claude")["saved"])
+        for cwd in ("/mnt/project-other", "/mnt/project/../private", "/tmp", "relative", 123):
+            rows[-1]["cwd"] = cwd
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            self.assertFalse(self.finish("claude")["saved"])
+
     def test_claude_returns_scoped_chain_and_skips_assistant_content(self):
         user = str(uuid.uuid4())
         base = {"cwd": guest.PROJECT, "sessionId": self.session}

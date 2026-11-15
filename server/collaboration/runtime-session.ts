@@ -4,7 +4,7 @@ import { realpath, stat, readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { projectAccountFingerprint, verifiedProjectCodexHome } from './official-codex-history.js';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, isAbsolute, join, resolve, posix } from 'node:path';
 import type { NativeSessionIdentity, RuntimeRequest } from '../../shared/collaboration.js';
 import { digest } from './continuity.js';
 import { cliApiSettings, cliEnv, JsonProcess } from './runtime-common.js';
@@ -134,7 +134,7 @@ export function projectTranscript(rows: unknown, sessionId: string): TranscriptR
   const seen = new Set<string>();
   for (const row of rows) {
     if (!row || typeof row !== 'object' || row.isSidechain || typeof row.uuid !== 'string') continue;
-    if (row.sessionId !== sessionId || (row.cwd !== undefined && row.cwd !== '/mnt/project') ||
+    if (row.sessionId !== sessionId || (row.cwd !== undefined && (typeof row.cwd !== 'string' || posix.normalize(row.cwd) !== row.cwd || !(row.cwd === '/mnt/project' || row.cwd.startsWith('/mnt/project/')))) ||
         typeof row.type !== 'string' || (row.parentUuid != null && typeof row.parentUuid !== 'string') || seen.has(row.uuid)) return;
     seen.add(row.uuid);
     records.push(row);
