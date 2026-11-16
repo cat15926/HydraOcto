@@ -291,6 +291,8 @@ async function runCodex(request: RuntimeRequest, command: string, project?: Proj
       const category = /network|connect|stream|socket|tls|dns/i.test(rawMessage) ? 'network_or_stream' : /time.?out|timed out/i.test(rawMessage) ? 'timeout' : /auth|permission|forbidden/i.test(rawMessage) ? 'authentication_or_permission' : /model/i.test(rawMessage) ? 'model' : /quota|limit|budget/i.test(rawMessage) ? 'limit' : 'runtime_error';
       const status = typeof info === 'object' ? info?.[rawCode]?.httpStatusCode : undefined;
       request.onEvent({ kind: 'diagnostic', detail: { notification: 'error', nativeSessionId, nativeTurnId: params.turnId, willRetry: params.willRetry === true, code, category, ...(typeof status === 'number' ? { httpStatusCode: status } : {}), message: `Codex reported ${category}; ${params.willRetry === true ? 'native retry pending' : 'awaiting native terminal event'}.` } });
+    } else if (message.method === 'item/reasoning/summaryTextDelta' && nativeTurnId && matches(params) && typeof params.delta === 'string') {
+      request.onEvent({kind:'diagnostic',detail:{observation:'reasoning_summary',itemId:params.itemId,summary:params.delta}});
     } else if (message.method === 'item/started' && ['reasoning', 'mcpToolCall', 'dynamicToolCall', 'commandExecution'].includes(params.item?.type)) {
       request.onEvent({ kind: 'diagnostic', detail: { notification: 'item/started', itemType: params.item.type, nativeSessionId, nativeTurnId: params.turnId } });
     } else if (message.method === 'turn/started' && params.turn?.id) {

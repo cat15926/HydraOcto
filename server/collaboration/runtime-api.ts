@@ -1,3 +1,4 @@
+import { readProviderMessage } from './runtime-api-stream.js';
 import { apiUserContent } from './runtime-images.js';
 import type { RuntimeRequest, RuntimeResult } from '../../shared/collaboration.js';
 import { executeTool, runtimeTools, type Json } from './runtime-common.js';
@@ -23,7 +24,7 @@ export async function invokeApi(request: RuntimeRequest): Promise<RuntimeResult>
     request.signal.throwIfAborted();
     request.onEvent({ kind: 'exposed', detail: { transport: 'http', round } });
     awaitingProvider = true;
-    const response = await fetch(url, { method: 'POST', redirect: 'error', signal: request.signal, headers: { 'content-type': 'application/json', ...(anthropic ? { 'x-api-key': process.env[keyName]!, 'anthropic-version': '2023-06-01' } : { authorization: `Bearer ${process.env[keyName]}` }) }, body: JSON.stringify({ model: request.member.model, messages, tools, ...(anthropic ? { max_tokens: 4096 } : {}) }) });
+    const response = await fetch(url, { method: 'POST', redirect: 'error', signal: request.signal, headers: { 'content-type': 'application/json', ...(anthropic ? { 'x-api-key': process.env[keyName]!, 'anthropic-version': '2023-06-01' } : { authorization: `Bearer ${process.env[keyName]}` }) }, body: JSON.stringify({ stream: true, model: request.member.model, messages, tools, ...(anthropic ? { max_tokens: 4096 } : {}) }) });
     if (!response.ok) {
       await response.body?.cancel();
       awaitingProvider = false;
@@ -34,19 +35,10 @@ export async function invokeApi(request: RuntimeRequest): Promise<RuntimeResult>
       }
       throw new Error(`Model API returned HTTP ${response.status}.`);
     }
-    let raw = '';
-    if (!response.body) throw new Error('Model API returned no body.');
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    for (;;) {
-      const item = await reader.read(); if (item.done) break;
-      raw += decoder.decode(item.value, { stream: true });
-      if (raw.length > 2_000_000) { await reader.cancel(); throw new Error('Model response exceeds 2 MB.'); }
-    }
-    raw += decoder.decode();
+    const {data, streamed} = await readProviderMessage(response, anthropic, text => {
+      if (text) request.onEvent({kind:'text',detail:{text}});
+    });
     awaitingProvider = false;
-    let data: Json;
-    try { data = JSON.parse(raw) as Json; } catch { throw new Error('Model API returned malformed JSON.'); }
     const reply = anthropic ? data : data.choices?.[0]?.message;
     const validCall = (call: Json) => call && typeof call.id === 'string' && call.id && call.type === 'function' && typeof call.function?.name === 'string' && typeof call.function?.arguments === 'string';
     const validBlock = (item: Json) => item && ((item.type === 'text' && typeof item.text === 'string') || (item.type === 'tool_use' && typeof item.id === 'string' && typeof item.name === 'string' && item.input && typeof item.input === 'object' && !Array.isArray(item.input)) || (item.type === 'thinking' && typeof item.thinking === 'string') || (item.type === 'redacted_thinking' && typeof item.data === 'string'));
@@ -57,7 +49,7 @@ export async function invokeApi(request: RuntimeRequest): Promise<RuntimeResult>
     request.onEvent({ kind: 'accepted', detail: { transport: 'http', round, evidence: 'validated assistant response', providerResponseId: typeof data.id === 'string' ? data.id : undefined } });
     const calls: Json[] = anthropic ? reply.content.filter((item: Json) => item.type === 'tool_use') : reply.tool_calls ?? [];
     const text = anthropic ? reply.content.filter((item: Json) => item.type === 'text').map((item: Json) => item.text).join('\n') : reply.content ?? '';
-    if (text) request.onEvent({ kind: 'text', detail: { text } });
+    if (text && !streamed) request.onEvent({ kind: 'text', detail: { text } });
     if (!calls.length) {
       if ((anthropic && data.stop_reason !== 'end_turn') || (!anthropic && data.choices?.[0]?.finish_reason !== 'stop')) throw new Error('Model response did not reach a successful terminal condition.');
       settle({ round, providerResponseId: data.id });

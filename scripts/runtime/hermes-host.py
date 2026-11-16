@@ -98,9 +98,13 @@ def main():
 
             inference["allowed"] = True
 
+    def emit_text(delta):
+        if isinstance(delta, str) and delta:
+            send({"method":"text", "params":{"session":params["session"], "text":delta}})
+
     agent = PlatformAgent(model=params["model"], api_key=params.pop("key"), base_url=params["endpoint"],
                           provider="custom", api_mode="chat_completions", enabled_toolsets=["collaboration_platform"],
-                          session_id=params["session"], skip_memory=True, skip_context_files=True,
+                          stream_delta_callback=emit_text, session_id=params["session"], skip_memory=True, skip_context_files=True,
                           load_soul_identity=False, quiet_mode=True, save_trajectories=False,
                           max_iterations=12, tool_delay=0, checkpoints_enabled=False)
     agent._api_max_retries = 1

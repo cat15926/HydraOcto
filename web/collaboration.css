@@ -138,3 +138,10 @@
 .cc-route-preview small{display:inline;margin-inline-start:5px}
 .cc-shell .cc-workspace-close{width:auto;display:inline-flex;align-items:center;gap:4px}
 @media(max-width:760px){.cc-shell .cc-nav-control{min-height:40px}.cc-topbar{gap:6px}.cc-conversation-heading{min-width:0}}
+
+.cc-reply-process{margin:5px 0 10px;color:#52635b;font-size:13px}
+.cc-reply-process summary{cursor:pointer;width:fit-content;padding:3px 2px}
+.cc-reply-process ol{list-style:none;margin:5px 0 0 5px;padding:1px 12px;border-left:2px solid #dce5df}
+.cc-reply-process li{margin:5px 0;overflow-wrap:anywhere}
+.cc-reply-process p{white-space:pre-wrap;margin:4px 0;color:#4b5650}
+.cc-reply-process small{font-size:11px;color:#637269}

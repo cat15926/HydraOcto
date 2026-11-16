@@ -1,3 +1,4 @@
+import { streamRedactor } from './stream-redaction.js';
 import { validateMemberContext, memberContextTool, memberContextToolAllowed, runtimeMemberContextMode, requiresFreshMemberContext } from './member-context.js';
 import { ciTargets } from './obligation-ci.js';
 import type { ProjectBrowser } from './project-browser.js';
@@ -100,7 +101,15 @@ export class CollaborationEngine {
       const account = this.store.accountFor(i.id);
       snapshotSecret = (account.apiKeyEnv && process.env[account.apiKeyEnv]) || '';
       const changes = await GitFileChanges.start(this.store,i.id,frozen,controller.signal);
+      const keys = this.store.accounts().flatMap(a => a.apiKeyEnv && process.env[a.apiKeyEnv] ? [process.env[a.apiKeyEnv]!] : []);
+      const redactBody = streamRedactor(keys), redactSummary = streamRedactor(keys);
       const onEvent = (event: RuntimeEvent) => {
+        const field = event.kind==='text' ? 'text' : event.detail.observation==='reasoning_summary' ? 'summary' : undefined;
+        if (field && typeof event.detail[field] === 'string') {
+          const chunk = (field==='text' ? redactBody : redactSummary)(event.detail[field]);
+          if (!chunk) return;
+          event = {...event,detail:{...event.detail,[field]:chunk}};
+        }
         const safe = JSON.parse(redact(JSON.stringify(event))) as RuntimeEvent;
         this.store.recordEvidence(i.id, safe);
         changes?.observe(safe);

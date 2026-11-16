@@ -148,7 +148,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
   const nativeToolsAllowed = confirmFiles ? ['Read','Glob','Grep','Write','Bash'] : project && !official ? ['Read','Glob','Grep','Edit','Write','Bash'] : [];
   const platformTools = runtimeTools(request).map(tool => 'mcp__platform__'+tool.name);
   if (official) platformTools.push('mcp__platform__project_command');
-  const args = ['--print', '--output-format', 'stream-json', '--verbose', '--permission-mode', confirmFiles ? 'default' : 'dontAsk', '--tools', nativeToolsAllowed.join(','), '--disable-slash-commands', '--setting-sources', '', '--settings', confirmFiles ? '{"disableAllHooks":true,"permissions":{"ask":["Write","Bash"]}}' : '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', mcpConfig, '--allowedTools', ...nativeToolsAllowed.filter(tool => !confirmFiles || !['Write','Bash'].includes(tool)), ...platformTools, ...(request.member.model ? ['--model', request.member.model] : []), ...(request.member.effort ? ['--effort', request.member.effort] : []), ...(resumeId ? ['--resume', resumeId] : ['--session-id', requestedSessionId])];
+  const args = ['--print', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-mode', confirmFiles ? 'default' : 'dontAsk', '--tools', nativeToolsAllowed.join(','), '--disable-slash-commands', '--setting-sources', '', '--settings', confirmFiles ? '{"disableAllHooks":true,"permissions":{"ask":["Write","Bash"]}}' : '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', mcpConfig, '--allowedTools', ...nativeToolsAllowed.filter(tool => !confirmFiles || !['Write','Bash'].includes(tool)), ...platformTools, ...(request.member.model ? ['--model', request.member.model] : []), ...(request.member.effort ? ['--effort', request.member.effort] : []), ...(resumeId ? ['--resume', resumeId] : ['--session-id', requestedSessionId])];
   if (request.projectReview || personal) {
     args.push('--no-session-persistence');
     if (api) args.push('--bare');
@@ -166,6 +166,7 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
       : {kind:'process_exit',detail:{code,signal,transport:'stdio',confirmed:true}}) });
   const control = official && project?.officialClaude ? officialClaudeControl(request,project.officialClaude,proc) : undefined;
   let nativeSessionId: string | undefined, terminal: Json | undefined, text = '', accepted = false, assistantUuid: string | undefined;
+  let partialText = '';
   let officialInputSent = false;
   let failed: Error | undefined;
   const nativeTools = new NativeToolEvidence(project ? guestProject : request.cwd, request.onEvent);
@@ -246,6 +247,17 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
       const apiKeySource = ['none', 'user', 'project', 'org', 'environment', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'apiKeyHelper'].includes(message.apiKeySource) ? message.apiKeySource as string : undefined;
       request.onEvent({ kind: 'session', detail: { nativeSessionId, continuity: resumeId ? 'unknown' : 'fresh', evidence: 'system.init', resumeRequested: Boolean(resumeId), authentication: request.account.auth, ...(api ? { model: message.model, apiKeySource: apiKeySource ?? 'unknown', credentialEvidence: apiKeySource === 'ANTHROPIC_API_KEY' || apiKeySource === 'ANTHROPIC_AUTH_TOKEN' || apiKeySource === 'environment' ? 'native_environment_source' : 'selected_configuration_only' } : {}) } });
     }
+    if (message.type === 'stream_event' && nativeSessionId && message.session_id === nativeSessionId && !message.parent_tool_use_id && !terminal) {
+      const event = message.event;
+      if (event?.type === 'message_start') partialText = '';
+      if (event?.type === 'content_block_start' && event.content_block?.type === 'thinking')
+        request.onEvent({kind:'diagnostic',detail:{notification:'item/started',itemType:'reasoning'}});
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+        partialText += event.delta.text;
+        request.onEvent({kind:'text',detail:{text:event.delta.text}});
+      }
+      return;
+    }
     if (!official && nativeSessionId && !terminal && !failed && !request.signal.aborted) nativeTools.claude(nativeSessionId, message, confirmFiles && verifiedInput ? inputUuid : undefined);
     if (message.type === 'assistant' || message.type === 'result') {
       if (!nativeSessionId || message.session_id !== nativeSessionId) { failed = new Error('Claude response session mismatch.'); proc.kill('SIGTERM'); return; }
@@ -259,7 +271,12 @@ async function invokeClaudeProcess(request: RuntimeRequest, command: string, pro
         }
         if (typeof message.uuid === 'string') assistantUuid = message.uuid;
         const content = (message.message?.content ?? []).filter((item: Json) => item.type === 'text').map((item: Json) => item.text).join('\n');
-        if (content) { text += content; request.onEvent({ kind: 'text', detail: { text: content } }); }
+        if (content) {
+          text += content;
+          const suffix = content.startsWith(partialText) ? content.slice(partialText.length) : partialText ? '' : content;
+          if (suffix) request.onEvent({kind:'text',detail:{text:suffix}});
+        }
+        partialText = '';
       } else {
         terminal = message;
         gate.close();

@@ -54,7 +54,13 @@ export async function invokeHermes(request: RuntimeRequest, python: string): Pro
     request.signal.addEventListener('abort', abort, { once: true });
     const allowed = runtimeTools(request);
     const calls = new Set<string>();
+    let streamed = false;
     child.onMessage = frame => {
+      if (active && !request.signal.aborted && frame.method === 'text' && frame.params?.session === session && typeof frame.params.text === 'string') {
+        streamed = true;
+        request.onEvent({kind:'text',detail:{text:frame.params.text}});
+        return;
+      }
       if (!active || request.signal.aborted || frame.method !== 'tool' || frame.params?.session !== session ||
           typeof frame.id !== 'string' || !frame.id || calls.has(frame.id)) { abort(); return; }
       calls.add(frame.id);
@@ -82,7 +88,7 @@ export async function invokeHermes(request: RuntimeRequest, python: string): Pro
     }
     if (!result.ok || typeof result.text !== 'string' || !result.text.trim()) throw new RuntimeOutcomeUnknown();
     accept('Hermes 返回模型完成结果');
-    request.onEvent({ kind: 'text', detail: { text: result.text } });
+    if (!streamed) request.onEvent({ kind: 'text', detail: { text: result.text } });
     request.onEvent({ kind: 'diagnostic', detail: { protocol: 'hermes-agent', observation: 'native_terminal', nativeSessionId: session, status: 'succeeded', content: result.text, evidence: 'Hermes run_conversation completed' } });
     request.onEvent({ kind: 'usage', detail: { source: 'Hermes Agent', scope: 'invocation', inputTokens: result.input, outputTokens: result.output } });
     return { text: result.text, nativeSessionId: session, continuity: 'fresh' };

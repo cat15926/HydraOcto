@@ -196,26 +196,31 @@ export async function executeTool(request: RuntimeRequest, name: string, args: J
     throw new Error('This continuation is outside the frozen invocation policy.');
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'started' } });
   let result: unknown;
-  if (name.startsWith('game_') || name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select' || name.startsWith('opinion_') || name.startsWith('package_') || name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
-  else if (name === 'workspace_read' || name === 'workspace_list') {
-    if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
-    if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);
-    const path = args.path ?? '.';
-    if (isAbsolute(path)) throw new Error('Only workspace-relative paths are allowed.');
-    const root = await realpath(request.cwd), actual = await realpath(resolve(root, path));
-    protectProjectLogin(root,'read-only');
-    protectProjectLogin(actual,'read-only');
-    const rel = relative(root, actual);
-    if (rel === '..' || rel.startsWith('../') || isAbsolute(rel) || rel.split('/').some((part: string) => part.startsWith('.'))) throw new Error('Path is outside the allowed visible workspace.');
-    if (name === 'workspace_list') result = (await readdir(actual, { withFileTypes: true })).filter(x => !x.name.startsWith('.')).slice(0, 200).map(x => ({ name: x.name, directory: x.isDirectory() }));
-    else {
-      const info = await stat(actual);
-      if (!info.isFile() || info.size > 131072) throw new Error('Only text files of up to 128 KB can be read.');
-      const data = await readFile(actual);
-      if (data.includes(0)) throw new Error('Binary files are not supported.');
-      result = data.toString('utf8');
-    }
-  } else throw new Error(`Unsupported tool: ${name}`);
+  try {
+    if (name.startsWith('game_') || name === 'member_context_read' || name === 'member_note_write' || name === 'member_expression_select' || name.startsWith('opinion_') || name.startsWith('package_') || name.startsWith('obligation_') || name.startsWith('cross_') || name.startsWith('action_') || name.startsWith('project_web_') || name === 'project_git_deliver' || name === 'project_service_start' || name === 'project_browser_check' || name === 'project_mcp_search' || name === 'project_environment_check' || name === 'project_export_request' || name === 'project_npm_test' || name.startsWith('project_review_') || name === 'project_work_propose' || name === 'collaboration_request' || name.startsWith('task_') || name.startsWith('artifact_') || name.startsWith('review_') || name === 'user_question' || name.startsWith('conversation_') || name === 'multi_mention' || name.startsWith('memory_') || name === 'material_search') result = await request.onToolCall(name, args, callId);
+    else if (name === 'workspace_read' || name === 'workspace_list') {
+      if (args.path !== undefined && typeof args.path !== 'string') throw new Error('path must be a relative string.');
+      if (request.workspaceGrant) verifyWorkspace(request.workspaceGrant);
+      const path = args.path ?? '.';
+      if (isAbsolute(path)) throw new Error('Only workspace-relative paths are allowed.');
+      const root = await realpath(request.cwd), actual = await realpath(resolve(root, path));
+      protectProjectLogin(root,'read-only');
+      protectProjectLogin(actual,'read-only');
+      const rel = relative(root, actual);
+      if (rel === '..' || rel.startsWith('../') || isAbsolute(rel) || rel.split('/').some((part: string) => part.startsWith('.'))) throw new Error('Path is outside the allowed visible workspace.');
+      if (name === 'workspace_list') result = (await readdir(actual, { withFileTypes: true })).filter(x => !x.name.startsWith('.')).slice(0, 200).map(x => ({ name: x.name, directory: x.isDirectory() }));
+      else {
+        const info = await stat(actual);
+        if (!info.isFile() || info.size > 131072) throw new Error('Only text files of up to 128 KB can be read.');
+        const data = await readFile(actual);
+        if (data.includes(0)) throw new Error('Binary files are not supported.');
+        result = data.toString('utf8');
+      }
+    } else throw new Error(`Unsupported tool: ${name}`);
+  } catch (error) {
+    request.onEvent({kind:'tool',detail:{name,callId,state:'failed'}});
+    throw error;
+  }
   request.onEvent({ kind: 'tool', detail: { name, callId, state: 'completed' } });
   return result;
 }

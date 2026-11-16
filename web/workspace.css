@@ -242,7 +242,9 @@
 .cc-pull-status small { display:block; }
 
 /* The directory belongs to the message context, with a fixed row independent of routing hints. */
-.cc-composer-context{display:flex;align-items:center;gap:10px;min-height:46px;margin:0 0 9px;position:relative;z-index:8;min-width:0}
+.cc-composer-context{display:flex;align-items:center;gap:10px;min-height:46px;margin:0 0 9px;position:relative;min-width:0}
+/* Only an open context menu needs to paint over the composer. */
+.cc-composer-context:has([aria-expanded="true"]){z-index:8}
 .cc-directory{position:relative;min-width:0;max-width:50%}
 .cc-shell .cc-directory-trigger{display:flex;align-items:center;gap:8px;max-width:100%;height:38px;padding:7px 11px;background:#eaf0e4;border:1px solid transparent;border-radius:10px;color:#47684b;font-size:13px}
 .cc-directory-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

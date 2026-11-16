@@ -39,11 +39,11 @@ function projectOperations(evidence: AcceptanceEvidence[], invocationId: string)
   return [...operations.values()];
 }
 
-export function NativeProjectActivity({ detail, run, cancelling, stop, command, refresh }: {
-  detail: ConversationDetail; run: CollaborationInvocation; cancelling?: boolean; stop?: (id: string) => void;
+export function NativeProjectActivity({ detail, run, cancelling, stop, command, refresh, showOperations = true }: {
+  showOperations?: boolean; detail: ConversationDetail; run: CollaborationInvocation; cancelling?: boolean; stop?: (id: string) => void;
   command: WorkbenchCommand; refresh: () => Promise<void>;
 }) {
-  const operations = projectOperations(detail.evidence, run.id);
+  const operations = showOperations ? projectOperations(detail.evidence, run.id) : [];
   const contract = detail.contracts?.find(c => c.id === run.contractId);
   const projectWork = contract?.projectWork, review = contract?.projectReview;
   const reviewSourceId = review && (review.initialReviewSourceId ?? contract?.primarySourceId);
